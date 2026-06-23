@@ -12,10 +12,13 @@ use rand::Rng;
 use serde::Serialize;
 use server::{Server, Task};
 use std::io::{self, Write};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 const MIN_DURATION_SECS: f32 = 1e-9;
 const SERVICE_MEAN: f32 = 1.0;
+const SLO_MULTIPLIER: f64 = 5.0;
 
 fn sample_exp(rng: &mut impl Rng, mean: f32) -> f32 {
     // u in (0, 1]; avoid ln(0) when the uniform draw is exactly 0.
@@ -67,16 +70,18 @@ fn exp_source(
 struct ServiceStats {
     utilization_pct: f64,
     unloaded_latency_p99: f64,
-    normalized_e2e: Vec<f64>,
-    normalized_queueing_delays: Vec<f64>,
+    slo_latency: f64,
+    e2e: Vec<f64>,
+    queueing_delays: Vec<f64>,
 }
 
 #[derive(Serialize)]
 struct RunOutput {
     utilization_pct: f64,
     unloaded_latency_p99: f64,
-    normalized_e2e: Vec<f64>,
-    normalized_queueing_delays: Vec<f64>,
+    slo_latency: f64,
+    e2e: Vec<f64>,
+    queueing_delays: Vec<f64>,
 }
 
 fn calculate_stats(
@@ -109,13 +114,11 @@ fn calculate_stats(
         return None;
     }
 
-    let normalized_e2e: Vec<f64> = task_samples
+    let slo_latency = SLO_MULTIPLIER * unloaded_latency_p99;
+    let e2e: Vec<f64> = task_samples.iter().map(|(e2e, _)| *e2e).collect();
+    let queueing_delays: Vec<f64> = task_samples
         .iter()
-        .map(|(e2e, _)| e2e / unloaded_latency_p99)
-        .collect();
-    let normalized_queueing_delays: Vec<f64> = task_samples
-        .iter()
-        .map(|(e2e, duration)| (e2e - duration) / unloaded_latency_p99)
+        .map(|(e2e, duration)| e2e - duration)
         .collect();
 
     let utilization_pct = if observation.is_zero() || total_capacity == 0 {
@@ -127,8 +130,9 @@ fn calculate_stats(
     Some(ServiceStats {
         utilization_pct,
         unloaded_latency_p99,
-        normalized_e2e,
-        normalized_queueing_delays,
+        slo_latency,
+        e2e,
+        queueing_delays,
     })
 }
 
@@ -154,14 +158,9 @@ fn print_percentile_table(label: &str, values: &mut [f64]) {
 fn print_human_stats(stats: &ServiceStats) {
     println!("utilization: {:.2}%", stats.utilization_pct);
     println!("unloaded latency (p99): {:.6}s", stats.unloaded_latency_p99);
-    print_percentile_table(
-        "normalized e2e (slowdown):",
-        &mut stats.normalized_e2e.clone(),
-    );
-    print_percentile_table(
-        "normalized queueing delay:",
-        &mut stats.normalized_queueing_delays.clone(),
-    );
+    println!("SLO latency: {:.6}s", stats.slo_latency);
+    print_percentile_table("e2e latency (s):", &mut stats.e2e.clone());
+    print_percentile_table("queueing delay (s):", &mut stats.queueing_delays.clone());
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Default)]
@@ -210,12 +209,15 @@ fn run_simulation(
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
     let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
+    let server_loads: Vec<Arc<AtomicU32>> =
+        (0..n_servers).map(|_| Arc::new(AtomicU32::new(0))).collect();
 
     let task_counts = split_tasks(args.n, n_clients);
     let mut inputs = Vec::with_capacity(n_clients as usize);
 
     for i in 0..n_clients as usize {
-        let mut load_balancer = LoadBalancer::new(args.lb_policy.build(), n_servers);
+        let mut load_balancer =
+            LoadBalancer::new(args.lb_policy.build(), server_loads.clone(), n_servers);
         for j in 0..n_servers {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
         }
@@ -228,7 +230,7 @@ fn run_simulation(
     }
 
     for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
-        let mut server = Server::new(concurrency);
+        let mut server = Server::new(concurrency, server_loads[i].clone());
         server.output.connect_sink(sink.clone());
         bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
     }
@@ -273,14 +275,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(stats) => RunOutput {
                     utilization_pct: stats.utilization_pct,
                     unloaded_latency_p99: stats.unloaded_latency_p99,
-                    normalized_e2e: stats.normalized_e2e,
-                    normalized_queueing_delays: stats.normalized_queueing_delays,
+                    slo_latency: stats.slo_latency,
+                    e2e: stats.e2e,
+                    queueing_delays: stats.queueing_delays,
                 },
                 None => RunOutput {
                     utilization_pct: 0.0,
                     unloaded_latency_p99: 0.0,
-                    normalized_e2e: Vec::new(),
-                    normalized_queueing_delays: Vec::new(),
+                    slo_latency: 0.0,
+                    e2e: Vec::new(),
+                    queueing_delays: Vec::new(),
                 },
             };
             let mut stdout = io::stdout().lock();

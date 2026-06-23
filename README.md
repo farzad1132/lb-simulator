@@ -13,15 +13,20 @@ exp_source_C → LoadBalancer_C ─→ Server_N ─┘
 
 With `--clients 1`, this reduces to a single client → load balancer → servers path.
 
-Load-balancing policies live in [`src/policy.rs`](src/policy.rs). The initial policy is **random** server selection; add new variants by implementing `LoadBalancePolicy` and extending `LoadBalancePolicyKind`.
+Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
+
+- **random** — uniform random server selection
+- **power-of-two** — sample two random servers and route to the one with fewer total jobs (in-flight + queued)
+- **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 
 ## Metrics
 
 For each completed task, let `p99(duration)` be the 99th percentile of all sampled service durations in the run:
 
 - **Unloaded latency baseline:** `p99(duration)` (reported as `unloaded_latency_p99`)
-- **Normalized e2e latency (slowdown):** `(finish - start) / p99(duration)`
-- **Normalized queueing delay:** `((finish - start) - duration) / p99(duration)`
+- **SLO latency:** `5 × p99(duration)` (reported as `slo_latency`)
+- **E2e latency:** `finish - start` in seconds (reported as `e2e`)
+- **Queueing delay:** `(finish - start) - duration` in seconds (reported as `queueing_delays`)
 
 The simulator also reports **utilization** as total service time divided by observation time and total system capacity (`servers × concurrency`).
 
@@ -73,6 +78,13 @@ The binary is at `target/release/lb`.
 
 # Four servers, two concurrent tasks each, random load balancing
 ./target/release/lb --format human --n 10000 --servers 4 --concurrency 2
+
+# Power-of-two-choices vs random with four servers
+./target/release/lb --format human --n 10000 --servers 4 --lb-policy random
+./target/release/lb --format human --n 10000 --servers 4 --lb-policy power-of-two
+
+# Round-robin with four servers
+./target/release/lb --format human --n 10000 --servers 4 --lb-policy round-robin
 ```
 
 Options:
@@ -85,7 +97,7 @@ Options:
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server (CPU cores) |
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
-| `--lb-policy` | `random` | Load-balancing policy (`random`) |
+| `--lb-policy` | `random` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
 
 With default `--servers 1 --concurrency 1`, behavior matches the original single-server simulator.
@@ -95,21 +107,22 @@ JSON output shape:
 ```json
 {
   "utilization_pct": 80.0,
-  "unloaded_latency_p99": 3.68,
-  "normalized_e2e": [1.2, 1.5, ...],
-  "normalized_queueing_delays": [0.2, 0.5, ...]
+  "unloaded_latency_p99": 4.61,
+  "slo_latency": 23.05,
+  "e2e": [1.2, 1.5, ...],
+  "queueing_delays": [0.2, 0.5, ...]
 }
 ```
 
 ## Plot e2e CDF
 
-`plot_cdfs.py` builds the release binary once, runs the simulator, and writes a normalized e2e latency CDF to `output/e2e_cdf.pdf`. The x-axis uses a log scale so low slowdown values (1×–10×) are easy to read.
+`plot_cdfs.py` builds the release binary once, runs the simulator, and writes an e2e latency CDF to `output/e2e_cdf.pdf`. The x-axis uses a log scale. The SLO latency (`5 × unloaded p99`) is marked on the plot automatically.
 
 ```bash
 python plot_cdfs.py --n 100000
 ```
 
-Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--servers`, `--concurrency`, `--clients`) plus:
+Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--servers`, `--concurrency`, `--clients`, `--lb-policy`) plus:
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -119,8 +132,9 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
+| `--lb-policy` | `random` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
-| `--mark` | (none) | Slowdown value(s) to annotate with P(slowdown ≤ x) on the plot |
+| `--mark` | (none) | Additional latency threshold(s) in seconds to annotate with P(latency ≤ x) on the plot |
 
 Example with a filename comment suffix:
 
@@ -129,13 +143,13 @@ python plot_cdfs.py --n 100000 --comment 4srv_c2
 # writes output/e2e_cdf_4srv_c2.pdf
 ```
 
-Example with custom parameters and threshold marks:
+Example with custom parameters and additional threshold marks:
 
 ```bash
 python plot_cdfs.py \
   --load 0.5 \
-  --mark 5 \
-  --mark 10
+  --mark 10 \
+  --mark 30
 ```
 
 Example with full parameter set:
@@ -150,9 +164,9 @@ python plot_cdfs.py \
 
 On failure, `plot_cdfs.py` prints the simulator command, exit code, and full stderr/stdout. Set `RUST_BACKTRACE=1` for panic backtraces when debugging the Rust binary.
 
-## Plot slowdown probability vs load
+## Plot SLO violation probability vs load
 
-`plot_load_sweep.py` runs the simulator at each load point (default 0.1, 0.2, …, 1.0), computes P(slowdown ≥ threshold), and writes a line plot to `output/slowdown_ge_5.pdf`. A progress bar shows sweep status on stderr.
+`plot_load_sweep.py` runs the simulator at each load point (default 0.1, 0.2, …, 1.0), computes P(latency > SLO) using each run's own `slo_latency`, and writes a line plot to `output/slo_violation.pdf`. A progress bar shows sweep status on stderr.
 
 ```bash
 python plot_load_sweep.py --n 100000
@@ -160,15 +174,16 @@ python plot_load_sweep.py --n 100000
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--output` | `output/slowdown_ge_5.pdf` | Output PDF path |
+| `--output` | `output/slo_violation.pdf` | Output PDF path |
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
-| `--threshold` | `5` | Slowdown cutoff |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `1.0` / `0.1` | Load sweep range |
 | `--n` | `1000000` | Tasks per load point |
 | `--service-dist` | `exponential` | Service distribution |
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
+| `--lb-policy` | `random` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--format` | `human` | `human` (summary + e2e latency percentiles per load) or `compact` (one line per load) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
 
 Example:
@@ -177,11 +192,10 @@ Example:
 python plot_load_sweep.py \
   --n 100000 \
   --comment random_lb \
-  --threshold 5 \
   --load-min 0.1 \
   --load-max 1.0 \
   --load-step 0.1
-# writes output/slowdown_ge_5_random_lb.pdf
+# writes output/slo_violation_random_lb.pdf
 ```
 
 Another example with an explicit output path:
@@ -189,9 +203,8 @@ Another example with an explicit output path:
 ```bash
 python plot_load_sweep.py \
   --n 100000 \
-  --threshold 5 \
   --load-min 0.1 \
   --load-max 1.0 \
   --load-step 0.1 \
-  --output output/slowdown_ge_5.pdf
+  --output output/slo_violation.pdf
 ```

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the lb simulator and plot normalized e2e latency CDF."""
+"""Run the lb simulator and plot e2e latency CDF."""
 
 from __future__ import annotations
 
@@ -22,8 +22,9 @@ from plotting_primitive import (
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "e2e_cdf.pdf"
-REQUIRED_JSON_KEYS = ("utilization_pct", "normalized_e2e")
+REQUIRED_JSON_KEYS = ("utilization_pct", "e2e", "slo_latency")
 SERVICE_MEAN = 1.0
+LB_POLICIES = ("random", "power-of-two", "round-robin")
 
 
 def arrival_mean_from_load(
@@ -151,6 +152,7 @@ def run_simulation(
     servers: int = 1,
     concurrency: int = 1,
     clients: int = 1,
+    lb_policy: str = "random",
 ) -> dict:
     cmd = [
         str(binary),
@@ -168,6 +170,8 @@ def run_simulation(
         str(concurrency),
         "--clients",
         str(clients),
+        "--lb-policy",
+        lb_policy,
     ]
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
@@ -182,16 +186,22 @@ def plot_e2e_cdf(
     load: float,
     marks: Optional[list[float]] = None,
 ) -> None:
+    e2e = data["e2e"]
+    slo_latency = data["slo_latency"]
+    thresholds = [slo_latency]
+    if marks:
+        thresholds.extend(marks)
+
     style = ACM_COMPACT_HALF
     grid = SubplotGrid(style, layout="1x1")
     plot_cdf(
         grid.get_ax(0, 0),
-        data["normalized_e2e"],
+        e2e,
         style=style,
-        thresholds=marks,
+        thresholds=thresholds,
         log_x=True,
-        xlim=(1.0, 1000.0),
-        xlabel="E2E Slowdown",
+        xlim=(min(e2e), max(e2e)),
+        xlabel="E2E latency (s)",
     )
     grid.configure_labels(
         pattern="leftmost_y_bottom_x",
@@ -203,7 +213,7 @@ def plot_e2e_cdf(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run lb simulator and plot normalized e2e latency CDF.",
+        description="Run lb simulator and plot e2e latency CDF.",
     )
     parser.add_argument("--binary", type=Path, default=None,
                         help="Prebuilt release binary (skips cargo build --release)")
@@ -223,9 +233,11 @@ def parse_args() -> argparse.Namespace:
                         help="Concurrent tasks per server (passed to lb simulator)")
     parser.add_argument("--clients", type=int, default=1,
                         help="Number of independent clients (passed to lb simulator)")
+    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="random",
+                        help="Load-balancing policy (passed to lb simulator)")
     parser.add_argument(
         "--mark", type=float, action="append", default=None,
-        help="Slowdown value(s) to annotate on the CDF (e.g. --mark 5 --mark 10)",
+        help="Additional latency threshold(s) in seconds to annotate on the CDF (e.g. --mark 10 --mark 30)",
     )
     return parser.parse_args()
 
@@ -241,8 +253,9 @@ def main() -> None:
         servers=args.servers,
         concurrency=args.concurrency,
         clients=args.clients,
+        lb_policy=args.lb_policy,
     )
-    if not data["normalized_e2e"]:
+    if not data["e2e"]:
         print("no completed tasks", file=sys.stderr)
         sys.exit(1)
     output_path = output_path_with_comment(args.output, args.comment)

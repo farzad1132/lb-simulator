@@ -2,6 +2,8 @@ use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 #[derive(Default, Deserialize, Serialize, Clone)]
@@ -27,16 +29,24 @@ pub struct Server {
     max_concurrency: u32,
     in_flight: u32,
     queue: Vec<Task>,
+    #[serde(skip)]
+    load: Arc<AtomicU32>,
 }
 
 impl Server {
-    pub fn new(max_concurrency: u32) -> Self {
+    pub fn new(max_concurrency: u32, load: Arc<AtomicU32>) -> Self {
         Self {
             output: Output::default(),
             max_concurrency: max_concurrency.max(1),
             in_flight: 0,
             queue: Vec::new(),
+            load,
         }
+    }
+
+    fn sync_load(&self) {
+        self.load
+            .store(self.in_flight + self.queue.len() as u32, Ordering::Relaxed);
     }
 
     fn begin_service(&mut self, task: Task, cx: &Context<Self>) {
@@ -45,6 +55,7 @@ impl Server {
             eprintln!("could not schedule complete. err: {}", t);
             self.in_flight -= 1;
         }
+        self.sync_load();
     }
 
     fn drain_queue(&mut self, cx: &Context<Self>) {
@@ -52,6 +63,7 @@ impl Server {
             let next = self.queue.remove(0);
             self.begin_service(next, cx);
         }
+        self.sync_load();
     }
 }
 
@@ -62,6 +74,7 @@ impl Server {
             self.begin_service(task, cx);
         } else {
             self.queue.push(task);
+            self.sync_load();
         }
     }
 

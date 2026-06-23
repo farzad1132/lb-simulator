@@ -913,8 +913,13 @@ def plot_cdf(ax, data, label: Optional[str] = None,
     configure_y_axis_ticks(ax, y_data=y, style=style, ylim=(0.0, 1.0), y_step=0.2)
     if thresholds:
         annotate_cdf_thresholds(ax, data, thresholds, style=style, color_idx=color_idx)
-    elif log_x and resolved_xlim is not None:
-        _clip_x_ticks_to_limits(ax, resolved_xlim[0], resolved_xlim[1], style=style)
+    if resolved_xlim is not None:
+        x_lo, x_hi = resolved_xlim
+        if log_x:
+            _configure_log_x_limits(ax, x_lo, x_hi)
+            _clip_x_ticks_to_limits(ax, x_lo, x_hi, style=style)
+        else:
+            ax.set_xlim(x_lo, x_hi)
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=style.font_size)
     return ax
