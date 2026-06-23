@@ -115,6 +115,7 @@ fn exp_source(
 
 struct ServiceStats {
     utilization_pct: f64,
+    unloaded_latency_p99: f64,
     normalized_e2e: Vec<f64>,
     normalized_queueing_delays: Vec<f64>,
 }
@@ -122,6 +123,7 @@ struct ServiceStats {
 #[derive(Serialize)]
 struct RunOutput {
     utilization_pct: f64,
+    unloaded_latency_p99: f64,
     normalized_e2e: Vec<f64>,
     normalized_queueing_delays: Vec<f64>,
 }
@@ -130,8 +132,7 @@ fn calculate_stats(
     output: &mut EventQueueReader<Task>,
     observation: Duration,
 ) -> Option<ServiceStats> {
-    let mut normalized_e2e = Vec::new();
-    let mut normalized_queueing_delays = Vec::new();
+    let mut task_samples = Vec::new();
     let mut busy = Duration::ZERO;
 
     while let Some(task) = output.try_read() {
@@ -141,15 +142,31 @@ fn calculate_stats(
             continue;
         }
         let e2e_ns = task.finish.duration_since(task.start).as_nanos();
-        let unloaded = unloaded_ns as f64 / 1e9;
-        let e2e = e2e_ns as f64 / 1e9;
-        normalized_e2e.push(e2e / unloaded);
-        normalized_queueing_delays.push((e2e - unloaded) / unloaded);
+        task_samples.push((
+            e2e_ns as f64 / 1e9,
+            unloaded_ns as f64 / 1e9,
+        ));
     }
 
-    if normalized_e2e.is_empty() {
+    if task_samples.is_empty() {
         return None;
     }
+
+    let mut unloaded_samples: Vec<f64> = task_samples.iter().map(|(_, duration)| *duration).collect();
+    unloaded_samples.sort_by(f64::total_cmp);
+    let unloaded_latency_p99 = percentile(&unloaded_samples, 99.0);
+    if unloaded_latency_p99 == 0.0 {
+        return None;
+    }
+
+    let normalized_e2e: Vec<f64> = task_samples
+        .iter()
+        .map(|(e2e, _)| e2e / unloaded_latency_p99)
+        .collect();
+    let normalized_queueing_delays: Vec<f64> = task_samples
+        .iter()
+        .map(|(e2e, duration)| (e2e - duration) / unloaded_latency_p99)
+        .collect();
 
     let utilization_pct = if observation.is_zero() {
         0.0
@@ -159,6 +176,7 @@ fn calculate_stats(
 
     Some(ServiceStats {
         utilization_pct,
+        unloaded_latency_p99,
         normalized_e2e,
         normalized_queueing_delays,
     })
@@ -184,6 +202,7 @@ fn print_percentile_table(label: &str, values: &mut [f64]) {
 
 fn print_human_stats(stats: &ServiceStats) {
     println!("utilization: {:.2}%", stats.utilization_pct);
+    println!("unloaded latency (p99): {:.6}s", stats.unloaded_latency_p99);
     print_percentile_table(
         "normalized e2e (slowdown):",
         &mut stats.normalized_e2e.clone(),
@@ -258,11 +277,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let output = match stats {
                 Some(stats) => RunOutput {
                     utilization_pct: stats.utilization_pct,
+                    unloaded_latency_p99: stats.unloaded_latency_p99,
                     normalized_e2e: stats.normalized_e2e,
                     normalized_queueing_delays: stats.normalized_queueing_delays,
                 },
                 None => RunOutput {
                     utilization_pct: 0.0,
+                    unloaded_latency_p99: 0.0,
                     normalized_e2e: Vec::new(),
                     normalized_queueing_delays: Vec::new(),
                 },
