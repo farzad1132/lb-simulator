@@ -69,6 +69,30 @@ cargo build --release
 
 The binary is at `target/release/lb`.
 
+## Microservice simulator (`ms`)
+
+A separate binary simulates microservice applications from a callgraph and per-API load file. Callgraph service times are in **milliseconds**; `load.json` rates are in **RPS**. See [docs/microservice-simulation.md](docs/microservice-simulation.md) for the full design (request flow, metrics, wiring).
+
+```bash
+cargo build --release
+./target/release/ms \
+  --callgraph tests/fanin/callgraph.json \
+  --load-file tests/fanin/load.json \
+  --format human \
+  --n 10000
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--callgraph` | (required) | Path to callgraph JSON |
+| `--load-file` | (required) | Path to per-API RPS JSON |
+| `--n` | `1000000` | Total requests, split across APIs by RPS weight |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
+| `--format` | `human` | `human` or `json` |
+
+JSON output includes per-microservice `utilization_pct` and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms`, `slo_latency_ms` = 5× unloaded p99, same rule as `lb`).
+
 ## Simulator CLI
 
 ```bash

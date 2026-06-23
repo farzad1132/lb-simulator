@@ -3,6 +3,10 @@ name = "lb"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "ms"
+path = "src/bin/ms.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 nexosim = "1"
