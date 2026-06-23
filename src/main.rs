@@ -67,7 +67,14 @@ impl Server {
 }
 
 fn sample_exp(rng: &mut impl Rng, mean: f32) -> f32 {
-    -mean * rng.random::<f32>().ln()
+    // u in (0, 1]; avoid ln(0) when the uniform draw is exactly 0.
+    let u = loop {
+        let u = 1.0 - rng.random::<f32>();
+        if u > 0.0 && u.is_finite() {
+            break u;
+        }
+    };
+    (-mean * u.ln()).max(MIN_DURATION_SECS)
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -77,11 +84,10 @@ enum ServiceDistribution {
 }
 
 fn sample_service(rng: &mut impl Rng, mean: f32, dist: ServiceDistribution) -> f32 {
-    let sample = match dist {
+    match dist {
         ServiceDistribution::Exponential => sample_exp(rng, mean),
-        ServiceDistribution::Constant => mean,
-    };
-    sample.max(MIN_DURATION_SECS)
+        ServiceDistribution::Constant => mean.max(MIN_DURATION_SECS),
+    }
 }
 
 fn exp_source(
