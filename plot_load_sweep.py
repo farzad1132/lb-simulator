@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-from plot_cdfs import REPO_ROOT, ensure_release_binary, run_simulation
+from plot_cdfs import REPO_ROOT, ensure_release_binary, output_path_with_comment, run_simulation
 from plotting_primitive import (
     ACM_COMPACT_HALF,
     SubplotGrid,
@@ -37,19 +37,23 @@ def run_load_sweep(
     binary: Path,
     loads: list[float],
     *,
-    arrival_mean: float,
     n: int,
     service_dist: str,
     threshold: float,
+    servers: int = 1,
+    concurrency: int = 1,
+    clients: int = 1,
 ) -> tuple[list[float], list[float]]:
     probs: list[float] = []
     for load in tqdm(loads, desc="load sweep", unit="run"):
         data = run_simulation(
             binary,
-            arrival_mean=arrival_mean,
-            service_mean=load,
+            load=load,
             n=n,
             service_dist=service_dist,
+            servers=servers,
+            concurrency=concurrency,
+            clients=clients,
         )
         if not data["normalized_e2e"]:
             print("no completed tasks", file=sys.stderr)
@@ -94,15 +98,24 @@ def parse_args() -> argparse.Namespace:
                         help="Prebuilt release binary (skips cargo build --release)")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
                         help="Output PDF path")
+    parser.add_argument(
+        "--comment", type=str, default=None,
+        help="Suffix appended to output filename before .pdf (e.g. slowdown_ge_5_foo.pdf)",
+    )
     parser.add_argument("--threshold", type=float, default=5.0,
                         help="Slowdown cutoff")
     parser.add_argument("--load-min", type=float, default=0.1)
     parser.add_argument("--load-max", type=float, default=1.0)
     parser.add_argument("--load-step", type=float, default=0.1)
-    parser.add_argument("--arrival-mean", type=float, default=1.0)
     parser.add_argument("--n", type=int, default=1_000_000)
     parser.add_argument("--service-dist", choices=["exponential", "constant"],
                         default="exponential")
+    parser.add_argument("--servers", type=int, default=1,
+                        help="Number of servers (passed to lb simulator)")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Concurrent tasks per server (passed to lb simulator)")
+    parser.add_argument("--clients", type=int, default=1,
+                        help="Number of independent clients (passed to lb simulator)")
     return parser.parse_args()
 
 
@@ -117,18 +130,21 @@ def main() -> None:
     loads, probs = run_load_sweep(
         binary,
         loads,
-        arrival_mean=args.arrival_mean,
         n=args.n,
         service_dist=args.service_dist,
         threshold=args.threshold,
+        servers=args.servers,
+        concurrency=args.concurrency,
+        clients=args.clients,
     )
+    output_path = output_path_with_comment(args.output, args.comment)
     plot_slowdown_prob(
         loads,
         probs,
-        args.output,
+        output_path,
         threshold=args.threshold,
     )
-    print(f"wrote {args.output}", file=sys.stderr)
+    print(f"wrote {output_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -22,6 +23,33 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "e2e_cdf.pdf"
 REQUIRED_JSON_KEYS = ("utilization_pct", "normalized_e2e")
+SERVICE_MEAN = 1.0
+
+
+def arrival_mean_from_load(
+    load: float,
+    servers: int,
+    concurrency: int,
+    service_mean: float = SERVICE_MEAN,
+    clients: int = 1,
+) -> float:
+    """Aggregate inter-arrival mean for target load (per-client mean is × clients)."""
+    capacity = max(servers, 1) * max(concurrency, 1)
+    return service_mean / (load * capacity)
+
+
+def _sanitize_comment(comment: str) -> str:
+    comment = comment.strip().replace("/", "_").replace("\\", "_")
+    return re.sub(r"\s+", "_", comment)
+
+
+def output_path_with_comment(path: Path, comment: str | None) -> Path:
+    if not comment:
+        return path
+    safe = _sanitize_comment(comment)
+    if not safe:
+        return path
+    return path.with_name(f"{path.stem}_{safe}{path.suffix}")
 
 
 def _print_subprocess_failure(
@@ -117,23 +145,29 @@ def _parse_simulation_json(cmd: list[str], stdout: str) -> dict:
 def run_simulation(
     binary: Path,
     *,
-    arrival_mean: float,
-    service_mean: float,
+    load: float,
     n: int,
     service_dist: str,
+    servers: int = 1,
+    concurrency: int = 1,
+    clients: int = 1,
 ) -> dict:
     cmd = [
         str(binary),
         "--format",
         "json",
-        "--arrival-mean",
-        str(arrival_mean),
-        "--service-mean",
-        str(service_mean),
+        "--load",
+        str(load),
         "--n",
         str(n),
         "--service-dist",
         service_dist,
+        "--servers",
+        str(servers),
+        "--concurrency",
+        str(concurrency),
+        "--clients",
+        str(clients),
     ]
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
@@ -145,12 +179,10 @@ def plot_e2e_cdf(
     data: dict,
     output_path: Path,
     *,
-    arrival_mean: float,
-    service_mean: float,
+    load: float,
     marks: Optional[list[float]] = None,
 ) -> None:
     style = ACM_COMPACT_HALF
-    load = service_mean / arrival_mean
     grid = SubplotGrid(style, layout="1x1")
     plot_cdf(
         grid.get_ax(0, 0),
@@ -177,11 +209,20 @@ def parse_args() -> argparse.Namespace:
                         help="Prebuilt release binary (skips cargo build --release)")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
                         help="Output PDF path")
-    parser.add_argument("--arrival-mean", type=float, default=1.0)
-    parser.add_argument("--service-mean", type=float, default=0.8)
+    parser.add_argument(
+        "--comment", type=str, default=None,
+        help="Suffix appended to output filename before .pdf (e.g. e2e_cdf_foo.pdf)",
+    )
+    parser.add_argument("--load", type=float, default=0.8)
     parser.add_argument("--n", type=int, default=1_000_000)
     parser.add_argument("--service-dist", choices=["exponential", "constant"],
                         default="exponential")
+    parser.add_argument("--servers", type=int, default=1,
+                        help="Number of servers (passed to lb simulator)")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Concurrent tasks per server (passed to lb simulator)")
+    parser.add_argument("--clients", type=int, default=1,
+                        help="Number of independent clients (passed to lb simulator)")
     parser.add_argument(
         "--mark", type=float, action="append", default=None,
         help="Slowdown value(s) to annotate on the CDF (e.g. --mark 5 --mark 10)",
@@ -194,23 +235,25 @@ def main() -> None:
     binary = ensure_release_binary(REPO_ROOT, args.binary)
     data = run_simulation(
         binary,
-        arrival_mean=args.arrival_mean,
-        service_mean=args.service_mean,
+        load=args.load,
         n=args.n,
         service_dist=args.service_dist,
+        servers=args.servers,
+        concurrency=args.concurrency,
+        clients=args.clients,
     )
     if not data["normalized_e2e"]:
         print("no completed tasks", file=sys.stderr)
         sys.exit(1)
+    output_path = output_path_with_comment(args.output, args.comment)
     plot_e2e_cdf(
         data,
-        args.output,
-        arrival_mean=args.arrival_mean,
-        service_mean=args.service_mean,
+        output_path,
+        load=args.load,
         marks=args.mark,
     )
     print(
-        f"wrote {args.output} (utilization: {data['utilization_pct']:.2f}%)",
+        f"wrote {output_path} (utilization: {data['utilization_pct']:.2f}%)",
         file=sys.stderr,
     )
 
