@@ -4,22 +4,23 @@ Single-server FCFS queue simulator. Tasks arrive according to a Poisson process,
 
 ## Metrics
 
-For each completed task:
+For each completed task, let `p99(duration)` be the 99th percentile of all sampled service durations in the run:
 
-- **Normalized e2e latency (slowdown):** `(finish - start) / duration`
-- **Normalized queueing delay:** `((finish - start) - duration) / duration`
+- **Unloaded latency baseline:** `p99(duration)` (reported as `unloaded_latency_p99`)
+- **Normalized e2e latency (slowdown):** `(finish - start) / p99(duration)`
+- **Normalized queueing delay:** `((finish - start) - duration) / p99(duration)`
 
 The simulator also reports server **utilization** (fraction of observation time the server was busy).
 
 ## Requirements
 
 - Rust (stable)
-- Python 3 with `numpy` and `matplotlib` (a local venv is fine)
+- Python 3 with `numpy`, `matplotlib`, and `tqdm` (a local venv is fine)
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install numpy matplotlib
+pip install numpy matplotlib tqdm
 ```
 
 ## Build
@@ -55,6 +56,7 @@ JSON output shape:
 ```json
 {
   "utilization_pct": 80.0,
+  "unloaded_latency_p99": 3.68,
   "normalized_e2e": [1.2, 1.5, ...],
   "normalized_queueing_delays": [0.2, 0.5, ...]
 }
@@ -97,3 +99,33 @@ python plot_cdfs.py \
 ```
 
 On failure, `plot_cdfs.py` prints the simulator command, exit code, and full stderr/stdout. Set `RUST_BACKTRACE=1` for panic backtraces when debugging the Rust binary.
+
+## Plot slowdown probability vs load
+
+`plot_load_sweep.py` runs the simulator at each load point (default 0.1, 0.2, …, 1.0), computes P(slowdown ≥ threshold), and writes a line plot to `output/slowdown_ge_5.pdf`. A progress bar shows sweep status on stderr.
+
+```bash
+python plot_load_sweep.py --n 100000
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `output/slowdown_ge_5.pdf` | Output PDF path |
+| `--threshold` | `5` | Slowdown cutoff |
+| `--load-min` / `--load-max` / `--load-step` | `0.1` / `1.0` / `0.1` | Load sweep range |
+| `--arrival-mean` | `1.0` | Fixed inter-arrival mean (`service_mean = load`) |
+| `--n` | `1000000` | Tasks per load point |
+| `--service-dist` | `exponential` | Service distribution |
+| `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
+
+Example:
+
+```bash
+python plot_load_sweep.py \
+  --n 100000 \
+  --threshold 5 \
+  --load-min 0.1 \
+  --load-max 1.0 \
+  --load-step 0.1 \
+  --output output/slowdown_ge_5.pdf
+```
