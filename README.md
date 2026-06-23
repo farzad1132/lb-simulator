@@ -19,6 +19,8 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **power-of-two** — sample two random servers and route to the one with fewer total jobs (in-flight + queued)
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 
+Each load balancer can be restricted to a random subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB independently samples `min(k, servers)` servers at startup and only reads their loads when routing.
+
 ## Metrics
 
 For each completed task, let `p99(duration)` be the 99th percentile of all sampled service durations in the run:
@@ -76,12 +78,15 @@ The binary is at `target/release/lb`.
 # JSON output for scripting / plotting
 ./target/release/lb --format json --n 10000
 
-# Four servers, two concurrent tasks each, random load balancing
+# Four servers, two concurrent tasks each (default: power-of-two)
 ./target/release/lb --format human --n 10000 --servers 4 --concurrency 2
 
 # Power-of-two-choices vs random with four servers
 ./target/release/lb --format human --n 10000 --servers 4 --lb-policy random
 ./target/release/lb --format human --n 10000 --servers 4 --lb-policy power-of-two
+
+# Subsetting: each LB routes to 3 of 10 servers
+./target/release/lb --format human --n 10000 --servers 10 --lb-subset-size 3
 
 # Round-robin with four servers
 ./target/release/lb --format human --n 10000 --servers 4 --lb-policy round-robin
@@ -97,7 +102,8 @@ Options:
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server (CPU cores) |
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
-| `--lb-policy` | `random` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
 
 With default `--servers 1 --concurrency 1`, behavior matches the original single-server simulator.
@@ -122,7 +128,7 @@ JSON output shape:
 python plot_cdfs.py --n 100000
 ```
 
-Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--servers`, `--concurrency`, `--clients`, `--lb-policy`) plus:
+Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--servers`, `--concurrency`, `--clients`, `--lb-policy`, `--lb-subset-size`) plus:
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -132,7 +138,8 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `random` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
 | `--mark` | (none) | Additional latency threshold(s) in seconds to annotate with P(latency ≤ x) on the plot |
 
@@ -182,9 +189,21 @@ python plot_load_sweep.py --n 100000
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `random` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-subset-size` | `0` | Subset size(s) per LB (`0` = all servers); pass multiple values to compare on one plot |
 | `--format` | `human` | `human` (summary + e2e latency percentiles per load) or `compact` (one line per load) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
+
+Example comparing subset sizes:
+
+```bash
+python plot_load_sweep.py \
+  --servers 10 \
+  --lb-subset-size 0 2 4 8 \
+  --n 100000 \
+  --comment subset_cmp
+# writes output/slo_violation_subset_cmp.pdf with legend k=0, k=2, k=4, k=8
+```
 
 Example:
 

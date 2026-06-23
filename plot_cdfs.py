@@ -152,7 +152,8 @@ def run_simulation(
     servers: int = 1,
     concurrency: int = 1,
     clients: int = 1,
-    lb_policy: str = "random",
+    lb_policy: str = "power-of-two",
+    lb_subset_size: int = 0,
 ) -> dict:
     cmd = [
         str(binary),
@@ -172,6 +173,8 @@ def run_simulation(
         str(clients),
         "--lb-policy",
         lb_policy,
+        "--lb-subset-size",
+        str(lb_subset_size),
     ]
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
@@ -233,8 +236,10 @@ def parse_args() -> argparse.Namespace:
                         help="Concurrent tasks per server (passed to lb simulator)")
     parser.add_argument("--clients", type=int, default=1,
                         help="Number of independent clients (passed to lb simulator)")
-    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="random",
+    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="power-of-two",
                         help="Load-balancing policy (passed to lb simulator)")
+    parser.add_argument("--lb-subset-size", type=int, default=0,
+                        help="Servers each LB can route to (0 = all; passed to lb simulator)")
     parser.add_argument(
         "--mark", type=float, action="append", default=None,
         help="Additional latency threshold(s) in seconds to annotate on the CDF (e.g. --mark 10 --mark 30)",
@@ -254,6 +259,7 @@ def main() -> None:
         concurrency=args.concurrency,
         clients=args.clients,
         lb_policy=args.lb_policy,
+        lb_subset_size=args.lb_subset_size,
     )
     if not data["e2e"]:
         print("no completed tasks", file=sys.stderr)

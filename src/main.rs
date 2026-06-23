@@ -9,6 +9,7 @@ use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation
 use nexosim::time::MonotonicTime;
 use policy::LoadBalancePolicyKind;
 use rand::Rng;
+use rand::seq::SliceRandom;
 use serde::Serialize;
 use server::{Server, Task};
 use std::io::{self, Write};
@@ -182,12 +183,26 @@ struct Args {
     servers: u32,
     #[arg(long, default_value_t = 1)]
     concurrency: u32,
-    #[arg(long, value_enum, default_value_t = LoadBalancePolicyKind::Random)]
+    #[arg(long, value_enum, default_value_t = LoadBalancePolicyKind::PowerOfTwo)]
     lb_policy: LoadBalancePolicyKind,
+    #[arg(long, default_value_t = 0)]
+    lb_subset_size: u32,
     #[arg(long, default_value_t = 1)]
     clients: u32,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
+}
+
+fn random_server_subset(n_servers: usize, subset_size: u32) -> Vec<usize> {
+    let k = if subset_size == 0 {
+        n_servers
+    } else {
+        (subset_size as usize).min(n_servers).max(1)
+    };
+    let mut indices: Vec<usize> = (0..n_servers).collect();
+    indices.shuffle(&mut rand::rng());
+    indices.truncate(k);
+    indices
 }
 
 fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
@@ -216,8 +231,9 @@ fn run_simulation(
     let mut inputs = Vec::with_capacity(n_clients as usize);
 
     for i in 0..n_clients as usize {
+        let server_indices = random_server_subset(n_servers, args.lb_subset_size);
         let mut load_balancer =
-            LoadBalancer::new(args.lb_policy.build(), server_loads.clone(), n_servers);
+            LoadBalancer::new(args.lb_policy.build(), server_loads.clone(), server_indices);
         for j in 0..n_servers {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
         }

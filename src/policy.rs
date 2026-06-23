@@ -63,8 +63,8 @@ impl LoadBalancePolicy for RoundRobinPolicy {
 
 #[derive(Clone, Copy, Debug, ValueEnum, Default)]
 pub enum LoadBalancePolicyKind {
-    #[default]
     Random,
+    #[default]
     PowerOfTwo,
     RoundRobin,
 }

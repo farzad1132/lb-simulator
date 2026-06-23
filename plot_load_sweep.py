@@ -44,13 +44,14 @@ def format_percentile_table(label: str, values: list[float]) -> str:
 
 def report_run_stats(
     *,
+    lb_subset_size: int,
     load: float,
     data: dict,
     prob_gt: float,
     output_format: str,
 ) -> None:
     summary = (
-        f"load={load:g}  P(latency>SLO)={prob_gt:.6f}  "
+        f"k={lb_subset_size}  load={load:g}  P(latency>SLO)={prob_gt:.6f}  "
         f"SLO={data['slo_latency']:.4f}s  "
         f"utilization={data['utilization_pct']:.1f}%"
     )
@@ -82,11 +83,16 @@ def run_load_sweep(
     servers: int = 1,
     concurrency: int = 1,
     clients: int = 1,
-    lb_policy: str = "random",
+    lb_policy: str = "power-of-two",
+    lb_subset_size: int = 0,
     output_format: str = "human",
-) -> tuple[list[float], list[float]]:
+) -> list[float]:
     probs: list[float] = []
-    for load in tqdm(loads, desc="load sweep", unit="run"):
+    for load in tqdm(
+        loads,
+        desc=f"k={lb_subset_size} load sweep",
+        unit="run",
+    ):
         data = run_simulation(
             binary,
             load=load,
@@ -96,6 +102,7 @@ def run_load_sweep(
             concurrency=concurrency,
             clients=clients,
             lb_policy=lb_policy,
+            lb_subset_size=lb_subset_size,
         )
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)
@@ -103,23 +110,33 @@ def run_load_sweep(
         prob_gt = prob_latency_gt_slo(data)
         probs.append(prob_gt)
         report_run_stats(
+            lb_subset_size=lb_subset_size,
             load=load,
             data=data,
             prob_gt=prob_gt,
             output_format=output_format,
         )
-    return loads, probs
+    return probs
 
 
 def plot_slo_violation_prob(
     loads: list[float],
-    probs: list[float],
+    series: list[tuple[int, list[float]]],
     output_path: Path,
 ) -> None:
     style = ACM_COMPACT_HALF
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
-    plot_line(ax, loads, probs, style=style, show_markers=True)
+    for color_idx, (k, probs) in enumerate(series):
+        plot_line(
+            ax,
+            loads,
+            probs,
+            label=f"k={k}",
+            style=style,
+            color_idx=color_idx,
+            show_markers=True,
+        )
     ax.set_xlim(min(loads), max(loads))
     ax.set_ylim(0.0, 1.0)
     ax.set_xticks(loads)
@@ -129,6 +146,7 @@ def plot_slo_violation_prob(
         xlabel="Load",
         ylabel="P(latency > SLO)",
     )
+    grid.add_shared_legend(position="top")
     grid.save(output_path)
 
 
@@ -156,8 +174,12 @@ def parse_args() -> argparse.Namespace:
                         help="Concurrent tasks per server (passed to lb simulator)")
     parser.add_argument("--clients", type=int, default=1,
                         help="Number of independent clients (passed to lb simulator)")
-    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="random",
+    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="power-of-two",
                         help="Load-balancing policy (passed to lb simulator)")
+    parser.add_argument(
+        "--lb-subset-size", type=int, nargs="+", default=[0],
+        help="Subset size(s) per LB (0 = all servers); pass multiple to compare",
+    )
     parser.add_argument("--format", choices=["human", "compact"], default="human",
                         help="human: summary + e2e latency percentiles; compact: one line per load")
     return parser.parse_args()
@@ -171,23 +193,24 @@ def main() -> None:
         sys.exit(1)
 
     binary = ensure_release_binary(REPO_ROOT, args.binary)
-    loads, probs = run_load_sweep(
-        binary,
-        loads,
-        n=args.n,
-        service_dist=args.service_dist,
-        servers=args.servers,
-        concurrency=args.concurrency,
-        clients=args.clients,
-        lb_policy=args.lb_policy,
-        output_format=args.format,
-    )
+    series: list[tuple[int, list[float]]] = []
+    for k in args.lb_subset_size:
+        probs = run_load_sweep(
+            binary,
+            loads,
+            n=args.n,
+            service_dist=args.service_dist,
+            servers=args.servers,
+            concurrency=args.concurrency,
+            clients=args.clients,
+            lb_policy=args.lb_policy,
+            lb_subset_size=k,
+            output_format=args.format,
+        )
+        series.append((k, probs))
+
     output_path = output_path_with_comment(args.output, args.comment)
-    plot_slo_violation_prob(
-        loads,
-        probs,
-        output_path,
-    )
+    plot_slo_violation_prob(loads, series, output_path)
     print(f"wrote {output_path}", file=sys.stderr)
 
 
