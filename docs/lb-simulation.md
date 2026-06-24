@@ -146,6 +146,7 @@ The policy only chooses among servers in this subset.
 | Policy | CLI flag | Behavior |
 |--------|----------|----------|
 | **power-of-two** | `--lb-policy power-of-two` (default) | Sample two random servers from the subset; route to the one with lower local inflight |
+| **least-request** | `--lb-policy least-request` | Route to the server with lowest local inflight; random tie-break among minima |
 | **random** | `--lb-policy random` | Uniform random server from the subset (ignores load slice) |
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
 

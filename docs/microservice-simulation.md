@@ -294,7 +294,7 @@ cargo build --release
 | `--callgraph` | Path to callgraph JSON (required) |
 | `--load-file` | Path to per-API RPS JSON (required) |
 | `--n` | Total requests, split across APIs proportional to RPS |
-| `--lb-policy` | `random`, `power-of-two`, or `round-robin` |
+| `--lb-policy` | `random`, `power-of-two`, `least-request`, or `round-robin` |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all) |
 | `--format` | `human` or `json` |
 

@@ -21,6 +21,7 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 
 - **random** — uniform random server selection
 - **power-of-two** — sample two random servers and route to the one with fewer locally in-flight requests (dispatched by this LB but not yet completed)
+- **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 
 Each load balancer can be restricted to a random subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB independently samples `min(k, servers)` servers at startup and only routes among that subset using its own local inflight counts.
@@ -91,7 +92,7 @@ cargo build --release
 | `--callgraph` | (required) | Path to callgraph JSON |
 | `--load-file` | (required) | Path to per-API RPS JSON |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
 | `--format` | `human` | `human` or `json` |
 
@@ -130,7 +131,7 @@ Options:
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server (CPU cores) |
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
 
@@ -166,7 +167,7 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
 | `--mark` | (none) | Additional latency threshold(s) in seconds to annotate with P(latency ≤ x) on the plot |
@@ -217,7 +218,7 @@ python plot_load_sweep.py --n 100000
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Subset size(s) per LB (`0` = all servers); pass multiple values to compare on one plot |
 | `--format` | `human` | `human` (summary + e2e latency percentiles per load) or `compact` (one line per load) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |

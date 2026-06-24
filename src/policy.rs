@@ -61,12 +61,31 @@ impl LoadBalancePolicy for RoundRobinPolicy {
     }
 }
 
+pub struct LeastRequestPolicy;
+
+impl LoadBalancePolicy for LeastRequestPolicy {
+    fn select(&mut self, loads: &[u32]) -> usize {
+        let min_load = *loads.iter().min().unwrap_or(&0);
+        let tied: Vec<usize> = loads
+            .iter()
+            .enumerate()
+            .filter(|&(_, &load)| load == min_load)
+            .map(|(i, _)| i)
+            .collect();
+        if tied.is_empty() {
+            return 0;
+        }
+        tied[rand::rng().random_range(0..tied.len())]
+    }
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum, Default)]
 pub enum LoadBalancePolicyKind {
     Random,
     #[default]
     PowerOfTwo,
     RoundRobin,
+    LeastRequest,
 }
 
 impl LoadBalancePolicyKind {
@@ -78,6 +97,7 @@ impl LoadBalancePolicyKind {
                 order: Vec::new(),
                 next: 0,
             }),
+            Self::LeastRequest => Box::new(LeastRequestPolicy),
         }
     }
 }

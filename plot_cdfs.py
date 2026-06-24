@@ -24,7 +24,7 @@ DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "e2e_cdf.pdf"
 REQUIRED_JSON_KEYS = ("utilization_pct", "e2e", "slo_latency")
 SERVICE_MEAN = 1.0
-LB_POLICIES = ("random", "power-of-two", "round-robin")
+LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
 
 
 def arrival_mean_from_load(
