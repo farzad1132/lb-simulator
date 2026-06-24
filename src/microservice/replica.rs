@@ -2,33 +2,27 @@ use super::hop::Hop;
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Deserialize, Serialize)]
 pub struct Replica {
     pub output: Output<Hop>,
+    pub release: Output<usize>,
+    replica_idx: usize,
     max_concurrency: u32,
     in_flight: u32,
     queue: Vec<Hop>,
-    #[serde(skip)]
-    load: Arc<AtomicU32>,
 }
 
 impl Replica {
-    pub fn new(max_concurrency: u32, load: Arc<AtomicU32>) -> Self {
+    pub fn new(max_concurrency: u32, replica_idx: usize) -> Self {
         Self {
             output: Output::default(),
+            release: Output::default(),
+            replica_idx,
             max_concurrency: max_concurrency.max(1),
             in_flight: 0,
             queue: Vec::new(),
-            load,
         }
-    }
-
-    fn sync_load(&self) {
-        self.load
-            .store(self.in_flight + self.queue.len() as u32, Ordering::Relaxed);
     }
 
     fn begin_service(&mut self, hop: Hop, cx: &Context<Self>) {
@@ -37,7 +31,6 @@ impl Replica {
             eprintln!("could not schedule complete. err: {}", h);
             self.in_flight -= 1;
         }
-        self.sync_load();
     }
 
     fn drain_queue(&mut self, cx: &Context<Self>) {
@@ -45,7 +38,6 @@ impl Replica {
             let next = self.queue.remove(0);
             self.begin_service(next, cx);
         }
-        self.sync_load();
     }
 }
 
@@ -56,13 +48,13 @@ impl Replica {
             self.begin_service(hop, cx);
         } else {
             self.queue.push(hop);
-            self.sync_load();
         }
     }
 
     #[nexosim(schedulable)]
     async fn complete(&mut self, hop: Hop, cx: &Context<Self>) {
         self.output.send(hop).await;
+        self.release.send(self.replica_idx).await;
         self.in_flight -= 1;
         self.drain_queue(cx);
     }

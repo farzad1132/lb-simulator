@@ -206,19 +206,17 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
         let n_replicas = spec.replicas as usize;
         let concurrency = (spec.cpu / spec.replicas).max(1);
 
-        let replica_loads: Vec<_> = (0..n_replicas)
-            .map(|_| Arc::new(std::sync::atomic::AtomicU32::new(0)))
-            .collect();
         let replica_mailboxes: Vec<_> = (0..n_replicas).map(|_| Mailbox::new()).collect();
 
         let replica_indices = random_replica_subset(n_replicas, args.lb_subset_size);
         let mut balancer = Balancer::new(
             args.lb_policy.build(),
-            replica_loads.clone(),
+            n_replicas,
             replica_indices,
         );
 
         let balancer_mb = Mailbox::new();
+        let balancer_address = balancer_mb.address();
         let mut to_balancer = Output::default();
         to_balancer.connect(Balancer::input, &balancer_mb);
         service_outputs.insert(service_id.clone(), to_balancer);
@@ -229,8 +227,9 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
         bench = bench.add_model(balancer, balancer_mb, service_id);
 
         for (i, mb) in replica_mailboxes.into_iter().enumerate() {
-            let mut replica = Replica::new(concurrency, replica_loads[i].clone());
+            let mut replica = Replica::new(concurrency, i);
             replica.output.connect(HopForward::input, &forward_mb);
+            replica.release.connect(Balancer::release, &balancer_address);
             bench = bench.add_model(replica, mb, &format!("{service_id}-replica-{i}"));
         }
     }

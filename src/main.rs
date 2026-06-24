@@ -4,7 +4,7 @@ mod server;
 
 use clap::{Parser, ValueEnum};
 use load_balancer::LoadBalancer;
-use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, SinkState, event_queue};
+use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
 use policy::LoadBalancePolicyKind;
@@ -13,8 +13,6 @@ use rand::seq::SliceRandom;
 use serde::Serialize;
 use server::{Server, Task};
 use std::io::{self, Write};
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 const MIN_DURATION_SECS: f32 = 1e-9;
@@ -224,20 +222,24 @@ fn run_simulation(
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
     let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
-    let server_loads: Vec<Arc<AtomicU32>> =
-        (0..n_servers).map(|_| Arc::new(AtomicU32::new(0))).collect();
 
     let task_counts = split_tasks(args.n, n_clients);
     let mut inputs = Vec::with_capacity(n_clients as usize);
+    let mut lb_addresses = Vec::with_capacity(n_clients as usize);
 
     for i in 0..n_clients as usize {
         let server_indices = random_server_subset(n_servers, args.lb_subset_size);
-        let mut load_balancer =
-            LoadBalancer::new(args.lb_policy.build(), server_loads.clone(), server_indices);
+        let mut load_balancer = LoadBalancer::new(
+            args.lb_policy.build(),
+            n_servers,
+            server_indices,
+            i,
+        );
         for j in 0..n_servers {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
         }
         let lb_mailbox = Mailbox::new();
+        lb_addresses.push(lb_mailbox.address());
         let input = EventSource::new()
             .connect(LoadBalancer::input, &lb_mailbox)
             .register(&mut bench);
@@ -246,7 +248,13 @@ fn run_simulation(
     }
 
     for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
-        let mut server = Server::new(concurrency, server_loads[i].clone());
+        let mut release_outputs: Vec<_> = (0..n_clients as usize)
+            .map(|_| Output::default())
+            .collect();
+        for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
+            release_outputs[lb_id].connect(LoadBalancer::release, lb_address);
+        }
+        let mut server = Server::new(concurrency, i, release_outputs);
         server.output.connect_sink(sink.clone());
         bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
     }

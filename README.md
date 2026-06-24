@@ -9,17 +9,21 @@ exp_source_0 → LoadBalancer_0 ─┐
 exp_source_1 → LoadBalancer_1 ─┼→ Server_0 ─┐
 ...                            → Server_1 ─┼→ shared output sink
 exp_source_C → LoadBalancer_C ─→ Server_N ─┘
+         ▲                           │
+         └──────── release ──────────┘
 ```
 
 With `--clients 1`, this reduces to a single client → load balancer → servers path.
 
+See [docs/lb-simulation.md](docs/lb-simulation.md) for the full design (port wiring, task flow, load balancing, metrics).
+
 Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
 
 - **random** — uniform random server selection
-- **power-of-two** — sample two random servers and route to the one with fewer total jobs (in-flight + queued)
+- **power-of-two** — sample two random servers and route to the one with fewer locally in-flight requests (dispatched by this LB but not yet completed)
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 
-Each load balancer can be restricted to a random subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB independently samples `min(k, servers)` servers at startup and only reads their loads when routing.
+Each load balancer can be restricted to a random subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB independently samples `min(k, servers)` servers at startup and only routes among that subset using its own local inflight counts.
 
 ## Metrics
 

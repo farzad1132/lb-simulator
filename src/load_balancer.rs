@@ -4,8 +4,6 @@ use crate::server::Task;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
     Box::new(PowerOfTwoPolicy)
@@ -15,8 +13,9 @@ fn default_policy() -> Box<dyn LoadBalancePolicy> {
 pub struct LoadBalancer {
     #[serde(skip, default = "default_policy")]
     policy: Box<dyn LoadBalancePolicy>,
+    lb_id: usize,
     #[serde(skip)]
-    server_loads: Vec<Arc<AtomicU32>>,
+    local_inflight: Vec<u32>,
     #[serde(skip)]
     server_indices: Vec<usize>,
     #[serde(skip)]
@@ -27,13 +26,14 @@ pub struct LoadBalancer {
 impl LoadBalancer {
     pub fn new(
         policy: Box<dyn LoadBalancePolicy>,
-        server_loads: Vec<Arc<AtomicU32>>,
+        n_servers: usize,
         server_indices: Vec<usize>,
+        lb_id: usize,
     ) -> Self {
-        let n_servers = server_loads.len();
         Self {
             policy,
-            server_loads,
+            lb_id,
+            local_inflight: vec![0; n_servers],
             load_scratch: vec![0; server_indices.len()],
             server_indices,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
@@ -43,16 +43,22 @@ impl LoadBalancer {
 
 #[Model]
 impl LoadBalancer {
-    pub async fn input(&mut self, task: Task, _cx: &Context<Self>) {
+    pub async fn input(&mut self, mut task: Task, _cx: &Context<Self>) {
         for (scratch, &server_idx) in self
             .load_scratch
             .iter_mut()
             .zip(self.server_indices.iter())
         {
-            *scratch = self.server_loads[server_idx].load(Ordering::Relaxed);
+            *scratch = self.local_inflight[server_idx];
         }
         let local_idx = self.policy.select(&self.load_scratch);
         let global_idx = self.server_indices[local_idx];
+        self.local_inflight[global_idx] += 1;
+        task.lb_id = self.lb_id;
         self.outputs[global_idx].send(task).await;
+    }
+
+    pub async fn release(&mut self, server_idx: usize, _cx: &Context<Self>) {
+        self.local_inflight[server_idx] = self.local_inflight[server_idx].saturating_sub(1);
     }
 }

@@ -4,8 +4,6 @@ use crate::policy::PowerOfTwoPolicy;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
     Box::new(PowerOfTwoPolicy)
@@ -16,7 +14,7 @@ pub struct Balancer {
     #[serde(skip, default = "default_policy")]
     policy: Box<dyn LoadBalancePolicy>,
     #[serde(skip)]
-    replica_loads: Vec<Arc<AtomicU32>>,
+    local_inflight: Vec<u32>,
     #[serde(skip)]
     replica_indices: Vec<usize>,
     #[serde(skip)]
@@ -27,13 +25,12 @@ pub struct Balancer {
 impl Balancer {
     pub fn new(
         policy: Box<dyn LoadBalancePolicy>,
-        replica_loads: Vec<Arc<AtomicU32>>,
+        n_replicas: usize,
         replica_indices: Vec<usize>,
     ) -> Self {
-        let n_replicas = replica_loads.len();
         Self {
             policy,
-            replica_loads,
+            local_inflight: vec![0; n_replicas],
             load_scratch: vec![0; replica_indices.len()],
             replica_indices,
             outputs: (0..n_replicas).map(|_| Output::default()).collect(),
@@ -49,10 +46,15 @@ impl Balancer {
             .iter_mut()
             .zip(self.replica_indices.iter())
         {
-            *scratch = self.replica_loads[replica_idx].load(Ordering::Relaxed);
+            *scratch = self.local_inflight[replica_idx];
         }
         let local_idx = self.policy.select(&self.load_scratch);
         let global_idx = self.replica_indices[local_idx];
+        self.local_inflight[global_idx] += 1;
         self.outputs[global_idx].send(hop).await;
+    }
+
+    pub async fn release(&mut self, replica_idx: usize, _cx: &Context<Self>) {
+        self.local_inflight[replica_idx] = self.local_inflight[replica_idx].saturating_sub(1);
     }
 }
