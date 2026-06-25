@@ -56,14 +56,19 @@ Both forms define the mean of an **exponential** random variable sampled when th
 
 ### `load.json`
 
-Maps API name to request rate (requests per second):
+Maps API name to request rate and SLO latency:
 
 ```json
 {
-    "f1": 2000,
-    "g1": 500
+    "f1": { "rps": 2000, "slo_ms": 58.0 },
+    "g1": { "rps": 500, "slo_ms": 49.0 }
 }
 ```
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| **rps** | requests/s | Poisson arrival rate for this API |
+| **slo_ms** | ms | SLO latency threshold (reported as `slo_latency_ms` in output) |
 
 Every key must match an entry API from the callgraph. Each API gets an independent Poisson arrival process at the given RPS.
 
@@ -263,12 +268,12 @@ All latency values in **output** are in **milliseconds**, grouped **per API** un
 
 Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a primary output).
 
-### SLO (per API, same rule as `lb`)
+### SLO (per API)
 
 | Metric | Definition |
 |--------|------------|
 | **unloaded_latency_p99_ms** | p99 of that API's `processing_time_ms` samples |
-| **slo_latency_ms** | `5 × unloaded_latency_p99_ms` |
+| **slo_latency_ms** | `slo_ms` from `load.json` for that API |
 
 ### Per microservice
 
@@ -292,9 +297,9 @@ cargo build --release
 | Flag | Description |
 |------|-------------|
 | `--callgraph` | Path to callgraph JSON (required) |
-| `--load-file` | Path to per-API RPS JSON (required) |
+| `--load-file` | Path to per-API load JSON (`rps` + `slo_ms`) (required) |
 | `--n` | Total requests, split across APIs proportional to RPS |
-| `--lb-policy` | `random`, `power-of-two`, `least-request`, or `round-robin` |
+| `--lb-policy` | Load-balancing policy: `random`, `power-of-two`, `least-request` (default), or `round-robin` |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all) |
 | `--format` | `human` or `json` |
 
@@ -324,3 +329,5 @@ cargo build --release
   }
 }
 ```
+
+To plot e2e latency CDFs from `plot_cdfs.py`, see [Plot microservice e2e CDF](../README.md#plot-microservice-e2e-cdf) in the README.

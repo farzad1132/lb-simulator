@@ -12,7 +12,7 @@ struct Args {
     load_file: PathBuf,
     #[arg(long, default_value_t = 1_000_000)]
     n: u32,
-    #[arg(long, value_enum, default_value_t = LoadBalancePolicyKind::PowerOfTwo)]
+    #[arg(long, value_enum, default_value = "least-request")]
     lb_policy: LoadBalancePolicyKind,
     #[arg(long, default_value_t = 0)]
     lb_subset_size: u32,
@@ -50,4 +50,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn default_lb_policy_is_least_request() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::LeastRequest);
+    }
 }

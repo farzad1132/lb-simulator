@@ -76,7 +76,7 @@ The binary is at `target/release/lb`.
 
 ## Microservice simulator (`ms`)
 
-A separate binary simulates microservice applications from a callgraph and per-API load file. Callgraph service times are in **milliseconds**; `load.json` rates are in **RPS**. See [docs/microservice-simulation.md](docs/microservice-simulation.md) for the full design (request flow, metrics, wiring).
+A separate binary simulates microservice applications from a callgraph and per-API load file. Callgraph service times are in **milliseconds**; `load.json` specifies per-API **RPS** and **SLO latency (`slo_ms`)**. See [docs/microservice-simulation.md](docs/microservice-simulation.md) for the full design (request flow, metrics, wiring).
 
 ```bash
 cargo build --release
@@ -90,13 +90,13 @@ cargo build --release
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--callgraph` | (required) | Path to callgraph JSON |
-| `--load-file` | (required) | Path to per-API RPS JSON |
+| `--load-file` | (required) | Path to per-API load JSON (`rps` + `slo_ms`) |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
+| `--lb-policy` | `least-request` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
 | `--format` | `human` | `human` or `json` |
 
-JSON output includes per-microservice `utilization_pct` and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms`, `slo_latency_ms` = 5× unloaded p99, same rule as `lb`).
+JSON output includes per-microservice `utilization_pct` and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms` computed from samples, `slo_latency_ms` from `load.json`).
 
 ## Simulator CLI
 
@@ -205,6 +205,50 @@ python plot_cdfs.py \
 ```
 
 On failure, `plot_cdfs.py` prints the simulator command, exit code, and full stderr/stdout. Set `RUST_BACKTRACE=1` for panic backtraces when debugging the Rust binary.
+
+### Plot microservice e2e CDF
+
+Use `--simulator ms` to run the microservice binary and plot per-API e2e latency CDFs. Latencies and `--mark` thresholds are in **milliseconds**. The SLO from `load.json` (`slo_ms`) is marked on each plot automatically.
+
+```bash
+python plot_cdfs.py --simulator ms \
+  --callgraph tests/fanin/callgraph.json \
+  --load-file tests/fanin/load.json \
+  --n 100000
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--simulator` | `lb` | `lb` or `ms` |
+| `--callgraph` | (required for ms) | Path to callgraph JSON |
+| `--load-file` | (required for ms) | Path to per-API load JSON (`rps` + `slo_ms`) |
+| `--api` | (none) | Plot only this API; omit to plot all APIs from the load file (one subplot per API) |
+| `--output` | `output/e2e_cdf_ms.pdf` | Output PDF path |
+| `--mark` | (none) | Additional latency threshold(s) in **ms** |
+
+Single API:
+
+```bash
+python plot_cdfs.py --simulator ms \
+  --callgraph tests/fanin/callgraph.json \
+  --load-file tests/fanin/load.json \
+  --api f1 \
+  --n 100000 \
+  --comment fanin_f1
+# writes output/e2e_cdf_ms_fanin_f1.pdf
+```
+
+With additional threshold marks (ms):
+
+```bash
+python plot_cdfs.py --simulator ms \
+  --callgraph tests/fanin/callgraph.json \
+  --load-file tests/fanin/load.json \
+  --n 100000 \
+  --mark 25 --mark 50
+```
+
+Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms, `power-of-two` for lb), `--lb-subset-size`, `--binary`, `--comment`.
 
 ## Plot SLO violation probability vs load
 

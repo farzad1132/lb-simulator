@@ -777,6 +777,40 @@ def plot_scatter(ax, x, y, yerr=None, label: Optional[str] = None,
     return ax
 
 
+def percentile(values, pct: float) -> float:
+    """Empirical percentile using the same index rule as the Rust simulator."""
+    arr = np.sort(np.asarray(values, dtype=float))
+    if len(arr) == 0:
+        raise ValueError("percentile requires at least one value")
+    idx = round((len(arr) - 1) * pct / 100.0)
+    return float(arr[int(idx)])
+
+
+def cdf_log_xlim(
+    data,
+    thresholds=(),
+    low_pct: float = 1.0,
+    high_pct: float = 99.99,
+    pad: float = 1.15,
+) -> Tuple[float, float]:
+    """Sensible log-scale x-axis window for CDF plots."""
+    arr = np.sort(np.asarray(data, dtype=float))
+    positive = arr[arr > 0]
+    if len(positive) == 0:
+        raise ValueError("cdf_log_xlim requires positive values")
+
+    lo = percentile(arr, low_pct) / pad
+    hi = percentile(arr, high_pct)
+    if thresholds:
+        hi = max(hi, max(float(t) for t in thresholds))
+    hi *= pad
+
+    lo = max(lo, float(positive[0]))
+    if lo >= hi:
+        hi = lo * 10
+    return lo, hi
+
+
 def compute_ecdf(data) -> Tuple[np.ndarray, np.ndarray]:
     """Return sorted samples and empirical CDF values."""
     x = np.sort(np.asarray(data, dtype=float))
@@ -893,6 +927,8 @@ def plot_cdf(ax, data, label: Optional[str] = None,
 
     if xlim is not None:
         resolved_xlim = (float(xlim[0]), float(xlim[1]))
+    elif log_x and len(arr) > 0:
+        resolved_xlim = cdf_log_xlim(arr, thresholds=thresholds or ())
     elif len(arr) > 0:
         lo = float(np.min(arr))
         hi = float(np.max(arr))

@@ -79,10 +79,9 @@ impl LoadBalancePolicy for LeastRequestPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum LoadBalancePolicyKind {
     Random,
-    #[default]
     PowerOfTwo,
     RoundRobin,
     LeastRequest,

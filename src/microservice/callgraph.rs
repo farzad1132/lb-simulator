@@ -20,7 +20,13 @@ pub struct CallGraph {
     pub service_order: Vec<String>,
 }
 
-pub type LoadSpec = HashMap<String, f64>;
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiLoad {
+    pub rps: f64,
+    pub slo_ms: f64,
+}
+
+pub type LoadSpec = HashMap<String, ApiLoad>;
 
 #[derive(Deserialize)]
 struct CallGraphFile {
@@ -145,12 +151,18 @@ impl CallGraph {
     }
 
     pub fn validate_load(&self, load: &LoadSpec) -> Result<(), String> {
-        for api in load.keys() {
+        for (api, spec) in load {
             if !self.entrypoints.contains_key(api) {
                 return Err(format!(
                     "load.json API {} has no entrypoint in callgraph",
                     api
                 ));
+            }
+            if spec.rps <= 0.0 {
+                return Err(format!("load.json API {} must have rps > 0", api));
+            }
+            if spec.slo_ms <= 0.0 {
+                return Err(format!("load.json API {} must have slo_ms > 0", api));
             }
         }
         Ok(())
@@ -203,6 +215,14 @@ fn build_path(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn load_spec_parses_api_objects() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/load.json");
+        let load = load_spec_from_file(&path).unwrap();
+        assert_eq!(load["f1"].rps, 900.0);
+        assert_eq!(load["f1"].slo_ms, 58.0);
+    }
 
     #[test]
     fn fanin_paths() {

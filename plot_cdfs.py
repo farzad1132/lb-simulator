@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the lb simulator and plot e2e latency CDF."""
+"""Run the lb or ms simulator and plot e2e latency CDF."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -21,10 +22,22 @@ from plotting_primitive import (
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
+DEFAULT_MS_BINARY = REPO_ROOT / "target" / "release" / "ms"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "e2e_cdf.pdf"
-REQUIRED_JSON_KEYS = ("utilization_pct", "e2e", "slo_latency")
+DEFAULT_MS_OUTPUT = REPO_ROOT / "output" / "e2e_cdf_ms.pdf"
+LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e", "slo_latency")
+MS_REQUIRED_JSON_KEYS = ("utilization_pct", "by_api")
+MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms")
 SERVICE_MEAN = 1.0
 LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
+SIMULATORS = ("lb", "ms")
+
+
+@dataclass
+class CdfPanel:
+    e2e: list[float]
+    slo_latency: float
+    title: str
 
 
 def arrival_mean_from_load(
@@ -111,7 +124,12 @@ def run_subprocess(
         raise SystemExit(f"{label} failed with exit code {exc.returncode}") from exc
 
 
-def ensure_release_binary(repo_root: Path, binary: Path | None) -> Path:
+def ensure_release_binary(
+    repo_root: Path,
+    binary: Path | None,
+    *,
+    simulator: str = "lb",
+) -> Path:
     if binary is None:
         env = os.environ.copy()
         env["CARGO_TARGET_DIR"] = str(repo_root / "target")
@@ -121,11 +139,11 @@ def ensure_release_binary(repo_root: Path, binary: Path | None) -> Path:
             cwd=repo_root,
             env=env,
         )
-        return repo_root / "target" / "release" / "lb"
+        return repo_root / "target" / "release" / simulator
     return binary
 
 
-def _parse_simulation_json(cmd: list[str], stdout: str) -> dict:
+def _parse_lb_json(cmd: list[str], stdout: str) -> dict:
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError as exc:
@@ -136,7 +154,7 @@ def _parse_simulation_json(cmd: list[str], stdout: str) -> dict:
         )
         raise SystemExit("simulator did not emit valid JSON") from exc
 
-    missing = [key for key in REQUIRED_JSON_KEYS if key not in data]
+    missing = [key for key in LB_REQUIRED_JSON_KEYS if key not in data]
     if missing:
         _print_subprocess_failure(
             "simulator (missing JSON keys)",
@@ -144,6 +162,53 @@ def _parse_simulation_json(cmd: list[str], stdout: str) -> dict:
             stdout=stdout,
         )
         raise SystemExit(f"simulator JSON missing required keys: {', '.join(missing)}")
+
+    return data
+
+
+def _parse_ms_json(cmd: list[str], stdout: str) -> dict:
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        _print_subprocess_failure(
+            "simulator (invalid JSON)",
+            cmd,
+            stdout=stdout,
+        )
+        raise SystemExit("simulator did not emit valid JSON") from exc
+
+    missing = [key for key in MS_REQUIRED_JSON_KEYS if key not in data]
+    if missing:
+        _print_subprocess_failure(
+            "simulator (missing JSON keys)",
+            cmd,
+            stdout=stdout,
+        )
+        raise SystemExit(f"simulator JSON missing required keys: {', '.join(missing)}")
+
+    by_api = data["by_api"]
+    if not isinstance(by_api, dict):
+        _print_subprocess_failure(
+            "simulator (invalid by_api)",
+            cmd,
+            stdout=stdout,
+        )
+        raise SystemExit("simulator JSON by_api must be an object")
+
+    for api, stats in by_api.items():
+        if not isinstance(stats, dict):
+            raise SystemExit(f"simulator JSON by_api[{api!r}] must be an object")
+        missing_api = [key for key in MS_API_REQUIRED_KEYS if key not in stats]
+        if missing_api:
+            _print_subprocess_failure(
+                "simulator (missing JSON keys)",
+                cmd,
+                stdout=stdout,
+            )
+            raise SystemExit(
+                f"simulator JSON by_api[{api!r}] missing required keys: "
+                f"{', '.join(missing_api)}"
+            )
 
     return data
 
@@ -190,7 +255,121 @@ def run_simulation(
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
-    return _parse_simulation_json(cmd, result.stdout)
+    return _parse_lb_json(cmd, result.stdout)
+
+
+def run_ms_simulation(
+    binary: Path,
+    *,
+    callgraph: Path,
+    load_file: Path,
+    n: int,
+    lb_policy: str = "least-request",
+    lb_subset_size: int = 0,
+) -> dict:
+    cmd = [
+        str(binary),
+        "--format",
+        "json",
+        "--callgraph",
+        str(callgraph),
+        "--load-file",
+        str(load_file),
+        "--n",
+        str(n),
+        "--lb-policy",
+        lb_policy,
+        "--lb-subset-size",
+        str(lb_subset_size),
+    ]
+    result = run_subprocess(cmd, label="simulator")
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
+    return _parse_ms_json(cmd, result.stdout)
+
+
+def load_api_names(load_file: Path) -> list[str]:
+    try:
+        data = json.loads(load_file.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid JSON in load file {load_file}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"load file {load_file} must be a JSON object")
+    return sorted(data.keys())
+
+
+def select_ms_panels(data: dict, *, api: str | None, load_file: Path) -> list[CdfPanel]:
+    by_api = data["by_api"]
+    if api is not None:
+        if api not in by_api:
+            valid = ", ".join(sorted(by_api.keys())) or "(none)"
+            raise SystemExit(f"API {api!r} not in simulation output; valid APIs: {valid}")
+        api_names = [api]
+    else:
+        api_names = load_api_names(load_file)
+        missing = [name for name in api_names if name not in by_api]
+        if missing:
+            valid = ", ".join(sorted(by_api.keys())) or "(none)"
+            raise SystemExit(
+                f"API(s) from load file missing in simulation output: {', '.join(missing)}; "
+                f"valid APIs: {valid}"
+            )
+
+    panels = []
+    for name in api_names:
+        stats = by_api[name]
+        panels.append(
+            CdfPanel(
+                e2e=stats["e2e_ms"],
+                slo_latency=stats["slo_latency_ms"],
+                title=f"api = {name}",
+            )
+        )
+    return panels
+
+
+def plot_e2e_cdf_panels(
+    panels: list[CdfPanel],
+    output_path: Path,
+    *,
+    xlabel: str,
+    marks: list[float] | None = None,
+) -> None:
+    if not panels:
+        raise SystemExit("no panels to plot")
+
+    style = ACM_COMPACT_HALF
+    n = len(panels)
+    layout = "1x1" if n == 1 else f"{n}x1"
+    grid = SubplotGrid(style, layout=layout)
+
+    for idx, panel in enumerate(panels):
+        row = idx if n > 1 else 0
+        col = 0
+        ax = grid.get_ax(row, col)
+        thresholds = [panel.slo_latency]
+        if marks:
+            thresholds.extend(marks)
+        plot_cdf(
+            ax,
+            panel.e2e,
+            style=style,
+            thresholds=thresholds,
+            log_x=True,
+            xlabel=xlabel if row == n - 1 else "",
+        )
+        grid.configure_ax(
+            ax,
+            xlabel=xlabel if row == n - 1 else "",
+            ylabel="CDF" if col == 0 else "",
+            title=panel.title,
+            show_xlabel=(row == n - 1),
+            show_ylabel=(col == 0),
+            show_xticklabels=(row == n - 1),
+            show_yticklabels=(col == 0),
+        )
+
+    grid.save(output_path)
 
 
 def plot_e2e_cdf(
@@ -200,43 +379,75 @@ def plot_e2e_cdf(
     load: float,
     marks: Optional[list[float]] = None,
 ) -> None:
-    e2e = data["e2e"]
-    slo_latency = data["slo_latency"]
-    thresholds = [slo_latency]
-    if marks:
-        thresholds.extend(marks)
-
-    style = ACM_COMPACT_HALF
-    grid = SubplotGrid(style, layout="1x1")
-    plot_cdf(
-        grid.get_ax(0, 0),
-        e2e,
-        style=style,
-        thresholds=thresholds,
-        log_x=True,
-        xlim=(min(e2e), max(e2e)),
+    plot_e2e_cdf_panels(
+        [CdfPanel(data["e2e"], data["slo_latency"], f"load = {load:g}")],
+        output_path,
         xlabel="E2E latency (s)",
+        marks=marks,
     )
-    grid.configure_labels(
-        pattern="leftmost_y_bottom_x",
-        ylabel="CDF",
-        title=f"load = {load:g}",
-    )
-    grid.save(output_path)
+
+
+def format_ms_utilization(utilization_pct: dict) -> str:
+    parts = [
+        f"{service}={pct:.1f}%"
+        for service, pct in sorted(utilization_pct.items())
+    ]
+    return " ".join(parts)
+
+
+def resolve_lb_policy(simulator: str, lb_policy: str | None) -> str:
+    if lb_policy is not None:
+        return lb_policy
+    return "least-request" if simulator == "ms" else "power-of-two"
+
+
+    if args.callgraph is not None:
+        raise SystemExit("--callgraph is only valid with --simulator ms")
+    if args.load_file is not None:
+        raise SystemExit("--load-file is only valid with --simulator ms")
+    if args.api is not None:
+        raise SystemExit("--api is only valid with --simulator ms")
+
+
+def validate_ms_args(args: argparse.Namespace) -> None:
+    if args.callgraph is None:
+        raise SystemExit("--callgraph is required with --simulator ms")
+    if args.load_file is None:
+        raise SystemExit("--load-file is required with --simulator ms")
+
+
+def resolve_output_path(args: argparse.Namespace) -> Path:
+    if args.output is not None:
+        return args.output
+    if args.simulator == "ms":
+        return DEFAULT_MS_OUTPUT
+    return DEFAULT_OUTPUT
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run lb simulator and plot e2e latency CDF.",
+        description="Run lb or ms simulator and plot e2e latency CDF.",
+    )
+    parser.add_argument(
+        "--simulator",
+        choices=SIMULATORS,
+        default="lb",
+        help="Which simulator to run (default: lb)",
     )
     parser.add_argument("--binary", type=Path, default=None,
                         help="Prebuilt release binary (skips cargo build --release)")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
-                        help="Output PDF path")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Output PDF path (default: output/e2e_cdf.pdf or output/e2e_cdf_ms.pdf)")
     parser.add_argument(
         "--comment", type=str, default=None,
         help="Suffix appended to output filename before .pdf (e.g. e2e_cdf_foo.pdf)",
     )
+    parser.add_argument("--callgraph", type=Path, default=None,
+                        help="Callgraph JSON (required with --simulator ms)")
+    parser.add_argument("--load-file", type=Path, default=None,
+                        help="Per-API load JSON with rps and slo_ms (required with --simulator ms)")
+    parser.add_argument("--api", type=str, default=None,
+                        help="Plot only this API (ms mode); omit to plot all APIs from load file")
     parser.add_argument("--load", type=float, default=0.8)
     parser.add_argument("--n", type=int, default=1_000_000)
     parser.add_argument("--service-dist", choices=["exponential", "constant", "bimodal"],
@@ -255,45 +466,80 @@ def parse_args() -> argparse.Namespace:
                         help="Concurrent tasks per server (passed to lb simulator)")
     parser.add_argument("--clients", type=int, default=1,
                         help="Number of independent clients (passed to lb simulator)")
-    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="power-of-two",
-                        help="Load-balancing policy (passed to lb simulator)")
+    parser.add_argument("--lb-policy", choices=LB_POLICIES, default=None,
+                        help="Load-balancing policy (default: power-of-two for lb, "
+                             "least-request for ms)")
     parser.add_argument("--lb-subset-size", type=int, default=0,
-                        help="Servers each LB can route to (0 = all; passed to lb simulator)")
+                        help="Replicas each LB can route to (0 = all; passed to lb/ms simulator)")
     parser.add_argument(
         "--mark", type=float, action="append", default=None,
-        help="Additional latency threshold(s) in seconds to annotate on the CDF (e.g. --mark 10 --mark 30)",
+        help="Additional latency threshold(s) to annotate on the CDF "
+             "(seconds for lb, ms for ms; e.g. --mark 10 --mark 30)",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    binary = ensure_release_binary(REPO_ROOT, args.binary)
-    data = run_simulation(
+    output_path = output_path_with_comment(resolve_output_path(args), args.comment)
+    lb_policy = resolve_lb_policy(args.simulator, args.lb_policy)
+
+    if args.simulator == "lb":
+        validate_lb_args(args)
+        binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="lb")
+        data = run_simulation(
+            binary,
+            load=args.load,
+            n=args.n,
+            service_dist=args.service_dist,
+            servers=args.servers,
+            concurrency=args.concurrency,
+            clients=args.clients,
+            lb_policy=lb_policy,
+            lb_subset_size=args.lb_subset_size,
+            service_modes=args.service_modes,
+            service_mode_probs=args.service_mode_probs,
+        )
+        if not data["e2e"]:
+            print("no completed tasks", file=sys.stderr)
+            sys.exit(1)
+        plot_e2e_cdf(
+            data,
+            output_path,
+            load=args.load,
+            marks=args.mark,
+        )
+        print(
+            f"wrote {output_path} (utilization: {data['utilization_pct']:.2f}%)",
+            file=sys.stderr,
+        )
+        return
+
+    validate_ms_args(args)
+    binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="ms")
+    data = run_ms_simulation(
         binary,
-        load=args.load,
+        callgraph=args.callgraph,
+        load_file=args.load_file,
         n=args.n,
-        service_dist=args.service_dist,
-        servers=args.servers,
-        concurrency=args.concurrency,
-        clients=args.clients,
-        lb_policy=args.lb_policy,
+        lb_policy=lb_policy,
         lb_subset_size=args.lb_subset_size,
-        service_modes=args.service_modes,
-        service_mode_probs=args.service_mode_probs,
     )
-    if not data["e2e"]:
-        print("no completed tasks", file=sys.stderr)
-        sys.exit(1)
-    output_path = output_path_with_comment(args.output, args.comment)
-    plot_e2e_cdf(
-        data,
+    panels = select_ms_panels(data, api=args.api, load_file=args.load_file)
+    for panel in panels:
+        if not panel.e2e:
+            print(f"no completed requests for {panel.title}", file=sys.stderr)
+            sys.exit(1)
+    plot_e2e_cdf_panels(
+        panels,
         output_path,
-        load=args.load,
+        xlabel="E2E latency (ms)",
         marks=args.mark,
     )
+    api_names = [panel.title.removeprefix("api = ") for panel in panels]
+    util = format_ms_utilization(data["utilization_pct"])
     print(
-        f"wrote {output_path} (utilization: {data['utilization_pct']:.2f}%)",
+        f"wrote {output_path} (apis: {', '.join(api_names)}; utilization: {util})",
         file=sys.stderr,
     )
 

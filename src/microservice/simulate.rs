@@ -20,7 +20,6 @@ use super::replica::Replica;
 const HUMAN_PERCENTILES: [f64; 12] = [
     1.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 99.0, 100.0,
 ];
-const SLO_MULTIPLIER: f64 = 5.0;
 const SECS_TO_MS: f64 = 1000.0;
 
 #[derive(Clone, Copy, Debug, ValueEnum, Default)]
@@ -62,7 +61,7 @@ fn percentile(sorted: &[f64], pct: f64) -> f64 {
 }
 
 fn split_by_rps(n: u32, load: &LoadSpec) -> HashMap<String, u32> {
-    let total_rps: f64 = load.values().sum();
+    let total_rps: f64 = load.values().map(|spec| spec.rps).sum();
     if total_rps <= 0.0 || n == 0 {
         return HashMap::new();
     }
@@ -70,7 +69,7 @@ fn split_by_rps(n: u32, load: &LoadSpec) -> HashMap<String, u32> {
     let mut assigned = 0u32;
     let apis: Vec<_> = load.keys().cloned().collect();
     for (i, api) in apis.iter().enumerate() {
-        let rps = load[api];
+        let rps = load[api].rps;
         let count = if i + 1 == apis.len() {
             n - assigned
         } else {
@@ -133,13 +132,13 @@ fn finalize_api_stats(stats: &mut ApiStats) {
     let mut processing = stats.processing_time_ms.clone();
     processing.sort_by(f64::total_cmp);
     stats.unloaded_latency_p99_ms = percentile(&processing, 99.0);
-    stats.slo_latency_ms = SLO_MULTIPLIER * stats.unloaded_latency_p99_ms;
 }
 
 fn calculate_stats(
     completed: &mut EventQueueReader<CompletedRequest>,
     busy_time: &HashMap<String, Duration>,
     graph: &CallGraph,
+    load: &LoadSpec,
     observation: Duration,
 ) -> Option<MsStats> {
     let mut by_api: HashMap<String, ApiStats> = HashMap::new();
@@ -156,11 +155,14 @@ fn calculate_stats(
         return None;
     }
 
-    for stats in by_api.values_mut() {
+    for (api, stats) in by_api.iter_mut() {
         if stats.processing_time_ms.is_empty() {
             continue;
         }
         finalize_api_stats(stats);
+        if let Some(spec) = load.get(api) {
+            stats.slo_latency_ms = spec.slo_ms;
+        }
     }
 
     let mut utilization_pct = HashMap::new();
@@ -255,7 +257,7 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
 
     let counts = split_by_rps(args.n, &load);
     for (api, count) in &counts {
-        let rps = load[api];
+        let rps = load[api].rps;
         poisson_arrivals(&simu, &arrival_input, api.clone(), rps, *count)?;
     }
 
@@ -267,6 +269,7 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
         &mut completed,
         &busy,
         graph.as_ref(),
+        &load,
         observation,
     ))
 }

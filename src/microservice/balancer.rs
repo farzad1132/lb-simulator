@@ -1,12 +1,12 @@
 use super::hop::Hop;
 use crate::policy::LoadBalancePolicy;
-use crate::policy::PowerOfTwoPolicy;
+use crate::policy::LeastRequestPolicy;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
-    Box::new(PowerOfTwoPolicy)
+    Box::new(LeastRequestPolicy)
 }
 
 #[derive(Deserialize, Serialize)]
