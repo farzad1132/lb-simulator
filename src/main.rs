@@ -34,12 +34,109 @@ fn sample_exp(rng: &mut impl Rng, mean: f32) -> f32 {
 enum ServiceDistribution {
     Exponential,
     Constant,
+    Bimodal,
 }
 
-fn sample_service(rng: &mut impl Rng, mean: f32, dist: ServiceDistribution) -> f32 {
-    match dist {
-        ServiceDistribution::Exponential => sample_exp(rng, mean),
-        ServiceDistribution::Constant => mean.max(MIN_DURATION_SECS),
+struct BimodalConfig {
+    modes: [f32; 2],
+    probs: [f32; 2],
+}
+
+struct ServiceTimeConfig {
+    mean: f32,
+    dist: ServiceDistribution,
+    bimodal: Option<BimodalConfig>,
+}
+
+const PROB_SUM_TOLERANCE: f32 = 1e-6;
+
+fn mixture_mean(modes: &[f32; 2], probs: &[f32; 2]) -> f32 {
+    modes[0] * probs[0] + modes[1] * probs[1]
+}
+
+fn select_bimodal_mode(rng: &mut impl Rng, config: &BimodalConfig) -> f32 {
+    if rng.random::<f32>() < config.probs[0] {
+        config.modes[0]
+    } else {
+        config.modes[1]
+    }
+}
+
+fn sample_bimodal(rng: &mut impl Rng, config: &BimodalConfig) -> f32 {
+    let mode_mean = select_bimodal_mode(rng, config);
+    sample_exp(rng, mode_mean)
+}
+
+fn sample_service(rng: &mut impl Rng, service_time: &ServiceTimeConfig) -> f32 {
+    match service_time.dist {
+        ServiceDistribution::Exponential => sample_exp(rng, service_time.mean),
+        ServiceDistribution::Constant => service_time.mean.max(MIN_DURATION_SECS),
+        ServiceDistribution::Bimodal => {
+            sample_bimodal(rng, service_time.bimodal.as_ref().expect("bimodal config"))
+        }
+    }
+}
+
+fn resolve_service_time(args: &Args) -> Result<ServiceTimeConfig, String> {
+    match args.service_dist {
+        ServiceDistribution::Bimodal => {
+            let modes = args
+                .service_modes
+                .as_ref()
+                .ok_or("--service-modes is required with --service-dist bimodal")?;
+            let probs = args
+                .service_mode_probs
+                .as_ref()
+                .ok_or("--service-mode-probs is required with --service-dist bimodal")?;
+            if modes.len() != 2 {
+                return Err(format!(
+                    "--service-modes requires exactly 2 values, got {}",
+                    modes.len()
+                ));
+            }
+            if probs.len() != 2 {
+                return Err(format!(
+                    "--service-mode-probs requires exactly 2 values, got {}",
+                    probs.len()
+                ));
+            }
+            if modes.iter().any(|m| *m <= 0.0 || !m.is_finite()) {
+                return Err("--service-modes values must be positive and finite".into());
+            }
+            if probs.iter().any(|p| *p <= 0.0 || !p.is_finite()) {
+                return Err("--service-mode-probs values must be positive and finite".into());
+            }
+            let prob_sum: f32 = probs.iter().sum();
+            if (prob_sum - 1.0).abs() > PROB_SUM_TOLERANCE {
+                return Err(format!(
+                    "--service-mode-probs must sum to 1, got {prob_sum}"
+                ));
+            }
+            let modes_arr = [modes[0], modes[1]];
+            let probs_arr = [probs[0], probs[1]];
+            let mean = mixture_mean(&modes_arr, &probs_arr);
+            Ok(ServiceTimeConfig {
+                mean,
+                dist: args.service_dist,
+                bimodal: Some(BimodalConfig {
+                    modes: modes_arr,
+                    probs: probs_arr,
+                }),
+            })
+        }
+        _ => {
+            if args.service_modes.is_some() || args.service_mode_probs.is_some() {
+                return Err(
+                    "--service-modes and --service-mode-probs are only valid with --service-dist bimodal"
+                        .into(),
+                );
+            }
+            Ok(ServiceTimeConfig {
+                mean: SERVICE_MEAN,
+                dist: args.service_dist,
+                bimodal: None,
+            })
+        }
     }
 }
 
@@ -47,9 +144,8 @@ fn exp_source(
     sim: &Simulation,
     input: &EventId<Task>,
     arrival_mean: f32,
-    service_mean: f32,
+    service_time: &ServiceTimeConfig,
     n: u32,
-    service_dist: ServiceDistribution,
 ) -> Result<(), SchedulingError> {
     let scheduler = sim.scheduler();
     let t0 = sim.time();
@@ -58,8 +154,7 @@ fn exp_source(
 
     for _ in 0..n {
         offset += Duration::from_secs_f32(sample_exp(&mut rng, arrival_mean));
-        let duration =
-            Duration::from_secs_f32(sample_service(&mut rng, service_mean, service_dist));
+        let duration = Duration::from_secs_f32(sample_service(&mut rng, service_time));
         let task = Task::new(t0 + offset, duration);
         scheduler.schedule_event(offset, input, task)?;
     }
@@ -177,6 +272,10 @@ struct Args {
     n: u32,
     #[arg(long, value_enum, default_value_t = ServiceDistribution::Exponential)]
     service_dist: ServiceDistribution,
+    #[arg(long, value_delimiter = ',')]
+    service_modes: Option<Vec<f32>>,
+    #[arg(long, value_delimiter = ',')]
+    service_mode_probs: Option<Vec<f32>>,
     #[arg(long, default_value_t = 1)]
     servers: u32,
     #[arg(long, default_value_t = 1)]
@@ -212,6 +311,7 @@ fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
 
 fn run_simulation(
     args: &Args,
+    service_time: &ServiceTimeConfig,
 ) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
     let n_clients = args.clients.max(1);
     let n_servers = args.servers.max(1) as usize;
@@ -263,7 +363,7 @@ fn run_simulation(
     let mut simu = bench.init(t0)?;
 
     let capacity = total_capacity as f32;
-    let arrival_mean = SERVICE_MEAN / (args.load * capacity);
+    let arrival_mean = service_time.mean / (args.load * capacity);
     let per_client_arrival_mean = arrival_mean * n_clients as f32;
 
     for (input, &client_n) in inputs.iter().zip(task_counts.iter()) {
@@ -272,9 +372,8 @@ fn run_simulation(
                 &simu,
                 input,
                 per_client_arrival_mean,
-                SERVICE_MEAN,
+                service_time,
                 client_n,
-                args.service_dist,
             )?;
         }
     }
@@ -287,7 +386,8 @@ fn run_simulation(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let stats = run_simulation(&args)?;
+    let service_time = resolve_service_time(&args)?;
+    let stats = run_simulation(&args, &service_time)?;
 
     match args.format {
         OutputFormat::Human => match stats {
@@ -318,4 +418,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    fn bimodal_config(m0: f32, m1: f32, p0: f32) -> BimodalConfig {
+        let modes = [m0, m1];
+        let probs = [p0, 1.0 - p0];
+        BimodalConfig { modes, probs }
+    }
+
+    #[test]
+    fn mixture_mean_computes_weighted_average() {
+        assert!((mixture_mean(&[0.1, 1.0], &[0.9, 0.1]) - 0.19).abs() < 1e-6);
+        assert!((mixture_mean(&[0.5, 0.5], &[0.5, 0.5]) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resolve_service_time_rejects_invalid_probs() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--service-dist",
+            "bimodal",
+            "--service-modes",
+            "0.1,1.0",
+            "--service-mode-probs",
+            "0.6,0.3",
+        ])
+        .unwrap();
+        let err = match resolve_service_time(&args) {
+            Err(err) => err,
+            Ok(_) => panic!("expected validation error"),
+        };
+        assert!(err.contains("must sum to 1"));
+    }
+
+    #[test]
+    fn resolve_service_time_rejects_wrong_mode_count() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--service-dist",
+            "bimodal",
+            "--service-modes",
+            "0.1",
+            "--service-mode-probs",
+            "0.5,0.5",
+        ])
+        .unwrap();
+        let err = match resolve_service_time(&args) {
+            Err(err) => err,
+            Ok(_) => panic!("expected validation error"),
+        };
+        assert!(err.contains("exactly 2 values"));
+    }
+
+    #[test]
+    fn resolve_service_time_rejects_modes_with_non_bimodal_dist() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--service-dist",
+            "exponential",
+            "--service-modes",
+            "0.1,1.0",
+        ])
+        .unwrap();
+        let err = match resolve_service_time(&args) {
+            Err(err) => err,
+            Ok(_) => panic!("expected validation error"),
+        };
+        assert!(err.contains("only valid with --service-dist bimodal"));
+    }
+
+    #[test]
+    fn resolve_service_time_bimodal_sets_mean() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--service-dist",
+            "bimodal",
+            "--service-modes",
+            "0.1,1.0",
+            "--service-mode-probs",
+            "0.9,0.1",
+        ])
+        .unwrap();
+        let cfg = resolve_service_time(&args).unwrap();
+        assert!((cfg.mean - 0.19).abs() < 1e-6);
+        assert!(cfg.bimodal.is_some());
+    }
+
+    #[test]
+    fn select_bimodal_mode_respects_probabilities() {
+        let config = bimodal_config(0.1, 1.0, 0.7);
+        let mut rng = StdRng::seed_from_u64(42);
+        let n = 10_000;
+        let mode0_count = (0..n)
+            .filter(|_| select_bimodal_mode(&mut rng, &config) == 0.1)
+            .count();
+        let ratio = mode0_count as f32 / n as f32;
+        assert!((ratio - 0.7).abs() < 0.02);
+    }
 }

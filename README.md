@@ -1,6 +1,6 @@
 # lb
 
-Multi-server FCFS queue simulator with pluggable load-balancing policies. Tasks arrive according to independent Poisson processes from one or more clients, receive exponential or constant service times, and are routed by each client's load balancer to a shared pool of servers. Each server has its own FIFO queue and can process multiple tasks concurrently (simulating CPU cores).
+Multi-server FCFS queue simulator with pluggable load-balancing policies. Tasks arrive according to independent Poisson processes from one or more clients, receive exponential, constant, or bimodal (mixture-of-exponentials) service times, and are routed by each client's load balancer to a shared pool of servers. Each server has its own FIFO queue and can process multiple tasks concurrently (simulating CPU cores).
 
 ## Architecture
 
@@ -37,14 +37,14 @@ For each completed task, let `p99(duration)` be the 99th percentile of all sampl
 
 The simulator also reports **utilization** as total service time divided by observation time and total system capacity (`servers × concurrency`).
 
-**Load** is the target utilization (0–1). Service time is fixed at mean 1 second; inter-arrival time is derived from load and capacity:
+**Load** is the target utilization (0–1). For exponential and constant service distributions, service time mean is fixed at 1 second. For bimodal, the mean is `E[S] = p1·m1 + p2·m2` from `--service-modes` and `--service-mode-probs`. Inter-arrival time is derived from load and capacity:
 
 ```
 load = service_mean / (arrival_mean × servers × concurrency)
 arrival_mean = service_mean / (load × servers × concurrency)
 ```
 
-With `service_mean = 1`: `arrival_mean = 1 / (load × servers × concurrency)`.
+With the default exponential/constant `service_mean = 1`: `arrival_mean = 1 / (load × servers × concurrency)`.
 
 With multiple clients, each client runs an independent Poisson source at a slower rate so the aggregate load is unchanged:
 
@@ -119,15 +119,21 @@ JSON output includes per-microservice `utilization_pct` and per-API latency arra
 
 # Round-robin with four servers
 ./target/release/lb --format human --n 10000 --servers 4 --lb-policy round-robin
+
+# Bimodal service time: 90% fast (0.1s mean), 10% slow (1.0s mean)
+./target/release/lb --format human --n 10000 --service-dist bimodal \
+  --service-modes 0.1,1.0 --service-mode-probs 0.9,0.1
 ```
 
 Options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--load` | `0.8` | Target utilization (0–1); sets inter-arrival time from fixed service mean 1s |
+| `--load` | `0.8` | Target utilization (0–1); sets inter-arrival time from service mean |
 | `--n` | `1000000` | Number of tasks |
-| `--service-dist` | `exponential` | `exponential` or `constant` |
+| `--service-dist` | `exponential` | `exponential`, `constant`, or `bimodal` |
+| `--service-modes` | (none) | Two exponential means for bimodal (required with `bimodal`) |
+| `--service-mode-probs` | (none) | Two mode probabilities summing to 1 (required with `bimodal`) |
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server (CPU cores) |
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
@@ -157,7 +163,7 @@ JSON output shape:
 python plot_cdfs.py --n 100000
 ```
 
-Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--servers`, `--concurrency`, `--clients`, `--lb-policy`, `--lb-subset-size`) plus:
+Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--service-modes`, `--service-mode-probs`, `--servers`, `--concurrency`, `--clients`, `--lb-policy`, `--lb-subset-size`) plus:
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -214,7 +220,9 @@ python plot_load_sweep.py --n 100000
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `1.0` / `0.1` | Load sweep range |
 | `--n` | `1000000` | Tasks per load point |
-| `--service-dist` | `exponential` | Service distribution |
+| `--service-dist` | `exponential` | Service distribution (`exponential`, `constant`, or `bimodal`) |
+| `--service-modes` | (none) | Two exponential means for bimodal |
+| `--service-mode-probs` | (none) | Two mode probabilities for bimodal |
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |

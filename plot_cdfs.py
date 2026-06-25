@@ -39,6 +39,11 @@ def arrival_mean_from_load(
     return service_mean / (load * capacity)
 
 
+def bimodal_service_mean(modes: list[float], probs: list[float]) -> float:
+    """Expected service time for a bimodal mixture of exponentials."""
+    return sum(m * p for m, p in zip(modes, probs))
+
+
 def _sanitize_comment(comment: str) -> str:
     comment = comment.strip().replace("/", "_").replace("\\", "_")
     return re.sub(r"\s+", "_", comment)
@@ -154,6 +159,8 @@ def run_simulation(
     clients: int = 1,
     lb_policy: str = "power-of-two",
     lb_subset_size: int = 0,
+    service_modes: list[float] | None = None,
+    service_mode_probs: list[float] | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -176,6 +183,10 @@ def run_simulation(
         "--lb-subset-size",
         str(lb_subset_size),
     ]
+    if service_modes is not None:
+        cmd.extend(["--service-modes", ",".join(str(m) for m in service_modes)])
+    if service_mode_probs is not None:
+        cmd.extend(["--service-mode-probs", ",".join(str(p) for p in service_mode_probs)])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
@@ -228,8 +239,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--load", type=float, default=0.8)
     parser.add_argument("--n", type=int, default=1_000_000)
-    parser.add_argument("--service-dist", choices=["exponential", "constant"],
+    parser.add_argument("--service-dist", choices=["exponential", "constant", "bimodal"],
                         default="exponential")
+    parser.add_argument(
+        "--service-modes", type=float, nargs=2, metavar=("M0", "M1"),
+        help="Exponential means for bimodal modes (required with --service-dist bimodal)",
+    )
+    parser.add_argument(
+        "--service-mode-probs", type=float, nargs=2, metavar=("P0", "P1"),
+        help="Mode selection probabilities (required with --service-dist bimodal)",
+    )
     parser.add_argument("--servers", type=int, default=1,
                         help="Number of servers (passed to lb simulator)")
     parser.add_argument("--concurrency", type=int, default=1,
@@ -260,6 +279,8 @@ def main() -> None:
         clients=args.clients,
         lb_policy=args.lb_policy,
         lb_subset_size=args.lb_subset_size,
+        service_modes=args.service_modes,
+        service_mode_probs=args.service_mode_probs,
     )
     if not data["e2e"]:
         print("no completed tasks", file=sys.stderr)

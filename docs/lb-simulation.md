@@ -166,14 +166,16 @@ There is no preemption and no priority classes.
 
 ## Arrival rate and load
 
-Service time mean is fixed at 1 second (`SERVICE_MEAN` in `src/main.rs`). Inter-arrival time is derived from target utilization `--load` and total system capacity:
+For `exponential` and `constant` service distributions, the service time mean is fixed at 1 second (`SERVICE_MEAN` in `src/main.rs`). For `bimodal`, the mean is the mixture expected value `E[S] = p1·m1 + p2·m2` from `--service-modes` and `--service-mode-probs`.
+
+Inter-arrival time is derived from target utilization `--load`, service mean, and total system capacity:
 
 ```
 total_capacity = servers × concurrency
 arrival_mean = service_mean / (load × total_capacity)
 ```
 
-With service mean 1 s: `arrival_mean = 1 / (load × servers × concurrency)`.
+With the default exponential/constant service mean of 1 s: `arrival_mean = 1 / (load × servers × concurrency)`.
 
 With multiple clients (`--clients C`), each client runs an independent Poisson source at a slower rate so aggregate load is unchanged:
 
@@ -183,7 +185,19 @@ per_client_arrival_mean = arrival_mean × clients
 
 Total task count `--n` is split evenly across clients via `split_tasks()` (remainder goes to the first clients).
 
-Service duration is sampled per task as either exponential (default) or constant (`--service-dist`).
+Service duration is sampled per task as:
+
+- **exponential** (default): `Exp(mean = 1 s)`
+- **constant**: fixed 1 s
+- **bimodal**: pick mode `i` with probability `p_i`, then sample `Exp(mean = m_i)`
+
+Example bimodal run:
+
+```bash
+./target/release/lb --service-dist bimodal \
+  --service-modes 0.1,1.0 --service-mode-probs 0.9,0.1
+# E[S] = 0.19 s → faster arrivals than the default 1 s mean
+```
 
 ## Metrics
 

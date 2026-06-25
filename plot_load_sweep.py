@@ -86,6 +86,8 @@ def run_load_sweep(
     lb_policy: str = "power-of-two",
     lb_subset_size: int = 0,
     output_format: str = "human",
+    service_modes: list[float] | None = None,
+    service_mode_probs: list[float] | None = None,
 ) -> list[float]:
     probs: list[float] = []
     for load in tqdm(
@@ -103,6 +105,8 @@ def run_load_sweep(
             clients=clients,
             lb_policy=lb_policy,
             lb_subset_size=lb_subset_size,
+            service_modes=service_modes,
+            service_mode_probs=service_mode_probs,
         )
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)
@@ -166,8 +170,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--load-max", type=float, default=1.0)
     parser.add_argument("--load-step", type=float, default=0.1)
     parser.add_argument("--n", type=int, default=1_000_000)
-    parser.add_argument("--service-dist", choices=["exponential", "constant"],
+    parser.add_argument("--service-dist", choices=["exponential", "constant", "bimodal"],
                         default="exponential")
+    parser.add_argument(
+        "--service-modes", type=float, nargs=2, metavar=("M0", "M1"),
+        help="Exponential means for bimodal modes (required with --service-dist bimodal)",
+    )
+    parser.add_argument(
+        "--service-mode-probs", type=float, nargs=2, metavar=("P0", "P1"),
+        help="Mode selection probabilities (required with --service-dist bimodal)",
+    )
     parser.add_argument("--servers", type=int, default=1,
                         help="Number of servers (passed to lb simulator)")
     parser.add_argument("--concurrency", type=int, default=1,
@@ -206,6 +218,8 @@ def main() -> None:
             lb_policy=args.lb_policy,
             lb_subset_size=k,
             output_format=args.format,
+            service_modes=args.service_modes,
+            service_mode_probs=args.service_mode_probs,
         )
         series.append((k, probs))
 
