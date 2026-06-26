@@ -50,11 +50,13 @@ pub struct ApiStats {
     pub processing_time_ms: Vec<f64>,
     pub unloaded_latency_p99_ms: f64,
     pub slo_latency_ms: f64,
+    pub prob_latency_gt_slo: f64,
 }
 
 #[derive(Serialize)]
 pub struct MsStats {
     pub utilization_pct: HashMap<String, f64>,
+    pub replica_utilization_pct: HashMap<String, HashMap<usize, f64>>,
     pub by_api: HashMap<String, ApiStats>,
 }
 
@@ -234,6 +236,7 @@ fn new_api_stats() -> ApiStats {
         processing_time_ms: Vec::new(),
         unloaded_latency_p99_ms: 0.0,
         slo_latency_ms: 0.0,
+        prob_latency_gt_slo: 0.0,
     }
 }
 
@@ -241,11 +244,21 @@ fn finalize_api_stats(stats: &mut ApiStats) {
     let mut processing = stats.processing_time_ms.clone();
     processing.sort_by(f64::total_cmp);
     stats.unloaded_latency_p99_ms = percentile(&processing, 99.0);
+    stats.prob_latency_gt_slo = if stats.e2e_ms.is_empty() || stats.slo_latency_ms <= 0.0 {
+        0.0
+    } else {
+        let violations = stats
+            .e2e_ms
+            .iter()
+            .filter(|&&e2e| e2e > stats.slo_latency_ms)
+            .count();
+        violations as f64 / stats.e2e_ms.len() as f64
+    };
 }
 
 fn calculate_stats(
     completed: &mut EventQueueReader<CompletedRequest>,
-    busy_time: &HashMap<String, Duration>,
+    busy_time: &HashMap<String, HashMap<usize, Duration>>,
     graph: &CallGraph,
     load: &LoadSpec,
     observation: Duration,
@@ -268,26 +281,45 @@ fn calculate_stats(
         if stats.processing_time_ms.is_empty() {
             continue;
         }
-        finalize_api_stats(stats);
         if let Some(spec) = load.get(api) {
             stats.slo_latency_ms = spec.slo_ms;
         }
+        finalize_api_stats(stats);
     }
 
     let mut utilization_pct = HashMap::new();
+    let mut replica_utilization_pct = HashMap::new();
     let obs_secs = observation.as_secs_f64();
     if obs_secs > 0.0 {
         for service_id in &graph.service_order {
             if let Some(spec) = graph.services.get(service_id) {
-                let busy = busy_time.get(service_id).copied().unwrap_or(Duration::ZERO);
-                let pct = busy.as_secs_f64() / (obs_secs * f64::from(spec.cpu)) * 100.0;
+                let replica_busy = busy_time.get(service_id);
+                let total_busy: Duration = replica_busy
+                    .map(|m| m.values().copied().sum())
+                    .unwrap_or(Duration::ZERO);
+                let pct =
+                    total_busy.as_secs_f64() / (obs_secs * f64::from(spec.cpu)) * 100.0;
                 utilization_pct.insert(service_id.clone(), pct);
+
+                let concurrency = (spec.cpu / spec.replicas).max(1);
+                let mut by_replica = HashMap::new();
+                let n_replicas = spec.replicas as usize;
+                for i in 0..n_replicas {
+                    let busy = replica_busy
+                        .and_then(|m| m.get(&i).copied())
+                        .unwrap_or(Duration::ZERO);
+                    let replica_pct =
+                        busy.as_secs_f64() / (obs_secs * f64::from(concurrency)) * 100.0;
+                    by_replica.insert(i, replica_pct);
+                }
+                replica_utilization_pct.insert(service_id.clone(), by_replica);
             }
         }
     }
 
     Some(MsStats {
         utilization_pct,
+        replica_utilization_pct,
         by_api,
     })
 }
@@ -304,12 +336,18 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let load = load_spec_from_file(&args.load_file)?;
     graph.validate_load(&load)?;
 
-    let busy_time: Arc<Mutex<HashMap<String, Duration>>> = Arc::new(Mutex::new(HashMap::new()));
+    let busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     for service_id in &graph.service_order {
+        let n_replicas = graph.services[service_id].replicas as usize;
+        let mut by_replica = HashMap::new();
+        for i in 0..n_replicas {
+            by_replica.insert(i, Duration::ZERO);
+        }
         busy_time
             .lock()
             .unwrap()
-            .insert(service_id.clone(), Duration::ZERO);
+            .insert(service_id.clone(), by_replica);
     }
 
     let tracer = if args.trace {
@@ -593,12 +631,25 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
 pub fn print_human_stats(stats: &MsStats) {
     println!("utilization (%):");
-    for service_id in stats.utilization_pct.keys() {
+    let mut service_ids: Vec<_> = stats.utilization_pct.keys().cloned().collect();
+    service_ids.sort();
+    for service_id in service_ids {
         println!(
             "  {}: {:.2}",
             service_id,
-            stats.utilization_pct[service_id]
+            stats.utilization_pct[&service_id]
         );
+        if let Some(replicas) = stats.replica_utilization_pct.get(&service_id) {
+            let mut indices: Vec<_> = replicas.keys().copied().collect();
+            indices.sort_unstable();
+            for idx in indices {
+                println!(
+                    "    replica {}: {:.2}",
+                    idx,
+                    replicas[&idx]
+                );
+            }
+        }
     }
     for (api, api_stats) in &stats.by_api {
         println!("API {api}:");
@@ -607,6 +658,10 @@ pub fn print_human_stats(stats: &MsStats) {
             api_stats.unloaded_latency_p99_ms
         );
         println!("  SLO latency: {:.4} ms", api_stats.slo_latency_ms);
+        println!(
+            "  P(latency > SLO): {:.6}",
+            api_stats.prob_latency_gt_slo
+        );
         print_percentile_table("  e2e latency (ms):", &mut api_stats.e2e_ms.clone());
         print_percentile_table(
             "  processing time (ms):",
@@ -662,6 +717,99 @@ mod tests {
         .unwrap()
         .expect("stats");
         assert!(!stats.by_api.is_empty());
+
+        let graph = CallGraph::from_file(&root.join("tests/fanin/multi/callgraph.json")).unwrap();
+        for service_id in &graph.service_order {
+            let spec = &graph.services[service_id];
+            let replicas = stats
+                .replica_utilization_pct
+                .get(service_id)
+                .expect("replica utilization for service");
+            assert_eq!(replicas.len(), spec.replicas as usize);
+            for i in 0..spec.replicas as usize {
+                let pct = replicas[&i];
+                assert!(
+                    (0.0..=100.0).contains(&pct),
+                    "replica {i} of {service_id}: {pct}% out of range"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_replica_utilization_matches_overall() {
+        let args = client_server_args(7);
+        let stats = run(&args).unwrap().expect("stats");
+        let overall = stats.utilization_pct["server"];
+        let replica = stats.replica_utilization_pct["server"][&0];
+        assert!(
+            (overall - replica).abs() < 1e-9,
+            "single replica: overall={overall}, replica={replica}"
+        );
+    }
+
+    #[test]
+    fn replica_utilization_is_reproducible() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let args = MsArgs {
+            callgraph: root.join("tests/fanin/multi/callgraph.json"),
+            load_file: root.join("tests/fanin/multi/load.json"),
+            n: 1000,
+            lb_policy: LoadBalancePolicyKind::LeastRequest,
+            lb_subset_size: 0,
+            seed: Some(99),
+            format: OutputFormat::Json,
+            trace: false,
+            trace_limit: 5,
+        };
+        let first = run(&args).unwrap().expect("stats");
+        let second = run(&args).unwrap().expect("stats");
+        assert_eq!(first.utilization_pct, second.utilization_pct);
+        for service_id in first.replica_utilization_pct.keys() {
+            let mut first_vals: Vec<_> = first.replica_utilization_pct[service_id]
+                .values()
+                .copied()
+                .collect();
+            let mut second_vals: Vec<_> = second.replica_utilization_pct[service_id]
+                .values()
+                .copied()
+                .collect();
+            first_vals.sort_by(f64::total_cmp);
+            second_vals.sort_by(f64::total_cmp);
+            assert_eq!(first_vals, second_vals, "service {service_id}");
+        }
+    }
+
+    #[test]
+    fn prob_latency_gt_slo_computed_from_e2e() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stats = run(&MsArgs {
+            callgraph: root.join("tests/fanin/multi/callgraph.json"),
+            load_file: root.join("tests/fanin/multi/load.json"),
+            n: 1000,
+            lb_policy: LoadBalancePolicyKind::LeastRequest,
+            lb_subset_size: 0,
+            seed: Some(1),
+            format: OutputFormat::Json,
+            trace: false,
+            trace_limit: 5,
+        })
+        .unwrap()
+        .expect("stats");
+
+        for (api, api_stats) in &stats.by_api {
+            let expected = api_stats
+                .e2e_ms
+                .iter()
+                .filter(|&&e2e| e2e > api_stats.slo_latency_ms)
+                .count() as f64
+                / api_stats.e2e_ms.len() as f64;
+            assert!(
+                (api_stats.prob_latency_gt_slo - expected).abs() < 1e-12,
+                "api {api}"
+            );
+            assert!((0.0..=1.0).contains(&api_stats.prob_latency_gt_slo));
+        }
     }
 
     #[test]

@@ -219,6 +219,7 @@ Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a p
 |--------|------------|
 | **unloaded_latency_p99_ms** | p99 of that API's `processing_time_ms` samples |
 | **slo_latency_ms** | `slo_ms` from `load.json` for that API |
+| **prob_latency_gt_slo** | Fraction of requests with `e2e_ms > slo_latency_ms` |
 
 ### Per microservice
 
@@ -227,6 +228,14 @@ Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a p
 | **Utilization** | `busy_time[s] / (observation_time × cpu[s]) × 100` |
 
 `busy_time[s]` is the sum of all sampled local hop durations executed on any replica of service `s`. Visiting the same service twice in one request contributes twice.
+
+### Per replica
+
+| Metric | Definition |
+|--------|------------|
+| **Utilization** | `busy_time[s][r] / (observation_time × (cpu[s] / replicas[s])) × 100` |
+
+`busy_time[s][r]` is the sum of local hop durations executed on replica `r` of service `s`. Per-replica utilization uses that replica's concurrency slots (`cpu / replicas`) as capacity. When all replicas have equal capacity, the service-level overall utilization equals the average of per-replica utilizations.
 
 ## Validation against `lb`
 
@@ -317,15 +326,24 @@ Only the first `--trace-limit` user arrivals are traced. Keep this small when `-
     "backend2": 2.54,
     "shared": 7.46
   },
+  "replica_utilization_pct": {
+    "frontend": { "0": 2.50, "1": 1.54 },
+    "backend1": { "0": 10.2, "1": 9.1, "2": 8.9 },
+    "backend2": { "0": 2.80, "1": 2.28 },
+    "shared": { "0": 8.1, "1": 7.2, "2": 7.0, "3": 6.5 }
+  },
   "by_api": {
     "f1": {
       "e2e_ms": [4.2, 5.1],
       "processing_time_ms": [3.0, 4.1],
       "unloaded_latency_p99_ms": 11.6,
-      "slo_latency_ms": 58.0
+      "slo_latency_ms": 58.0,
+      "prob_latency_gt_slo": 0.012
     }
   }
 }
 ```
+
+Human output lists per-replica utilization indented under each microservice.
 
 To plot e2e latency CDFs from `plot_cdfs.py`, see [Plot microservice e2e CDF](../README.md#plot-microservice-e2e-cdf) in the README.

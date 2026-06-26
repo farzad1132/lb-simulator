@@ -25,7 +25,7 @@ pub struct ReplicaConfig {
     pub service_id: String,
     pub replica_idx: usize,
     pub max_concurrency: u32,
-    pub busy_time: Arc<Mutex<HashMap<String, Duration>>>,
+    pub busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
     pub balancer_outbound: Output<OutboundCall>,
     pub outbound_release: Output<OutboundRelease>,
     pub edge_releases: HashMap<String, Output<usize>>,
@@ -48,7 +48,7 @@ pub struct Replica {
     #[serde(skip)]
     queue: VecDeque<ReplicaWork>,
     #[serde(skip)]
-    busy_time: Arc<Mutex<HashMap<String, Duration>>>,
+    busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
     #[serde(skip)]
     balancer_outbound: Output<OutboundCall>,
     #[serde(skip)]
@@ -279,7 +279,11 @@ impl Replica {
     #[nexosim(schedulable)]
     async fn complete(&mut self, mut hop: Hop, cx: &Context<Self>) {
         if let Ok(mut busy) = self.busy_time.lock() {
-            *busy.entry(self.service_id.clone()).or_default() += hop.duration;
+            *busy
+                .entry(self.service_id.clone())
+                .or_default()
+                .entry(self.replica_idx)
+                .or_default() += hop.duration;
         }
         hop.processing_time += hop.duration;
         self.trace(

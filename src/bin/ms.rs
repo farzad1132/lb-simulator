@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OutputFormat::Json => {
             let output = stats.unwrap_or(MsStats {
                 utilization_pct: Default::default(),
+                replica_utilization_pct: Default::default(),
                 by_api: Default::default(),
             });
             let mut stdout = io::stdout().lock();
