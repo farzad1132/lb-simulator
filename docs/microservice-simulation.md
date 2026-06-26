@@ -290,6 +290,7 @@ cargo build --release
 | `--format` | `human` or `json` |
 | `--trace` | Emit a human-readable request-flow timeline on stderr |
 | `--trace-limit` | Number of user requests to trace (default `5`; only applies with `--trace`) |
+| `--scale` | Add this many cores and replicas to every microservice (default `0`) |
 
 ### Tracing
 

@@ -14,6 +14,7 @@ fn caller_queue_args(seed: u64, n: u32) -> MsArgs {
         format: OutputFormat::Json,
         trace: false,
         trace_limit: 5,
+        scale: 0,
     }
 }
 
@@ -51,6 +52,7 @@ fn f1_nested_callgraph_completes() {
         format: OutputFormat::Json,
         trace: false,
         trace_limit: 5,
+        scale: 0,
     })
     .unwrap()
     .expect("stats");

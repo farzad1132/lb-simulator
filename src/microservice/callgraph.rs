@@ -146,6 +146,21 @@ impl CallGraph {
         })
     }
 
+    pub fn apply_scale(&mut self, delta: u32) -> Result<(), String> {
+        if delta == 0 {
+            return Ok(());
+        }
+        for (id, spec) in &mut self.services {
+            spec.cpu = spec.cpu.checked_add(delta).ok_or_else(|| {
+                format!("node {id} cpu overflow after --scale {delta}")
+            })?;
+            spec.replicas = spec.replicas.checked_add(delta).ok_or_else(|| {
+                format!("node {id} replicas overflow after --scale {delta}")
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn validate_load(&self, load: &LoadSpec) -> Result<(), String> {
         for (api, spec) in load {
             if !self.entrypoints.contains_key(api) {
@@ -239,5 +254,19 @@ mod tests {
             graph.entrypoints.get("g1").map(String::as_str),
             Some("frontend:g1")
         );
+    }
+
+    #[test]
+    fn apply_scale_adds_cpu_and_replicas() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/multi/callgraph.json");
+        let mut graph = CallGraph::from_file(&path).unwrap();
+        graph.apply_scale(5).unwrap();
+        assert_eq!(graph.services["frontend"].cpu, 7);
+        assert_eq!(graph.services["frontend"].replicas, 7);
+        assert_eq!(graph.services["backend1"].cpu, 8);
+        assert_eq!(graph.services["backend1"].replicas, 8);
+        assert_eq!(graph.services["shared"].cpu, 9);
+        assert_eq!(graph.services["shared"].replicas, 9);
     }
 }

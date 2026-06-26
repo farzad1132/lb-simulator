@@ -42,6 +42,7 @@ pub struct MsArgs {
     pub format: OutputFormat,
     pub trace: bool,
     pub trace_limit: u32,
+    pub scale: u32,
 }
 
 #[derive(Serialize)]
@@ -332,7 +333,9 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
 }
 
 fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
-    let graph = Arc::new(CallGraph::from_file(&args.callgraph)?);
+    let mut graph = CallGraph::from_file(&args.callgraph)?;
+    graph.apply_scale(args.scale)?;
+    let graph = Arc::new(graph);
     let load = load_spec_from_file(&args.load_file)?;
     graph.validate_load(&load)?;
 
@@ -697,6 +700,7 @@ mod tests {
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
+            scale: 0,
         }
     }
 
@@ -713,6 +717,7 @@ mod tests {
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
+            scale: 0,
         })
         .unwrap()
         .expect("stats");
@@ -761,6 +766,7 @@ mod tests {
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
+            scale: 0,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -793,6 +799,7 @@ mod tests {
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
+            scale: 0,
         })
         .unwrap()
         .expect("stats");

@@ -24,6 +24,8 @@ struct Args {
     trace: bool,
     #[arg(long, default_value_t = 5)]
     trace_limit: u32,
+    #[arg(long, default_value_t = 0)]
+    scale: u32,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         format: cli.format,
         trace: cli.trace,
         trace_limit: cli.trace_limit,
+        scale: cli.scale,
     };
 
     let stats = run(&args)?;
@@ -77,5 +80,6 @@ mod tests {
             "tests/fanin/load.json",
         ]);
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::LeastRequest);
+        assert_eq!(cli.scale, 0);
     }
 }

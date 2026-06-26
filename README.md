@@ -96,6 +96,7 @@ cargo build --release
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
 | `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
 | `--format` | `human` | `human` or `json` |
+| `--scale` | `0` | Add this many cores and replicas to every microservice |
 
 JSON output includes per-microservice `utilization_pct`, per-replica `replica_utilization_pct`, and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms` computed from samples, `slo_latency_ms` from `load.json`, `prob_latency_gt_slo` as the fraction of requests exceeding the SLO).
 
