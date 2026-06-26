@@ -48,11 +48,12 @@ def report_run_stats(
     load: float,
     data: dict,
     prob_gt: float,
+    slo: float,
     output_format: str,
 ) -> None:
     summary = (
         f"k={lb_subset_size}  load={load:g}  P(latency>SLO)={prob_gt:.6f}  "
-        f"SLO={data['slo_latency']:.4f}s  "
+        f"SLO={slo:.4f}s  "
         f"utilization={data['utilization_pct']:.1f}%"
     )
     if output_format == "human":
@@ -67,17 +68,20 @@ def load_values(load_min: float, load_max: float, load_step: float) -> list[floa
     return [float(v) for v in values]
 
 
-def prob_latency_gt_slo(data: dict) -> float:
+def prob_latency_gt_slo(data: dict, slo: float) -> float:
+    if "prob_latency_gt_slo" in data:
+        return data["prob_latency_gt_slo"]
     samples = data["e2e"]
     if not samples:
         return 0.0
-    return 1.0 - ecdf_probability(samples, data["slo_latency"])
+    return 1.0 - ecdf_probability(samples, slo)
 
 
 def run_load_sweep(
     binary: Path,
     loads: list[float],
     *,
+    slo: float,
     n: int,
     service_dist: str,
     servers: int = 1,
@@ -107,17 +111,19 @@ def run_load_sweep(
             lb_subset_size=lb_subset_size,
             service_modes=service_modes,
             service_mode_probs=service_mode_probs,
+            slo=slo,
         )
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)
             sys.exit(1)
-        prob_gt = prob_latency_gt_slo(data)
+        prob_gt = prob_latency_gt_slo(data, slo)
         probs.append(prob_gt)
         report_run_stats(
             lb_subset_size=lb_subset_size,
             load=load,
             data=data,
             prob_gt=prob_gt,
+            slo=slo,
             output_format=output_format,
         )
     return probs
@@ -169,6 +175,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--load-min", type=float, default=0.1)
     parser.add_argument("--load-max", type=float, default=1.0)
     parser.add_argument("--load-step", type=float, default=0.1)
+    parser.add_argument("--slo", type=float, required=True,
+                        help="SLO latency threshold in seconds (passed to lb simulator)")
     parser.add_argument("--n", type=int, default=1_000_000)
     parser.add_argument("--service-dist", choices=["exponential", "constant", "bimodal"],
                         default="exponential")
@@ -210,6 +218,7 @@ def main() -> None:
         probs = run_load_sweep(
             binary,
             loads,
+            slo=args.slo,
             n=args.n,
             service_dist=args.service_dist,
             servers=args.servers,

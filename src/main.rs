@@ -19,7 +19,6 @@ use std::time::Duration;
 
 const MIN_DURATION_SECS: f32 = 1e-9;
 const SERVICE_MEAN: f32 = 1.0;
-const SLO_MULTIPLIER: f64 = 5.0;
 
 fn sample_exp(rng: &mut impl Rng, mean: f32) -> f32 {
     // u in (0, 1]; avoid ln(0) when the uniform draw is exactly 0.
@@ -190,7 +189,6 @@ fn compute_rates(args: &Args, service_mean: f32) -> Rates {
 struct ServiceStats {
     utilization_pct: f64,
     unloaded_latency_p99: f64,
-    slo_latency: f64,
     e2e: Vec<f64>,
     processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
@@ -204,10 +202,30 @@ struct RunOutput {
     per_client_arrival_rate: f64,
     utilization_pct: f64,
     unloaded_latency_p99: f64,
-    slo_latency: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slo_latency: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prob_latency_gt_slo: Option<f64>,
     e2e: Vec<f64>,
     processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
+}
+
+fn validate_slo(slo: Option<f64>) -> Result<Option<f64>, String> {
+    match slo {
+        None => Ok(None),
+        Some(s) if s <= 0.0 || !s.is_finite() => {
+            Err("--slo must be positive and finite".into())
+        }
+        Some(s) => Ok(Some(s)),
+    }
+}
+
+fn prob_latency_gt_slo(e2e: &[f64], slo: f64) -> f64 {
+    if e2e.is_empty() || slo <= 0.0 {
+        return 0.0;
+    }
+    e2e.iter().filter(|&&latency| latency > slo).count() as f64 / e2e.len() as f64
 }
 
 fn calculate_stats(
@@ -240,7 +258,6 @@ fn calculate_stats(
         return None;
     }
 
-    let slo_latency = SLO_MULTIPLIER * unloaded_latency_p99;
     let e2e: Vec<f64> = task_samples.iter().map(|(e2e, _)| *e2e).collect();
     let processing_times: Vec<f64> = task_samples.iter().map(|(_, duration)| *duration).collect();
     let queueing_delays: Vec<f64> = task_samples
@@ -257,7 +274,6 @@ fn calculate_stats(
     Some(ServiceStats {
         utilization_pct,
         unloaded_latency_p99,
-        slo_latency,
         e2e,
         processing_times,
         queueing_delays,
@@ -283,7 +299,7 @@ fn print_percentile_table(label: &str, values: &mut [f64]) {
     println!();
 }
 
-fn print_human_stats(stats: &ServiceStats, rates: &Rates) {
+fn print_human_stats(stats: &ServiceStats, rates: &Rates, slo: Option<f64>) {
     println!("total service rate: {:.4} tasks/s", rates.total_service_rate);
     println!(
         "per-server service rate: {:.4} tasks/s",
@@ -296,7 +312,12 @@ fn print_human_stats(stats: &ServiceStats, rates: &Rates) {
     );
     println!("utilization: {:.2}%", stats.utilization_pct);
     println!("unloaded latency (p99): {:.6}s", stats.unloaded_latency_p99);
-    println!("SLO latency: {:.6}s", stats.slo_latency);
+    if let Some(slo) = slo {
+        println!(
+            "P(latency > SLO): {:.6}",
+            prob_latency_gt_slo(&stats.e2e, slo)
+        );
+    }
     print_percentile_table("e2e latency (s):", &mut stats.e2e.clone());
     print_percentile_table("processing time (s):", &mut stats.processing_times.clone());
     print_percentile_table("queueing delay (s):", &mut stats.queueing_delays.clone());
@@ -333,6 +354,8 @@ struct Args {
     clients: u32,
     #[arg(long)]
     seed: Option<u64>,
+    #[arg(long)]
+    slo: Option<f64>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -435,7 +458,14 @@ fn run_simulation(
     Ok(calculate_stats(&mut output, observation, total_capacity))
 }
 
-fn run_output(stats: Option<ServiceStats>, rates: &Rates) -> RunOutput {
+fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> RunOutput {
+    let (slo_latency, prob_latency_gt_slo) = match (stats.as_ref(), slo) {
+        (Some(stats), Some(slo)) => (
+            Some(slo),
+            Some(prob_latency_gt_slo(&stats.e2e, slo)),
+        ),
+        _ => (None, None),
+    };
     match stats {
         Some(stats) => RunOutput {
             total_service_rate: rates.total_service_rate,
@@ -444,7 +474,8 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates) -> RunOutput {
             per_client_arrival_rate: rates.per_client_arrival_rate,
             utilization_pct: stats.utilization_pct,
             unloaded_latency_p99: stats.unloaded_latency_p99,
-            slo_latency: stats.slo_latency,
+            slo_latency,
+            prob_latency_gt_slo,
             e2e: stats.e2e,
             processing_times: stats.processing_times,
             queueing_delays: stats.queueing_delays,
@@ -456,7 +487,8 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates) -> RunOutput {
             per_client_arrival_rate: rates.per_client_arrival_rate,
             utilization_pct: 0.0,
             unloaded_latency_p99: 0.0,
-            slo_latency: 0.0,
+            slo_latency,
+            prob_latency_gt_slo,
             e2e: Vec::new(),
             processing_times: Vec::new(),
             queueing_delays: Vec::new(),
@@ -466,6 +498,7 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates) -> RunOutput {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let service_time = resolve_service_time(&args)?;
     let rates = compute_rates(&args, service_time.mean);
     rng::enter_run(args.seed);
@@ -475,11 +508,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.format {
         OutputFormat::Human => match stats {
-            Some(stats) => print_human_stats(&stats, &rates),
+            Some(stats) => print_human_stats(&stats, &rates, slo),
             None => println!("no completed tasks"),
         },
         OutputFormat::Json => {
-            let output = run_output(stats, &rates);
+            let output = run_output(stats, &rates, slo);
             let mut stdout = io::stdout().lock();
             serde_json::to_writer(&mut stdout, &output)?;
             stdout.write_all(b"\n")?;
@@ -589,5 +622,26 @@ mod tests {
             .count();
         let ratio = mode0_count as f32 / n as f32;
         assert!((ratio - 0.7).abs() < 0.02);
+    }
+
+    #[test]
+    fn prob_latency_gt_slo_empty_samples() {
+        assert_eq!(prob_latency_gt_slo(&[], 5.0), 0.0);
+    }
+
+    #[test]
+    fn prob_latency_gt_slo_all_below() {
+        assert_eq!(prob_latency_gt_slo(&[1.0, 2.0, 3.0], 5.0), 0.0);
+    }
+
+    #[test]
+    fn prob_latency_gt_slo_some_above() {
+        assert!((prob_latency_gt_slo(&[1.0, 6.0, 7.0, 2.0], 5.0) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn validate_slo_rejects_non_positive() {
+        assert!(validate_slo(Some(0.0)).is_err());
+        assert!(validate_slo(Some(-1.0)).is_err());
     }
 }

@@ -207,9 +207,10 @@ After the simulation completes, `calculate_stats()` reads all completed tasks fr
 |--------|------------|
 | **utilization_pct** | `sum(task.duration) / (observation_time × total_capacity) × 100` |
 | **unloaded_latency_p99** | 99th percentile of sampled service durations |
-| **slo_latency** | `5 × unloaded_latency_p99` |
 | **e2e** | `finish - start` per task (seconds) |
 | **queueing_delays** | `(finish - start) - duration` per task (seconds) |
+
+When `--slo` is provided (latency threshold in seconds), the simulator also reports **prob_latency_gt_slo** — the fraction of requests with `e2e > slo`. In human output this appears as `P(latency > SLO)`. Without `--slo`, no SLO fields are emitted.
 
 Output format is controlled by `--format human` (percentile tables) or `--format json`.
 

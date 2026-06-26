@@ -31,9 +31,10 @@ Each load balancer can be restricted to a random subset of servers via `--lb-sub
 For each completed task, let `p99(duration)` be the 99th percentile of all sampled service durations in the run:
 
 - **Unloaded latency baseline:** `p99(duration)` (reported as `unloaded_latency_p99`)
-- **SLO latency:** `5 × p99(duration)` (reported as `slo_latency`)
 - **E2e latency:** `finish - start` in seconds (reported as `e2e`)
 - **Queueing delay:** `(finish - start) - duration` in seconds (reported as `queueing_delays`)
+
+When `--slo` is set (latency threshold in seconds), the simulator also reports **P(latency > SLO)** in human output and includes `slo_latency` and `prob_latency_gt_slo` in JSON output. Without `--slo`, no SLO metrics are emitted.
 
 The simulator also reports **utilization** as total service time divided by observation time and total system capacity (`servers × concurrency`).
 
@@ -142,25 +143,29 @@ Options:
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
+| `--slo` | (none) | SLO latency threshold in seconds; when set, reports P(latency > SLO) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
 
 With default `--servers 1 --concurrency 1`, behavior matches the original single-server simulator.
 
-JSON output shape:
+JSON output shape (with `--slo 5.0`):
 
 ```json
 {
   "utilization_pct": 80.0,
   "unloaded_latency_p99": 4.61,
-  "slo_latency": 23.05,
+  "slo_latency": 5.0,
+  "prob_latency_gt_slo": 0.012,
   "e2e": [1.2, 1.5, ...],
   "queueing_delays": [0.2, 0.5, ...]
 }
 ```
 
+Without `--slo`, `slo_latency` and `prob_latency_gt_slo` are omitted from JSON.
+
 ## Plot e2e CDF
 
-`plot_cdfs.py` builds the release binary once, runs the simulator, and writes an e2e latency CDF to `output/e2e_cdf.pdf`. The x-axis uses a log scale. The SLO latency (`5 × unloaded p99`) is marked on the plot automatically.
+`plot_cdfs.py` builds the release binary once, runs the simulator, and writes an e2e latency CDF to `output/e2e_cdf.pdf`. The x-axis uses a log scale. Pass `--slo` to mark the SLO threshold on the plot.
 
 ```bash
 python plot_cdfs.py --n 100000
@@ -179,6 +184,7 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--seed` | (none) | RNG seed for reproducible simulation |
+| `--slo` | (none) | SLO latency threshold in seconds (marked on CDF when set) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
 | `--mark` | (none) | Additional latency threshold(s) in seconds to annotate with P(latency ≤ x) on the plot |
 
@@ -256,10 +262,10 @@ Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms,
 
 ## Plot SLO violation probability vs load
 
-`plot_load_sweep.py` runs the simulator at each load point (default 0.1, 0.2, …, 1.0), computes P(latency > SLO) using each run's own `slo_latency`, and writes a line plot to `output/slo_violation.pdf`. A progress bar shows sweep status on stderr.
+`plot_load_sweep.py` runs the simulator at each load point (default 0.1, 0.2, …, 1.0), computes P(latency > SLO) at the given `--slo`, and writes a line plot to `output/slo_violation.pdf`. A progress bar shows sweep status on stderr.
 
 ```bash
-python plot_load_sweep.py --n 100000
+python plot_load_sweep.py --slo 5.0 --n 100000
 ```
 
 | Flag | Default | Description |
@@ -267,6 +273,7 @@ python plot_load_sweep.py --n 100000
 | `--output` | `output/slo_violation.pdf` | Output PDF path |
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `1.0` / `0.1` | Load sweep range |
+| `--slo` | (required) | SLO latency threshold in seconds |
 | `--n` | `1000000` | Tasks per load point |
 | `--service-dist` | `exponential` | Service distribution (`exponential`, `constant`, or `bimodal`) |
 | `--service-modes` | (none) | Two exponential means for bimodal |
@@ -283,6 +290,7 @@ Example comparing subset sizes:
 
 ```bash
 python plot_load_sweep.py \
+  --slo 5.0 \
   --servers 10 \
   --lb-subset-size 0 2 4 8 \
   --n 100000 \
@@ -294,6 +302,7 @@ Example:
 
 ```bash
 python plot_load_sweep.py \
+  --slo 5.0 \
   --n 100000 \
   --comment random_lb \
   --load-min 0.1 \
@@ -306,6 +315,7 @@ Another example with an explicit output path:
 
 ```bash
 python plot_load_sweep.py \
+  --slo 5.0 \
   --n 100000 \
   --load-min 0.1 \
   --load-max 1.0 \

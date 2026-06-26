@@ -25,7 +25,7 @@ DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_MS_BINARY = REPO_ROOT / "target" / "release" / "ms"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "e2e_cdf.pdf"
 DEFAULT_MS_OUTPUT = REPO_ROOT / "output" / "e2e_cdf_ms.pdf"
-LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e", "slo_latency")
+LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e")
 MS_REQUIRED_JSON_KEYS = ("utilization_pct", "by_api")
 MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms")
 SERVICE_MEAN = 1.0
@@ -36,7 +36,7 @@ SIMULATORS = ("lb", "ms")
 @dataclass
 class CdfPanel:
     e2e: list[float]
-    slo_latency: float
+    slo_latency: Optional[float]
     title: str
 
 
@@ -227,6 +227,7 @@ def run_simulation(
     service_modes: list[float] | None = None,
     service_mode_probs: list[float] | None = None,
     seed: int | None = None,
+    slo: float | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -255,6 +256,8 @@ def run_simulation(
         cmd.extend(["--service-modes", ",".join(str(m) for m in service_modes)])
     if service_mode_probs is not None:
         cmd.extend(["--service-mode-probs", ",".join(str(p) for p in service_mode_probs)])
+    if slo is not None:
+        cmd.extend(["--slo", str(slo)])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
@@ -353,7 +356,9 @@ def plot_e2e_cdf_panels(
         row = idx if n > 1 else 0
         col = 0
         ax = grid.get_ax(row, col)
-        thresholds = [panel.slo_latency]
+        thresholds: list[float] = []
+        if panel.slo_latency is not None:
+            thresholds.append(panel.slo_latency)
         if marks:
             thresholds.extend(marks)
         plot_cdf(
@@ -383,10 +388,12 @@ def plot_e2e_cdf(
     output_path: Path,
     *,
     load: float,
+    slo: Optional[float] = None,
     marks: Optional[list[float]] = None,
 ) -> None:
+    slo_latency = data.get("slo_latency", slo)
     plot_e2e_cdf_panels(
-        [CdfPanel(data["e2e"], data["slo_latency"], f"load = {load:g}")],
+        [CdfPanel(data["e2e"], slo_latency, f"load = {load:g}")],
         output_path,
         xlabel="E2E latency (s)",
         marks=marks,
@@ -414,6 +421,8 @@ def validate_lb_args(args: argparse.Namespace) -> None:
         raise SystemExit("--load-file is only valid with --simulator ms")
     if args.api is not None:
         raise SystemExit("--api is only valid with --simulator ms")
+    if args.slo is not None:
+        raise SystemExit("--slo is only valid with --simulator lb")
 
 
 def validate_ms_args(args: argparse.Namespace) -> None:
@@ -486,6 +495,10 @@ def parse_args() -> argparse.Namespace:
         help="Additional latency threshold(s) to annotate on the CDF "
              "(seconds for lb, ms for ms; e.g. --mark 10 --mark 30)",
     )
+    parser.add_argument(
+        "--slo", type=float, default=None,
+        help="SLO latency threshold in seconds (lb mode only; marked on CDF when set)",
+    )
     return parser.parse_args()
 
 
@@ -510,6 +523,7 @@ def main() -> None:
             service_modes=args.service_modes,
             service_mode_probs=args.service_mode_probs,
             seed=args.seed,
+            slo=args.slo,
         )
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)
@@ -518,6 +532,7 @@ def main() -> None:
             data,
             output_path,
             load=args.load,
+            slo=args.slo,
             marks=args.mark,
         )
         print(
