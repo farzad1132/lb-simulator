@@ -21,7 +21,7 @@
                 }
             ],
             "cpu": 2,
-            "replicas": 1
+            "replicas": 2
         },
         {
             "id": "backend1",

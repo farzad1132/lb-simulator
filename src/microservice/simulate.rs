@@ -1,21 +1,24 @@
 use clap::ValueEnum;
+use nexosim::model::{Context, Model};
 use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
-use rand::seq::SliceRandom;
-use serde::Serialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::policy::LoadBalancePolicyKind;
-use super::balancer::Balancer;
+use crate::rng;
+use super::balancer::{EdgeBalancer, ReplicaBalancer};
 use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
 use super::hop::{
-    CompletedRequest, Hop, HopDispatcher, HopDispatcherMsg, HopForward, sample_exp,
+    CompletedRequest, Hop, OutboundCall, ReplicaInput, sample_exp,
+    service_for_endpoint,
 };
-use super::replica::Replica;
+use super::replica::{Replica, ReplicaConfig};
+use super::trace::MsTracer;
 
 const HUMAN_PERCENTILES: [f64; 12] = [
     1.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 99.0, 100.0,
@@ -35,7 +38,10 @@ pub struct MsArgs {
     pub n: u32,
     pub lb_policy: LoadBalancePolicyKind,
     pub lb_subset_size: u32,
+    pub seed: Option<u64>,
     pub format: OutputFormat,
+    pub trace: bool,
+    pub trace_limit: u32,
 }
 
 #[derive(Serialize)]
@@ -50,6 +56,75 @@ pub struct ApiStats {
 pub struct MsStats {
     pub utilization_pct: HashMap<String, f64>,
     pub by_api: HashMap<String, ApiStats>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct UserArrival {
+    #[serde(skip)]
+    graph: Arc<CallGraph>,
+    #[serde(skip)]
+    edge_balancers: HashMap<String, Output<Hop>>,
+    #[serde(skip)]
+    tracer: Option<Arc<MsTracer>>,
+}
+
+impl UserArrival {
+    fn new(
+        graph: Arc<CallGraph>,
+        edge_balancers: HashMap<String, Output<Hop>>,
+        tracer: Option<Arc<MsTracer>>,
+    ) -> Self {
+        Self {
+            graph,
+            edge_balancers,
+            tracer,
+        }
+    }
+}
+
+#[Model]
+impl UserArrival {
+    async fn inject(&mut self, api: String, cx: &Context<Self>) {
+        let endpoint = match self.graph.entrypoints.get(&api) {
+            Some(e) => e.clone(),
+            None => {
+                eprintln!("arrival: unknown api {}", api);
+                return;
+            }
+        };
+        let output = match self.edge_balancers.get_mut(&api) {
+            Some(o) => o,
+            None => {
+                eprintln!("arrival: no edge balancer for api {}", api);
+                return;
+            }
+        };
+        let (request_id, trace) = match &self.tracer {
+            Some(tracer) => tracer.next_request_id(),
+            None => (0, false),
+        };
+        let hop = Hop {
+            request_id,
+            trace,
+            api,
+            endpoint: endpoint.clone(),
+            sibling_index: 0,
+            start: cx.time(),
+            duration: Duration::ZERO,
+            processing_time: Duration::ZERO,
+            caller: None,
+            outbound_release: None,
+        };
+        if let Some(tracer) = &self.tracer {
+            tracer.log(
+                trace,
+                cx.time(),
+                request_id,
+                &format!("UserArrival api={} entry={endpoint}", hop.api),
+            );
+        }
+        output.send(hop).await;
+    }
 }
 
 fn percentile(sorted: &[f64], pct: f64) -> f64 {
@@ -67,7 +142,8 @@ fn split_by_rps(n: u32, load: &LoadSpec) -> HashMap<String, u32> {
     }
     let mut counts = HashMap::new();
     let mut assigned = 0u32;
-    let apis: Vec<_> = load.keys().cloned().collect();
+    let mut apis: Vec<_> = load.keys().cloned().collect();
+    apis.sort();
     for (i, api) in apis.iter().enumerate() {
         let rps = load[api].rps;
         let count = if i + 1 == apis.len() {
@@ -88,14 +164,49 @@ fn random_replica_subset(n_replicas: usize, subset_size: u32) -> Vec<usize> {
         (subset_size as usize).min(n_replicas).max(1)
     };
     let mut indices: Vec<usize> = (0..n_replicas).collect();
-    indices.shuffle(&mut rand::rng());
+    rng::shuffle(&mut indices);
     indices.truncate(k);
     indices
 }
 
+fn new_bench(seed: Option<u64>) -> SimInit {
+    if seed.is_some() {
+        SimInit::with_num_threads(1)
+    } else {
+        SimInit::new()
+    }
+}
+
+fn downstream_targets(graph: &CallGraph, service_id: &str) -> HashSet<String> {
+    let mut targets = HashSet::new();
+    for (endpoint, owner) in &graph.endpoint_service {
+        if owner != service_id {
+            continue;
+        }
+        if let Some(edges) = graph.children.get(endpoint) {
+            for (target, _) in edges {
+                if let Some(downstream) = graph.endpoint_service.get(target) {
+                    targets.insert(downstream.clone());
+                }
+            }
+        }
+    }
+    targets
+}
+
+fn entry_services_by_api(graph: &CallGraph) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (api, endpoint) in &graph.entrypoints {
+        if let Ok(service) = service_for_endpoint(graph, endpoint) {
+            map.insert(api.clone(), service);
+        }
+    }
+    map
+}
+
 fn poisson_arrivals(
     sim: &Simulation,
-    input: &EventId<HopDispatcherMsg>,
+    input: &EventId<String>,
     api: String,
     rps: f64,
     n: u32,
@@ -105,17 +216,15 @@ fn poisson_arrivals(
     }
     let arrival_mean = 1.0 / rps as f32;
     let scheduler = sim.scheduler();
-    let mut rng = rand::rng();
     let mut offset = Duration::ZERO;
 
-    for _ in 0..n {
-        offset += Duration::from_secs_f32(sample_exp(&mut rng, arrival_mean));
-        scheduler.schedule_event(
-            offset,
-            input,
-            HopDispatcherMsg::Arrival(api.clone()),
-        )?;
-    }
+    rng::with_rng(|rng| {
+        for _ in 0..n {
+            offset += Duration::from_secs_f32(sample_exp(rng, arrival_mean));
+            scheduler.schedule_event(offset, input, api.clone())?;
+        }
+        Ok::<(), SchedulingError>(())
+    })?;
     Ok(())
 }
 
@@ -184,6 +293,13 @@ fn calculate_stats(
 }
 
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
+    rng::enter_run(args.seed);
+    let result = run_inner(args);
+    rng::exit_run();
+    result
+}
+
+fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     let graph = Arc::new(CallGraph::from_file(&args.callgraph)?);
     let load = load_spec_from_file(&args.load_file)?;
     graph.validate_load(&load)?;
@@ -196,69 +312,270 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
             .insert(service_id.clone(), Duration::ZERO);
     }
 
-    let mut bench = SimInit::new();
+    let tracer = if args.trace {
+        Some(MsTracer::new(args.trace_limit))
+    } else {
+        None
+    };
+
+    let entry_services = entry_services_by_api(graph.as_ref());
+    let service_replica_counts: HashMap<String, u32> = graph
+        .services
+        .iter()
+        .map(|(id, spec)| (id.clone(), spec.replicas))
+        .collect();
+
+    let mut bench = new_bench(args.seed);
     let (sink, mut completed) = event_queue(SinkState::Enabled);
 
-    let mut service_outputs: HashMap<String, Output<Hop>> = HashMap::new();
-    let dispatcher_mb = Mailbox::<HopDispatcher>::new();
-    let forward_mb = Mailbox::<HopForward>::new();
+    let mut replica_mailboxes: HashMap<(String, usize), Mailbox<Replica>> = HashMap::new();
+    for service_id in &graph.service_order {
+        let n_replicas = graph.services[service_id].replicas as usize;
+        for i in 0..n_replicas {
+            replica_mailboxes.insert((service_id.clone(), i), Mailbox::new());
+        }
+    }
+
+    let mut downstream_indices_by_service: HashMap<String, HashMap<String, Vec<usize>>> =
+        HashMap::new();
+    for service_id in &graph.service_order {
+        let mut downstream_indices = HashMap::new();
+        for target in downstream_targets(&graph, service_id) {
+            let target_replicas = graph.services[&target].replicas as usize;
+            downstream_indices.insert(
+                target.clone(),
+                random_replica_subset(target_replicas, args.lb_subset_size),
+            );
+        }
+        downstream_indices_by_service.insert(service_id.clone(), downstream_indices);
+    }
+
+    struct PendingEdgeBalancer {
+        balancer: EdgeBalancer,
+        mailbox: Mailbox<EdgeBalancer>,
+        api: String,
+        entry_service: String,
+        replica_indices: Vec<usize>,
+    }
+
+    struct PendingReplicaBalancer {
+        balancer: ReplicaBalancer,
+        mailbox: Mailbox<ReplicaBalancer>,
+        service_id: String,
+        replica_idx: usize,
+        downstream_indices: HashMap<String, Vec<usize>>,
+    }
+
+    let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
+    let mut edge_balancer_inputs: HashMap<String, Output<Hop>> = HashMap::new();
+    let mut edge_balancer_addresses: HashMap<String, nexosim::simulation::Address<EdgeBalancer>> =
+        HashMap::new();
+
+    for (api, entry_endpoint) in &graph.entrypoints {
+        let entry_service = service_for_endpoint(graph.as_ref(), entry_endpoint)?;
+        let n_replicas = graph.services[&entry_service].replicas as usize;
+        let replica_indices = random_replica_subset(n_replicas, args.lb_subset_size);
+
+        let balancer = EdgeBalancer::new(
+            args.lb_policy.build(),
+            api.clone(),
+            n_replicas,
+            replica_indices.clone(),
+            tracer.clone(),
+        );
+        let mailbox = Mailbox::new();
+        let address = mailbox.address();
+
+        let mut input = Output::default();
+        input.connect(EdgeBalancer::input, &mailbox);
+        edge_balancer_inputs.insert(api.clone(), input);
+        edge_balancer_addresses.insert(api.clone(), address.clone());
+
+        pending_edge_balancers.push(PendingEdgeBalancer {
+            balancer,
+            mailbox,
+            api: api.clone(),
+            entry_service,
+            replica_indices,
+        });
+    }
+
+    for pending in &mut pending_edge_balancers {
+        for &replica_idx in &pending.replica_indices {
+            if let Some(mb) = replica_mailboxes.get(&(pending.entry_service.clone(), replica_idx)) {
+                pending.balancer.outputs[replica_idx]
+                    .connect(Replica::input, mb);
+            }
+        }
+    }
+
+    let mut pending_replica_balancers: Vec<PendingReplicaBalancer> = Vec::new();
+    let mut replica_balancer_outbound: HashMap<(String, usize), Output<OutboundCall>> =
+        HashMap::new();
+    let mut replica_balancer_addresses: HashMap<
+        (String, usize),
+        nexosim::simulation::Address<ReplicaBalancer>,
+    > = HashMap::new();
+
+    for service_id in &graph.service_order {
+        let downstream_indices = downstream_indices_by_service
+            .get(service_id)
+            .cloned()
+            .unwrap_or_default();
+        let n_replicas = graph.services[service_id].replicas as usize;
+
+        for replica_idx in 0..n_replicas {
+            let balancer = ReplicaBalancer::new(
+                args.lb_policy.build(),
+                service_id.clone(),
+                replica_idx,
+                downstream_indices.clone(),
+                &service_replica_counts,
+                tracer.clone(),
+            );
+            let mailbox = Mailbox::new();
+            let address = mailbox.address();
+
+            let mut outbound = Output::default();
+            outbound.connect(ReplicaBalancer::outbound, &mailbox);
+            replica_balancer_outbound.insert((service_id.clone(), replica_idx), outbound);
+            replica_balancer_addresses.insert((service_id.clone(), replica_idx), address.clone());
+
+            pending_replica_balancers.push(PendingReplicaBalancer {
+                balancer,
+                mailbox,
+                service_id: service_id.clone(),
+                replica_idx,
+                downstream_indices: downstream_indices.clone(),
+            });
+        }
+    }
+
+    for pending in &mut pending_replica_balancers {
+        for (target_service, indices) in &pending.downstream_indices {
+            let n_target = graph.services[target_service].replicas as usize;
+            let outputs = pending
+                .balancer
+                .downstream_outputs
+                .get_mut(target_service)
+                .unwrap_or_else(|| panic!("missing downstream outputs for {target_service}"));
+            if outputs.len() != n_target {
+                *outputs = (0..n_target).map(|_| Output::default()).collect();
+            }
+            for &replica_idx in indices {
+                if let Some(mb) = replica_mailboxes.get(&(target_service.clone(), replica_idx)) {
+                    outputs[replica_idx].connect(Replica::input, mb);
+                }
+            }
+        }
+    }
+
+    let mut return_outputs: HashMap<(String, usize), Output<ReplicaInput>> = HashMap::new();
+    for (key, mb) in &replica_mailboxes {
+        let mut output = Output::default();
+        output.connect(Replica::input, mb);
+        return_outputs.insert(key.clone(), output);
+    }
+
+    let mut completed_output = Output::default();
+    completed_output.connect_sink(sink);
+
+    let apis_by_entry_service: HashMap<String, Vec<String>> = {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (api, service) in &entry_services {
+            map.entry(service.clone()).or_default().push(api.clone());
+        }
+        for apis in map.values_mut() {
+            apis.sort();
+        }
+        map
+    };
+
+    for pending in pending_edge_balancers {
+        bench = bench.add_model(
+            pending.balancer,
+            pending.mailbox,
+            &format!("edge-balancer-{}", pending.api),
+        );
+    }
+
+    for pending in pending_replica_balancers {
+        bench = bench.add_model(
+            pending.balancer,
+            pending.mailbox,
+            &format!(
+                "replica-balancer-{}-{}",
+                pending.service_id, pending.replica_idx
+            ),
+        );
+    }
 
     for service_id in &graph.service_order {
         let spec = &graph.services[service_id];
         let n_replicas = spec.replicas as usize;
         let concurrency = (spec.cpu / spec.replicas).max(1);
 
-        let replica_mailboxes: Vec<_> = (0..n_replicas).map(|_| Mailbox::new()).collect();
+        for i in 0..n_replicas {
+            let mb = replica_mailboxes
+                .remove(&(service_id.clone(), i))
+                .expect("replica mailbox");
+            let outbound = replica_balancer_outbound
+                .get(&(service_id.clone(), i))
+                .cloned()
+                .expect("replica balancer outbound");
+            let rb_address = replica_balancer_addresses
+                .get(&(service_id.clone(), i))
+                .expect("replica balancer address");
 
-        let replica_indices = random_replica_subset(n_replicas, args.lb_subset_size);
-        let mut balancer = Balancer::new(
-            args.lb_policy.build(),
-            n_replicas,
-            replica_indices,
-        );
+            let mut edge_releases = HashMap::new();
+            if let Some(apis) = apis_by_entry_service.get(service_id) {
+                for api in apis {
+                    let edge_address = edge_balancer_addresses
+                        .get(api)
+                        .expect("edge balancer address");
+                    let mut release = Output::default();
+                    release.connect(EdgeBalancer::release, edge_address);
+                    edge_releases.insert(api.clone(), release);
+                }
+            }
 
-        let balancer_mb = Mailbox::new();
-        let balancer_address = balancer_mb.address();
-        let mut to_balancer = Output::default();
-        to_balancer.connect(Balancer::input, &balancer_mb);
-        service_outputs.insert(service_id.clone(), to_balancer);
+            let mut outbound_release = Output::default();
+            outbound_release.connect(ReplicaBalancer::release_outbound, rb_address);
 
-        for (i, mb) in replica_mailboxes.iter().enumerate() {
-            balancer.outputs[i].connect(Replica::input, mb);
-        }
-        bench = bench.add_model(balancer, balancer_mb, service_id);
-
-        for (i, mb) in replica_mailboxes.into_iter().enumerate() {
-            let mut replica = Replica::new(concurrency, i);
-            replica.output.connect(HopForward::input, &forward_mb);
-            replica.release.connect(Balancer::release, &balancer_address);
+            let replica = Replica::new(ReplicaConfig {
+                graph: graph.clone(),
+                service_id: service_id.clone(),
+                replica_idx: i,
+                max_concurrency: concurrency,
+                busy_time: busy_time.clone(),
+                balancer_outbound: outbound,
+                outbound_release,
+                edge_releases,
+                return_outputs: return_outputs.clone(),
+                completed: completed_output.clone(),
+                tracer: tracer.clone(),
+            });
             bench = bench.add_model(replica, mb, &format!("{service_id}-replica-{i}"));
         }
     }
 
-    let mut forwarder = HopForward {
-        output: Output::default(),
-    };
-    forwarder
-        .output
-        .connect(HopDispatcher::input, &dispatcher_mb);
-    bench = bench.add_model(forwarder, forward_mb, "hop-forward");
-
+    let arrival = UserArrival::new(graph.clone(), edge_balancer_inputs, tracer);
+    let arrival_mb = Mailbox::new();
     let arrival_input = EventSource::new()
-        .connect(HopDispatcher::input, &dispatcher_mb)
+        .connect(UserArrival::inject, &arrival_mb)
         .register(&mut bench);
-
-    let mut dispatcher = HopDispatcher::new(graph.clone(), service_outputs, busy_time.clone());
-    dispatcher.completed.connect_sink(sink);
-    bench = bench.add_model(dispatcher, dispatcher_mb, "hop-dispatcher");
+    bench = bench.add_model(arrival, arrival_mb, "user-arrival");
 
     let t0 = MonotonicTime::EPOCH;
     let mut simu = bench.init(t0)?;
 
     let counts = split_by_rps(args.n, &load);
-    for (api, count) in &counts {
-        let rps = load[api].rps;
-        poisson_arrivals(&simu, &arrival_input, api.clone(), rps, *count)?;
+    let mut apis: Vec<_> = counts.keys().cloned().collect();
+    apis.sort();
+    for api in apis {
+        let count = counts[&api];
+        let rps = load[&api].rps;
+        poisson_arrivals(&simu, &arrival_input, api, rps, count)?;
     }
 
     simu.run()?;
@@ -306,4 +623,55 @@ fn print_percentile_table(label: &str, values: &mut [f64]) {
         print!("p{pct:.0}: {:>8.4}  ", percentile(values, pct));
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn client_server_args(seed: u64) -> MsArgs {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        MsArgs {
+            callgraph: root.join("tests/client_server/single_replica/callgraph.json"),
+            load_file: root.join("tests/client_server/single_replica/load.json"),
+            n: 5_000,
+            lb_policy: LoadBalancePolicyKind::LeastRequest,
+            lb_subset_size: 0,
+            seed: Some(seed),
+            format: OutputFormat::Json,
+            trace: false,
+            trace_limit: 5,
+        }
+    }
+
+    #[test]
+    fn fanin_multi_replica_seed_1() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stats = run(&MsArgs {
+            callgraph: root.join("tests/fanin/multi/callgraph.json"),
+            load_file: root.join("tests/fanin/multi/load.json"),
+            n: 1000,
+            lb_policy: LoadBalancePolicyKind::LeastRequest,
+            lb_subset_size: 0,
+            seed: Some(1),
+            format: OutputFormat::Json,
+            trace: false,
+            trace_limit: 5,
+        })
+        .unwrap()
+        .expect("stats");
+        assert!(!stats.by_api.is_empty());
+    }
+
+    #[test]
+    fn same_seed_is_reproducible() {
+        let args = client_server_args(42);
+        let first = run(&args).unwrap().expect("stats");
+        let second = run(&args).unwrap().expect("stats");
+        assert_eq!(
+            first.by_api["handle"].e2e_ms,
+            second.by_api["handle"].e2e_ms
+        );
+    }
 }

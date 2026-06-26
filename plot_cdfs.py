@@ -226,6 +226,7 @@ def run_simulation(
     lb_subset_size: int = 0,
     service_modes: list[float] | None = None,
     service_mode_probs: list[float] | None = None,
+    seed: int | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -248,6 +249,8 @@ def run_simulation(
         "--lb-subset-size",
         str(lb_subset_size),
     ]
+    if seed is not None:
+        cmd.extend(["--seed", str(seed)])
     if service_modes is not None:
         cmd.extend(["--service-modes", ",".join(str(m) for m in service_modes)])
     if service_mode_probs is not None:
@@ -266,6 +269,7 @@ def run_ms_simulation(
     n: int,
     lb_policy: str = "least-request",
     lb_subset_size: int = 0,
+    seed: int | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -282,6 +286,8 @@ def run_ms_simulation(
         "--lb-subset-size",
         str(lb_subset_size),
     ]
+    if seed is not None:
+        cmd.extend(["--seed", str(seed)])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
@@ -401,6 +407,7 @@ def resolve_lb_policy(simulator: str, lb_policy: str | None) -> str:
     return "least-request" if simulator == "ms" else "power-of-two"
 
 
+def validate_lb_args(args: argparse.Namespace) -> None:
     if args.callgraph is not None:
         raise SystemExit("--callgraph is only valid with --simulator ms")
     if args.load_file is not None:
@@ -472,6 +479,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lb-subset-size", type=int, default=0,
                         help="Replicas each LB can route to (0 = all; passed to lb/ms simulator)")
     parser.add_argument(
+        "--seed", type=int, default=None,
+        help="RNG seed for reproducible simulation (passed to lb/ms simulator)",
+    )
+    parser.add_argument(
         "--mark", type=float, action="append", default=None,
         help="Additional latency threshold(s) to annotate on the CDF "
              "(seconds for lb, ms for ms; e.g. --mark 10 --mark 30)",
@@ -499,6 +510,7 @@ def main() -> None:
             lb_subset_size=args.lb_subset_size,
             service_modes=args.service_modes,
             service_mode_probs=args.service_mode_probs,
+            seed=args.seed,
         )
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)
@@ -524,6 +536,7 @@ def main() -> None:
         n=args.n,
         lb_policy=lb_policy,
         lb_subset_size=args.lb_subset_size,
+        seed=args.seed,
     )
     panels = select_ms_panels(data, api=args.api, load_file=args.load_file)
     for panel in panels:

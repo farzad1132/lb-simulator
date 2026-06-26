@@ -1,0 +1,25 @@
+{
+    "nodes": [
+        { "id": "USER", "interfaces": [{ "name": "USER" }] },
+        {
+            "id": "frontend",
+            "interfaces": [
+                { "name": "g1", "avg_rt": 0.01 }
+            ],
+            "cpu": 1,
+            "replicas": 1
+        },
+        {
+            "id": "backend1",
+            "interfaces": [
+                { "name": "f3", "avg_rt": 5.0 }
+            ],
+            "cpu": 4,
+            "replicas": 1
+        }
+    ],
+    "edges": [
+        { "source": "USER", "target": "frontend:g1" },
+        { "source": "frontend:g1", "target": "backend1:f3", "api": "g1" }
+    ]
+}

@@ -1,6 +1,6 @@
 use clap::ValueEnum;
-use rand::Rng;
-use rand::seq::SliceRandom;
+
+use crate::rng;
 
 pub trait LoadBalancePolicy: Send {
     fn select(&mut self, loads: &[u32]) -> usize;
@@ -10,7 +10,7 @@ pub struct RandomPolicy;
 
 impl LoadBalancePolicy for RandomPolicy {
     fn select(&mut self, loads: &[u32]) -> usize {
-        rand::rng().random_range(0..loads.len())
+        rng::random_usize_range(0..loads.len())
     }
 }
 
@@ -22,9 +22,8 @@ impl LoadBalancePolicy for PowerOfTwoPolicy {
         if n <= 1 {
             return 0;
         }
-        let mut rng = rand::rng();
-        let i = rng.random_range(0..n);
-        let j = rng.random_range(0..n);
+        let i = rng::random_usize_range(0..n);
+        let j = rng::random_usize_range(0..n);
         if loads[i] <= loads[j] {
             i
         } else {
@@ -42,7 +41,7 @@ impl RoundRobinPolicy {
     fn ensure_order(&mut self, n: usize) {
         if self.order.len() != n {
             self.order = (0..n).collect();
-            self.order.shuffle(&mut rand::rng());
+            rng::shuffle(&mut self.order);
             self.next = 0;
         }
     }
@@ -55,9 +54,9 @@ impl LoadBalancePolicy for RoundRobinPolicy {
             return 0;
         }
         self.ensure_order(n);
-        let idx = self.order[self.next % n];
+        let local_idx = self.order[self.next % n];
         self.next += 1;
-        idx
+        local_idx
     }
 }
 
@@ -75,7 +74,7 @@ impl LoadBalancePolicy for LeastRequestPolicy {
         if tied.is_empty() {
             return 0;
         }
-        tied[rand::rng().random_range(0..tied.len())]
+        tied[rng::random_usize_range(0..tied.len())]
     }
 }
 

@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    { "id": "USER", "interfaces": [{ "name": "USER" }] },
+    {
+      "id": "server",
+      "interfaces": [{ "name": "handle", "avg_rt": 1000.0 }],
+      "cpu": 4,
+      "replicas": 1
+    }
+  ],
+  "edges": [
+    { "source": "USER", "target": "server:handle" }
+  ]
+}

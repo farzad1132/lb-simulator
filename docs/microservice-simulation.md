@@ -4,19 +4,20 @@ This document describes how the microservice simulator works: inputs, internal m
 
 ## Overview
 
-The simulator models a microservice application as a directed graph of endpoints. User requests arrive as independent Poisson processes (one per API), traverse a precomputed sequential path through the callgraph, and experience queueing and local processing at each microservice along the way.
+The simulator models a microservice application as a directed graph of endpoints. User requests arrive as independent Poisson processes (one per API), enter through a **per-API edge load balancer**, and traverse the callgraph as **nested synchronous RPCs**: each replica performs local work, calls downstream services sequentially (edge order) via its **own replica load balancer**, waits for each subtree to return, then returns directly to its caller replica. Queueing happens at each replica.
 
 ```
 Poisson sources (per API)
         │
         ▼
-  HopDispatcher  ◄──────────────────┐
-        │                           │
-        ▼                           │
-  Service Balancer → Replica(s) ────┘
-        │
-        ▼ (path complete)
-   stats sink
+  UserArrival ──▶ EdgeBalancer(api) ──▶ entry Replica(s)
+        │                                      │
+        │                    return (direct)   │
+        │                    ◀─────────────────┘
+        │                              │
+        │              outbound via caller's ReplicaBalancer
+        ▼                              ▼
+                         downstream Replica(s) ──▶ … ──▶ stats sink
 ```
 
 ## Input files
@@ -72,187 +73,131 @@ Maps API name to request rate and SLO latency:
 
 Every key must match an entry API from the callgraph. Each API gets an independent Poisson arrival process at the given RPS.
 
-## Path precomputation
+## Callgraph navigation
 
-At startup, for each entry API, the simulator builds an **ordered list of endpoints** by depth-first traversal with **sequential children** (follow edges in JSON array order; fully complete each subtree before the next sibling):
-
-```
-function build_path(api, endpoint):
-    path.append(endpoint)
-    for child in edges_from(endpoint) filtered by api:
-        build_path(api, child)
-```
+At runtime the simulator uses the **`children`** map (edges grouped by source endpoint, filtered by API). There is no flat precomputed path. Sibling edges are visited **sequentially** in JSON array order; each child call is a nested RPC that must return before the next sibling is dispatched.
 
 **Example** (fanin fixture, API `"f1"`):
 
 ```
-frontend:f1 → backend1:f2 → shared:f5 → backend2:f4 → shared:f5
+frontend:f1
+  ├─► backend1:f2 ─► shared:f5 ─► (return) ─► (return)
+  └─► backend2:f4 ─► shared:f5 ─► (return) ─► (return) ─► CompletedRequest
 ```
 
 **Example** (API `"g1"`):
 
 ```
-frontend:g1 → backend1:f3
+frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 ```
-
-The path is stored and never changes at runtime. Downstream calls are **sequential** — only one hop is in flight per request at any time. There is no parallel fan-out or fork-join.
 
 ## Simulation entities
 
 | Entity | Count | Role |
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
-| **HopDispatcher** | 1 | Orchestrates request flow: creates hops, samples service times, routes to balancers, collects metrics |
-| **Balancer** | one per microservice | Routes hops to a replica using the configured LB policy |
-| **Replica** | `replicas` per microservice | FCFS queue + concurrent workers; processes local work, returns hop to HopDispatcher |
+| **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
+| **EdgeBalancer** | one per API | Picks an entry-service replica for user traffic (local inflight view) |
+| **ReplicaBalancer** | one per replica | Outbound only: picks downstream replicas using local inflight view |
+| **Replica** | `replicas` per microservice | Strict FIFO queue, local processing, nested dispatch/return |
 
 ### What a microservice models
 
 A callgraph service node becomes:
 
 - `replicas` × `Replica` models, each with `max_concurrency = cpu / replicas`
-- 1 × `Balancer` fanning out to those replicas
+- `replicas` × `ReplicaBalancer` models (one outbound LB per replica)
 
-All interfaces of a service (e.g. `backend1:f2` and `backend1:f3`) share the same replica pool. The queue is per-replica, not per-interface.
+All interfaces of a service share the same replica pool. The queue is per-replica, not per-interface.
+
+User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-service replicas.
 
 ### What is NOT modeled
 
 - Network latency between services
 - Per-endpoint concurrency (only per-service `cpu`)
-- Parallel fan-out / fork-join
-- Direct replica-to-replica messaging
+- Parallel fan-out / fork-join among siblings (siblings are sequential)
 - Retries, failures, or timeouts
 
 ## Request lifecycle
 
 ### One user request = one `Hop`
 
-There is no fan-out into separate sub-requests and no request-id lookup table. A single `Hop` struct carries all context across steps:
-
 | Field | Set when | Changes? |
 |-------|----------|----------|
 | `api` | User arrival | Never |
+| `endpoint` | Arrival / return | Current endpoint for local work or continuation |
+| `sibling_index` | After local work or child return | Next child edge to dispatch at this endpoint |
 | `start` | User arrival | Never — used for e2e latency |
-| `hop_index` | Each dispatch | Incremented after each replica completes |
-| `duration` | Each dispatch | Re-sampled exponential for current endpoint |
-| `processing_time` | Each completion | Running sum of all hop durations so far |
-| `finish` | Final hop | Set when path is exhausted |
+| `duration` | Each local processing step | Re-sampled exponential for current endpoint |
+| `processing_time` | Each local completion | Running sum of local durations |
+| `caller` | Outbound dispatch | `CallerRef` for return routing |
 
-### Continuation model (how downstream calls work)
+### Nested call/return flow (API `f1`, one request)
 
-In a real system, a service finishes local work, calls a downstream service, blocks until the response, then continues.
+1. Request enters **frontend** via `EdgeBalancer(api=f1)`
+2. Local processing at **frontend** (`frontend:f1`)
+3. **frontend/0's ReplicaBalancer** picks a **backend1 replica**; async wait begins
+4. Local processing at **backend1** (`backend1:f2`)
+5. **backend1/0's ReplicaBalancer** picks a **shared replica**
+6. Local processing at **shared** (`shared:f5`)
+7. **shared** returns directly to **backend1** → backend1 FIFO queue
+8. **backend1** returns directly to **frontend** → frontend FIFO queue
+9. **frontend/0's ReplicaBalancer** picks a **backend2 replica** (next sibling)
+10. … second subtree …
+11. **frontend** emits `CompletedRequest` and releases the edge balancer slot
 
-In the simulator, **replicas never send responses back to a parent replica**. All replica outputs connect to **HopDispatcher**:
+While waiting on a downstream RPC, a replica may process other queue items (new requests or other continuations).
 
-1. HopDispatcher sends `Hop` to the **target service's Balancer**.
-2. Balancer picks a replica; replica queues or processes locally for `duration`.
-3. On completion, replica sends the **same `Hop`** back to HopDispatcher.
-4. HopDispatcher accumulates metrics, increments `hop_index`, and either dispatches the next hop or emits a `CompletedRequest`.
+### Load balancing
 
-The caller's replica (e.g. frontend) is not involved after its own step. The blocking continuation that would live on the parent's call stack in a real RPC is modeled by HopDispatcher not advancing until the current hop finishes.
+| Direction | Path |
+|-----------|------|
+| **User ingress** | `UserArrival` → `EdgeBalancer(api)` → entry-service replica |
+| **Outbound** (child RPC) | Caller replica → **caller's `ReplicaBalancer`** → downstream replica (local inflight view) |
+| **Return** | Callee replica → **specific caller replica** via `CallerRef` (not load-balanced) |
 
-| Real system | Simulator |
-|-------------|-----------|
-| Parent calls child, blocks until response | Next hop cannot start until current replica completes |
-| Child response resumes parent code | HopDispatcher receives completed `Hop`, advances `hop_index` |
-| Response to user after full chain | `CompletedRequest` emitted after final hop |
+Each `ReplicaBalancer` tracks only the outstanding RPCs **it** has dispatched to each downstream replica. It does not observe global callee queue depth.
 
-### HopDispatcher logic
+Example: frontend/0 → backend1 uses **ReplicaBalancer(frontend/0)** to pick a backend1 replica. backend1/0 → shared uses **ReplicaBalancer(backend1/0)** to pick a shared replica.
 
-```
-on_user_arrival(api, time):
-    hop = Hop { api, hop_index: 0, start: time, processing_time: 0 }
-    dispatch(hop)
+### Replica FIFO queue
 
-on_replica_complete(hop, finish_time):
-    hop.processing_time += hop.duration
-    busy_time[service(endpoint)] += hop.duration
-    hop.hop_index += 1
-    if hop.hop_index == paths[hop.api].len():
-        emit CompletedRequest { api, start: hop.start, finish: finish_time, processing_time }
-    else:
-        dispatch(hop)
+Each replica has one strict FIFO queue holding:
 
-dispatch(hop):
-    endpoint = paths[hop.api][hop.hop_index]
-    hop.duration = sample_exponential(means[endpoint])
-    send hop to balancers[service(endpoint)]
-```
+| Kind | Handler |
+|------|---------|
+| **Upstream** | Sample duration → local processing (holds concurrency slot) |
+| **DownstreamReturn** | Immediate `advance()` — dispatch next sibling, return up, or complete (no slot held) |
+
+**All items** require a free concurrency slot (`in_flight < max_concurrency`) to be dequeued. Dispatch-only returns do **not** increment `in_flight` once dequeued.
+
+After local processing completes, the first child call runs synchronously in the completion handler (same worker just freed). Subsequent continuations from downstream returns are separate queue items.
+
+### Continuation logic (`advance`)
+
+After local work at endpoint `E`:
+
+1. `sibling_index = 0`
+2. If `sibling_index < len(children(E))`: dispatch `children[sibling_index]` via own `ReplicaBalancer`
+3. Else if `caller` set: return hop to caller replica (restore endpoint / sibling_index from `CallerRef`)
+4. Else: emit `CompletedRequest`
+
+On **DownstreamReturn** dequeued: run `advance()` with restored state (next sibling, return up, or complete).
 
 ## Model wiring
 
 ```
-For each API in load.json:
-    Poisson source ──▶ HopDispatcher.new_request
+For each API in callgraph entrypoints:
+    Poisson ──▶ UserArrival ──▶ EdgeBalancer(api) ──▶ entry Replica[i]
 
-For each microservice with balancer LB and replicas R0..Rk:
-    HopDispatcher ──▶ LB.input
-    LB.outputs[i] ──▶ Ri.input
-    Ri.output ──▶ HopDispatcher.replica_complete    (all replicas, all services)
-
-HopDispatcher.completed ──▶ stats sink
-```
-
-Each Balancer reads load counters (`in_flight + queue.len()`) from its replicas, same as the flat `lb` simulator.
-
-## Request flow example
-
-**Fixture:** `tests/fanin/callgraph.json`, API `"f1"`, arrival at **t = 10.000s**.
-
-**Path:**
-
-| Step | Endpoint | Mean (callgraph) |
-|------|----------|------------------|
-| 0 | frontend:f1 | 0.2 ms |
-| 1 | backend1:f2 | 0.8 ms |
-| 2 | shared:f5 | 1.5 ms |
-| 3 | backend2:f4 | 0.5 ms |
-| 4 | shared:f5 | 1.5 ms |
-
-**Timeline** (simulation times in seconds; one `Hop` advancing through steps):
-
-| Step | Endpoint | Sampled duration | Service start | Service end | `processing_time` after |
-|------|----------|------------------|---------------|-------------|-------------------------|
-| 0 | frontend:f1 | 0.00018s | 10.000 | 10.00018 | 0.00018 |
-| 1 | backend1:f2 | 0.00092s | 10.00025 (queued) | 10.00117 | 0.00110 |
-| 2 | shared:f5 | 0.00140s | 10.00117 | 10.00257 | 0.00250 |
-| 3 | backend2:f4 | 0.00055s | 10.00257 | 10.00312 | 0.00305 |
-| 4 | shared:f5 | 0.00165s | 10.00312 | 10.00477 | 0.00470 |
-
-After step 4, HopDispatcher emits:
-
-```
-CompletedRequest { api: "f1", start: 10.000, finish: 10.00477, processing_time: 0.00470 }
-```
-
-**Metrics for this request:**
-
-- **e2e latency** = 10.00477 − 10.000 = **0.00477s** (includes queue wait at backend1)
-- **processing time** = sum of hop durations = **0.00470s** (local work only)
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant HD as HopDispatcher
-    participant FE as frontend
-    participant B1 as backend1
-    participant SH as shared
-    participant B2 as backend2
-    participant Sink
-
-    User->>HD: new f1 request at t=10.000
-    HD->>FE: Hop hop_index=0
-    FE->>HD: done at 10.180
-    HD->>B1: Hop hop_index=1
-    Note over B1: queues until 10.250
-    B1->>HD: done at 11.170
-    HD->>SH: Hop hop_index=2
-    SH->>HD: done at 12.570
-    HD->>B2: Hop hop_index=3
-    B2->>HD: done at 13.120
-    HD->>SH: Hop hop_index=4
-    SH->>HD: done at 14.770
-    HD->>Sink: CompletedRequest
+For each (service, replica_idx):
+    ReplicaBalancer(service, replica_idx).outbound ──▶ downstream Replica[j].input
+    Replica(service, replica_idx) ──▶ own ReplicaBalancer.outbound
+    Replica(service, replica_idx).outbound_release ──▶ own ReplicaBalancer.release_outbound
+    Replica(entry, i).edge_release[api] ──▶ EdgeBalancer(api).release
+    Replica[*].completed ──▶ stats sink
+    return_outputs[(S,j)] ──▶ Replica[j].input     (DownstreamReturn, direct)
 ```
 
 ## Metrics
@@ -263,8 +208,8 @@ All latency values in **output** are in **milliseconds**, grouped **per API** un
 
 | Metric | Definition |
 |--------|------------|
-| **e2e_ms** | `finish − start` in ms — wall-clock from user arrival to final hop completion (includes all queueing) |
-| **processing_time_ms** | Sum of sampled local durations across all hops in ms (excludes queueing) |
+| **e2e_ms** | `finish − start` in ms — wall-clock from user arrival to final completion (includes all queueing) |
+| **processing_time_ms** | Sum of sampled local durations across the nested call tree in ms (excludes queueing) |
 
 Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a primary output).
 
@@ -281,15 +226,46 @@ Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a p
 |--------|------------|
 | **Utilization** | `busy_time[s] / (observation_time × cpu[s]) × 100` |
 
-`busy_time[s]` is the sum of all sampled hop durations executed on any replica of service `s`. Each hop is attributed to the microservice that owns the endpoint (e.g. `backend1:f2` → `backend1`). Visiting the same service twice in one request (e.g. `shared:f5` twice) contributes twice to that service's busy time.
+`busy_time[s]` is the sum of all sampled local hop durations executed on any replica of service `s`. Visiting the same service twice in one request contributes twice.
+
+## Validation against `lb`
+
+A single-hop callgraph (`USER → server:handle`) is equivalent to the flat `lb` simulator when capacity, service-time mean, arrival rate, and LB policy match.
+
+| Concept | `ms` | `lb` |
+|---------|------|------|
+| Total capacity | `cpu` | `servers × concurrency` |
+| Per-replica concurrency | `cpu / replicas` | `concurrency` |
+| Server count | `replicas` | `servers` |
+| Service mean | `avg_rt` in ms (exponential) | default 1.0 s |
+| Arrival rate | `load.json` `rps` | derived from `--load` |
+
+Load equivalence (with service mean 1 s):
+
+```
+rps = load × cpu / service_mean_seconds
+```
+
+Fixtures live under `tests/client_server/single_replica/` and `tests/client_server/multi_replica/`. Use the same `--lb-policy` on both simulators (defaults differ).
+
+Run the comparison harness:
+
+```bash
+cargo build --release
+python compare_lb_ms.py --scenario all --n 200000
+```
+
+Automated check: `cargo test lb_ms_equivalence`.
+
+Nested multi-hop metrics (`f1`, etc.) differ from the old flat-path simulator by design.
 
 ## CLI and output
 
 ```bash
 cargo build --release
 ./target/release/ms \
-  --callgraph tests/fanin/callgraph.json \
-  --load-file tests/fanin/load.json \
+  --callgraph tests/fanin/single/callgraph.json \
+  --load-file tests/fanin/single/load.json \
   --format json \
   --n 100000
 ```
@@ -301,7 +277,35 @@ cargo build --release
 | `--n` | Total requests, split across APIs proportional to RPS |
 | `--lb-policy` | Load-balancing policy: `random`, `power-of-two`, `least-request` (default), or `round-robin` |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all) |
+| `--seed` | Optional RNG seed for reproducible runs (uses single-threaded simulation) |
 | `--format` | `human` or `json` |
+| `--trace` | Emit a human-readable request-flow timeline on stderr |
+| `--trace-limit` | Number of user requests to trace (default `5`; only applies with `--trace`) |
+
+### Tracing
+
+Use `--trace` to print a per-request timeline on **stderr** while stats still go to stdout. Each line shows simulation time, request id, entity, and action:
+
+```
+[t=0.000449s] req=1 UserArrival api=f1 entry=frontend:f1
+[t=0.000449s] req=1 EdgeBalancer(api=f1) -> replica=0
+[t=0.000449s] req=1 Replica(frontend/0) enqueue upstream endpoint=frontend:f1 queue=1 inflight=0
+[t=0.000449s] req=1 Replica(frontend/0) serve start endpoint=frontend:f1
+[t=0.000480s] req=1 Replica(frontend/0) serve done endpoint=frontend:f1 duration_ms=0.031
+...
+[t=0.004599s] req=1 UserArrival complete api=f1 e2e_ms=4.15 proc_ms=4.15
+```
+
+Only the first `--trace-limit` user arrivals are traced. Keep this small when `--n` is large.
+
+```bash
+./target/release/ms \
+  --callgraph tests/fanin/single/callgraph.json \
+  --load-file tests/fanin/single/load.json \
+  --n 200 --seed 7 \
+  --trace --trace-limit 1 \
+  2> trace.log
+```
 
 **JSON output:**
 
@@ -319,12 +323,6 @@ cargo build --release
       "processing_time_ms": [3.0, 4.1],
       "unloaded_latency_p99_ms": 11.6,
       "slo_latency_ms": 58.0
-    },
-    "g1": {
-      "e2e_ms": [1.2, 1.5],
-      "processing_time_ms": [0.9, 1.1],
-      "unloaded_latency_p99_ms": 9.8,
-      "slo_latency_ms": 49.0
     }
   }
 }

@@ -94,6 +94,7 @@ cargo build --release
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
 | `--lb-policy` | `least-request` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
+| `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
 | `--format` | `human` | `human` or `json` |
 
 JSON output includes per-microservice `utilization_pct` and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms` computed from samples, `slo_latency_ms` from `load.json`).
@@ -139,6 +140,7 @@ Options:
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
+| `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
 
 With default `--servers 1 --concurrency 1`, behavior matches the original single-server simulator.
@@ -163,7 +165,7 @@ JSON output shape:
 python plot_cdfs.py --n 100000
 ```
 
-Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--service-modes`, `--service-mode-probs`, `--servers`, `--concurrency`, `--clients`, `--lb-policy`, `--lb-subset-size`) plus:
+Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--service-modes`, `--service-mode-probs`, `--servers`, `--concurrency`, `--clients`, `--lb-policy`, `--lb-subset-size`, `--seed`) plus:
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -175,6 +177,7 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--clients` | `1` | Number of independent clients |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
+| `--seed` | (none) | RNG seed for reproducible simulation |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
 | `--mark` | (none) | Additional latency threshold(s) in seconds to annotate with P(latency ≤ x) on the plot |
 
@@ -248,7 +251,7 @@ python plot_cdfs.py --simulator ms \
   --mark 25 --mark 50
 ```
 
-Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms, `power-of-two` for lb), `--lb-subset-size`, `--binary`, `--comment`.
+Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms, `power-of-two` for lb), `--lb-subset-size`, `--seed`, `--binary`, `--comment`.
 
 ## Plot SLO violation probability vs load
 

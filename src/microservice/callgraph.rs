@@ -15,7 +15,6 @@ pub struct CallGraph {
     pub interface_means: HashMap<String, f32>, // endpoint -> mean seconds (from callgraph ms)
     pub children: HashMap<String, Vec<(String, Option<String>)>>,
     pub entrypoints: HashMap<String, String>,
-    pub paths: HashMap<String, Vec<String>>,
     pub endpoint_service: HashMap<String, String>,
     pub service_order: Vec<String>,
 }
@@ -131,12 +130,10 @@ impl CallGraph {
             }
         }
 
-        let mut paths = HashMap::new();
         for (api, entry) in &entrypoints {
             let mut path = Vec::new();
             let mut stack = HashSet::new();
             build_path(api, entry, &children, &mut path, &mut stack)?;
-            paths.insert(api.clone(), path);
         }
 
         Ok(Self {
@@ -144,7 +141,6 @@ impl CallGraph {
             interface_means,
             children,
             entrypoints,
-            paths,
             endpoint_service,
             service_order,
         })
@@ -218,26 +214,30 @@ mod tests {
 
     #[test]
     fn load_spec_parses_api_objects() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/load.json");
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/single/load.json");
         let load = load_spec_from_file(&path).unwrap();
-        assert_eq!(load["f1"].rps, 900.0);
-        assert_eq!(load["f1"].slo_ms, 58.0);
+        assert_eq!(load["f1"].rps, 1200.0);
+        assert_eq!(load["f1"].slo_ms, 35.0);
     }
 
     #[test]
-    fn fanin_paths() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/callgraph.json");
+    fn fanin_children() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/single/callgraph.json");
         let graph = CallGraph::from_file(&path).unwrap();
+        let f1_children: Vec<_> = graph
+            .children
+            .get("frontend:f1")
+            .unwrap()
+            .iter()
+            .filter(|(_, api)| api.as_deref() == Some("f1"))
+            .map(|(target, _)| target.as_str())
+            .collect();
+        assert_eq!(f1_children, vec!["backend1:f2", "backend2:f4"]);
         assert_eq!(
-            graph.paths["f1"],
-            vec![
-                "frontend:f1",
-                "backend1:f2",
-                "shared:f5",
-                "backend2:f4",
-                "shared:f5",
-            ]
+            graph.entrypoints.get("g1").map(String::as_str),
+            Some("frontend:g1")
         );
-        assert_eq!(graph.paths["g1"], vec!["frontend:g1", "backend1:f3"]);
     }
 }

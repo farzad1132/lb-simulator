@@ -1,5 +1,8 @@
 mod load_balancer;
 mod policy;
+mod rng {
+    pub use lb::rng::*;
+}
 mod server;
 
 use clap::{Parser, ValueEnum};
@@ -9,7 +12,6 @@ use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation
 use nexosim::time::MonotonicTime;
 use policy::LoadBalancePolicyKind;
 use rand::Rng;
-use rand::seq::SliceRandom;
 use serde::Serialize;
 use server::{Server, Task};
 use std::io::{self, Write};
@@ -149,15 +151,17 @@ fn exp_source(
 ) -> Result<(), SchedulingError> {
     let scheduler = sim.scheduler();
     let t0 = sim.time();
-    let mut rng = rand::rng();
     let mut offset = Duration::ZERO;
 
-    for _ in 0..n {
-        offset += Duration::from_secs_f32(sample_exp(&mut rng, arrival_mean));
-        let duration = Duration::from_secs_f32(sample_service(&mut rng, service_time));
-        let task = Task::new(t0 + offset, duration);
-        scheduler.schedule_event(offset, input, task)?;
-    }
+    rng::with_rng(|rng| {
+        for _ in 0..n {
+            offset += Duration::from_secs_f32(sample_exp(rng, arrival_mean));
+            let duration = Duration::from_secs_f32(sample_service(rng, service_time));
+            let task = Task::new(t0 + offset, duration);
+            scheduler.schedule_event(offset, input, task)?;
+        }
+        Ok::<(), SchedulingError>(())
+    })?;
     Ok(())
 }
 
@@ -286,6 +290,8 @@ struct Args {
     lb_subset_size: u32,
     #[arg(long, default_value_t = 1)]
     clients: u32,
+    #[arg(long)]
+    seed: Option<u64>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -297,7 +303,7 @@ fn random_server_subset(n_servers: usize, subset_size: u32) -> Vec<usize> {
         (subset_size as usize).min(n_servers).max(1)
     };
     let mut indices: Vec<usize> = (0..n_servers).collect();
-    indices.shuffle(&mut rand::rng());
+    rng::shuffle(&mut indices);
     indices.truncate(k);
     indices
 }
@@ -318,7 +324,11 @@ fn run_simulation(
     let concurrency = args.concurrency.max(1);
     let total_capacity = args.servers.max(1) * concurrency;
 
-    let mut bench = SimInit::new();
+    let mut bench = if args.seed.is_some() {
+        SimInit::with_num_threads(1)
+    } else {
+        SimInit::new()
+    };
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
     let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
@@ -387,7 +397,10 @@ fn run_simulation(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let service_time = resolve_service_time(&args)?;
-    let stats = run_simulation(&args, &service_time)?;
+    rng::enter_run(args.seed);
+    let stats = run_simulation(&args, &service_time);
+    rng::exit_run();
+    let stats = stats?;
 
     match args.format {
         OutputFormat::Human => match stats {

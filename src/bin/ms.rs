@@ -16,8 +16,14 @@ struct Args {
     lb_policy: LoadBalancePolicyKind,
     #[arg(long, default_value_t = 0)]
     lb_subset_size: u32,
+    #[arg(long)]
+    seed: Option<u64>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
+    #[arg(long)]
+    trace: bool,
+    #[arg(long, default_value_t = 5)]
+    trace_limit: u32,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,7 +34,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         n: cli.n,
         lb_policy: cli.lb_policy,
         lb_subset_size: cli.lb_subset_size,
+        seed: cli.seed,
         format: cli.format,
+        trace: cli.trace,
+        trace_limit: cli.trace_limit,
     };
 
     let stats = run(&args)?;
