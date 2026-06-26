@@ -165,20 +165,48 @@ fn exp_source(
     Ok(())
 }
 
+struct Rates {
+    total_service_rate: f64,
+    per_server_service_rate: f64,
+    total_arrival_rate: f64,
+    per_client_arrival_rate: f64,
+}
+
+fn compute_rates(args: &Args, service_mean: f32) -> Rates {
+    let total_capacity = args.servers.max(1) * args.concurrency.max(1);
+    let n_clients = args.clients.max(1);
+    let capacity = total_capacity as f32;
+    let arrival_mean = service_mean / (args.load * capacity);
+    let per_client_arrival_mean = arrival_mean * n_clients as f32;
+    let service_mean = f64::from(service_mean);
+    Rates {
+        total_service_rate: f64::from(total_capacity) / service_mean,
+        per_server_service_rate: f64::from(args.concurrency.max(1)) / service_mean,
+        total_arrival_rate: 1.0 / f64::from(arrival_mean),
+        per_client_arrival_rate: 1.0 / f64::from(per_client_arrival_mean),
+    }
+}
+
 struct ServiceStats {
     utilization_pct: f64,
     unloaded_latency_p99: f64,
     slo_latency: f64,
     e2e: Vec<f64>,
+    processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
 }
 
 #[derive(Serialize)]
 struct RunOutput {
+    total_service_rate: f64,
+    per_server_service_rate: f64,
+    total_arrival_rate: f64,
+    per_client_arrival_rate: f64,
     utilization_pct: f64,
     unloaded_latency_p99: f64,
     slo_latency: f64,
     e2e: Vec<f64>,
+    processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
 }
 
@@ -214,6 +242,7 @@ fn calculate_stats(
 
     let slo_latency = SLO_MULTIPLIER * unloaded_latency_p99;
     let e2e: Vec<f64> = task_samples.iter().map(|(e2e, _)| *e2e).collect();
+    let processing_times: Vec<f64> = task_samples.iter().map(|(_, duration)| *duration).collect();
     let queueing_delays: Vec<f64> = task_samples
         .iter()
         .map(|(e2e, duration)| e2e - duration)
@@ -230,6 +259,7 @@ fn calculate_stats(
         unloaded_latency_p99,
         slo_latency,
         e2e,
+        processing_times,
         queueing_delays,
     })
 }
@@ -253,11 +283,22 @@ fn print_percentile_table(label: &str, values: &mut [f64]) {
     println!();
 }
 
-fn print_human_stats(stats: &ServiceStats) {
+fn print_human_stats(stats: &ServiceStats, rates: &Rates) {
+    println!("total service rate: {:.4} tasks/s", rates.total_service_rate);
+    println!(
+        "per-server service rate: {:.4} tasks/s",
+        rates.per_server_service_rate
+    );
+    println!("total arrival rate: {:.4} tasks/s", rates.total_arrival_rate);
+    println!(
+        "per-client arrival rate: {:.4} tasks/s",
+        rates.per_client_arrival_rate
+    );
     println!("utilization: {:.2}%", stats.utilization_pct);
     println!("unloaded latency (p99): {:.6}s", stats.unloaded_latency_p99);
     println!("SLO latency: {:.6}s", stats.slo_latency);
     print_percentile_table("e2e latency (s):", &mut stats.e2e.clone());
+    print_percentile_table("processing time (s):", &mut stats.processing_times.clone());
     print_percentile_table("queueing delay (s):", &mut stats.queueing_delays.clone());
 }
 
@@ -394,9 +435,39 @@ fn run_simulation(
     Ok(calculate_stats(&mut output, observation, total_capacity))
 }
 
+fn run_output(stats: Option<ServiceStats>, rates: &Rates) -> RunOutput {
+    match stats {
+        Some(stats) => RunOutput {
+            total_service_rate: rates.total_service_rate,
+            per_server_service_rate: rates.per_server_service_rate,
+            total_arrival_rate: rates.total_arrival_rate,
+            per_client_arrival_rate: rates.per_client_arrival_rate,
+            utilization_pct: stats.utilization_pct,
+            unloaded_latency_p99: stats.unloaded_latency_p99,
+            slo_latency: stats.slo_latency,
+            e2e: stats.e2e,
+            processing_times: stats.processing_times,
+            queueing_delays: stats.queueing_delays,
+        },
+        None => RunOutput {
+            total_service_rate: rates.total_service_rate,
+            per_server_service_rate: rates.per_server_service_rate,
+            total_arrival_rate: rates.total_arrival_rate,
+            per_client_arrival_rate: rates.per_client_arrival_rate,
+            utilization_pct: 0.0,
+            unloaded_latency_p99: 0.0,
+            slo_latency: 0.0,
+            e2e: Vec::new(),
+            processing_times: Vec::new(),
+            queueing_delays: Vec::new(),
+        },
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let service_time = resolve_service_time(&args)?;
+    let rates = compute_rates(&args, service_time.mean);
     rng::enter_run(args.seed);
     let stats = run_simulation(&args, &service_time);
     rng::exit_run();
@@ -404,26 +475,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.format {
         OutputFormat::Human => match stats {
-            Some(stats) => print_human_stats(&stats),
+            Some(stats) => print_human_stats(&stats, &rates),
             None => println!("no completed tasks"),
         },
         OutputFormat::Json => {
-            let output = match stats {
-                Some(stats) => RunOutput {
-                    utilization_pct: stats.utilization_pct,
-                    unloaded_latency_p99: stats.unloaded_latency_p99,
-                    slo_latency: stats.slo_latency,
-                    e2e: stats.e2e,
-                    queueing_delays: stats.queueing_delays,
-                },
-                None => RunOutput {
-                    utilization_pct: 0.0,
-                    unloaded_latency_p99: 0.0,
-                    slo_latency: 0.0,
-                    e2e: Vec::new(),
-                    queueing_delays: Vec::new(),
-                },
-            };
+            let output = run_output(stats, &rates);
             let mut stdout = io::stdout().lock();
             serde_json::to_writer(&mut stdout, &output)?;
             stdout.write_all(b"\n")?;
