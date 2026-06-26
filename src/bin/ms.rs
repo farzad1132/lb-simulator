@@ -12,7 +12,7 @@ struct Args {
     load_file: PathBuf,
     #[arg(long, default_value_t = 1_000_000)]
     n: u32,
-    #[arg(long, value_enum, default_value = "least-request")]
+    #[arg(long, value_enum, default_value = "power-of-two")]
     lb_policy: LoadBalancePolicyKind,
     #[arg(long, default_value_t = 0)]
     lb_subset_size: u32,
@@ -71,7 +71,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn default_lb_policy_is_least_request() {
+    fn default_lb_policy_is_power_of_two() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
@@ -79,7 +79,7 @@ mod tests {
             "--load-file",
             "tests/fanin/load.json",
         ]);
-        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::LeastRequest);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::PowerOfTwo);
         assert_eq!(cli.scale, 0);
     }
 }

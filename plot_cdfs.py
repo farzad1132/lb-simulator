@@ -267,7 +267,7 @@ def run_ms_simulation(
     callgraph: Path,
     load_file: Path,
     n: int,
-    lb_policy: str = "least-request",
+    lb_policy: str = "power-of-two",
     lb_subset_size: int = 0,
     seed: int | None = None,
 ) -> dict:
@@ -404,7 +404,7 @@ def format_ms_utilization(utilization_pct: dict) -> str:
 def resolve_lb_policy(simulator: str, lb_policy: str | None) -> str:
     if lb_policy is not None:
         return lb_policy
-    return "least-request" if simulator == "ms" else "power-of-two"
+    return "power-of-two"
 
 
 def validate_lb_args(args: argparse.Namespace) -> None:
@@ -474,8 +474,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clients", type=int, default=1,
                         help="Number of independent clients (passed to lb simulator)")
     parser.add_argument("--lb-policy", choices=LB_POLICIES, default=None,
-                        help="Load-balancing policy (default: power-of-two for lb, "
-                             "least-request for ms)")
+                        help="Load-balancing policy (default: power-of-two)")
     parser.add_argument("--lb-subset-size", type=int, default=0,
                         help="Replicas each LB can route to (0 = all; passed to lb/ms simulator)")
     parser.add_argument(

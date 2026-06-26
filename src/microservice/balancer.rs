@@ -1,7 +1,7 @@
 use super::hop::{Hop, OutboundCall, OutboundRelease, ReplicaInput};
 use super::trace::MsTracer;
 use crate::policy::LoadBalancePolicy;
-use crate::policy::LeastRequestPolicy;
+use crate::policy::PowerOfTwoPolicy;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
-    Box::new(LeastRequestPolicy)
+    Box::new(PowerOfTwoPolicy)
 }
 
 #[derive(Deserialize, Serialize)]

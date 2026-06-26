@@ -273,7 +273,7 @@ def main() -> int:
     parser.add_argument(
         "--lb-policy",
         choices=LB_POLICIES,
-        default="least-request",
+        default="power-of-two",
         help="Load-balancing policy for both simulators",
     )
     parser.add_argument(
