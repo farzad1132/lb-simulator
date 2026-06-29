@@ -418,6 +418,52 @@ class SubplotGrid:
         plt.close(self.fig)
 
 
+def plot_heatmap(
+    ax,
+    data,
+    *,
+    x_labels: List[str],
+    y_labels: List[str],
+    style: PlotStyle,
+    cmap: str = "viridis",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    colorbar_label: str = "",
+    annotate: bool = True,
+    annotation_fmt: str = "{:.1f}%",
+):
+    """Plot an annotated heatmap on an existing primitive-managed axis."""
+    image = ax.imshow(data, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+
+    ax.set_xticks(np.arange(len(x_labels)))
+    ax.set_xticklabels(x_labels, fontsize=style.font_size - 1)
+    ax.set_yticks(np.arange(len(y_labels)))
+    ax.set_yticklabels(y_labels, fontsize=style.font_size - 1)
+
+    if annotate:
+        max_value = vmax if vmax is not None else float(np.nanmax(data))
+        threshold = max(max_value, 1.0) * 0.45
+        for row in range(data.shape[0]):
+            for col in range(data.shape[1]):
+                value = data[row, col]
+                color = "black" if value > threshold else "white"
+                ax.text(
+                    col,
+                    row,
+                    annotation_fmt.format(value),
+                    ha="center",
+                    va="center",
+                    color=color,
+                    fontsize=style.font_size - 1,
+                )
+
+    cbar = ax.figure.colorbar(image, ax=ax)
+    if colorbar_label:
+        cbar.set_label(colorbar_label, fontsize=style.font_size)
+    cbar.ax.tick_params(labelsize=style.font_size - 1)
+    return image
+
+
 # ============================================================================
 # Axis Configuration Helpers
 # ============================================================================
@@ -959,4 +1005,3 @@ def plot_cdf(ax, data, label: Optional[str] = None,
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=style.font_size)
     return ax
-

@@ -27,7 +27,7 @@ DEFAULT_OUTPUT = REPO_ROOT / "output" / "e2e_cdf.pdf"
 DEFAULT_MS_OUTPUT = REPO_ROOT / "output" / "e2e_cdf_ms.pdf"
 LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e")
 MS_REQUIRED_JSON_KEYS = ("utilization_pct", "by_api")
-MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms")
+MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
 LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
 SIMULATORS = ("lb", "ms")
@@ -273,6 +273,8 @@ def run_ms_simulation(
     lb_policy: str = "power-of-two",
     lb_subset_size: int = 0,
     seed: int | None = None,
+    rps: float | None = None,
+    slo_ms: float | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -291,6 +293,10 @@ def run_ms_simulation(
     ]
     if seed is not None:
         cmd.extend(["--seed", str(seed)])
+    if rps is not None:
+        cmd.extend(["--rps", str(rps)])
+    if slo_ms is not None:
+        cmd.extend(["--slo-ms", str(slo_ms)])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")

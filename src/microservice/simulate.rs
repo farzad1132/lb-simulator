@@ -13,6 +13,8 @@ use crate::policy::LoadBalancePolicyKind;
 use crate::rng;
 use super::balancer::{EdgeBalancer, ReplicaBalancer};
 use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
+#[cfg(test)]
+use super::callgraph::ApiLoad;
 use super::hop::{
     CompletedRequest, Hop, OutboundCall, ReplicaInput, sample_exp,
     service_for_endpoint,
@@ -39,6 +41,8 @@ pub struct MsArgs {
     pub lb_policy: LoadBalancePolicyKind,
     pub lb_subset_size: u32,
     pub seed: Option<u64>,
+    pub rps: Option<f64>,
+    pub slo_ms: Option<f64>,
     pub format: OutputFormat,
     pub trace: bool,
     pub trace_limit: u32,
@@ -158,6 +162,17 @@ fn split_by_rps(n: u32, load: &LoadSpec) -> HashMap<String, u32> {
         assigned += count;
     }
     counts
+}
+
+fn apply_load_overrides(load: &mut LoadSpec, rps: Option<f64>, slo_ms: Option<f64>) {
+    for spec in load.values_mut() {
+        if let Some(rps) = rps {
+            spec.rps = rps;
+        }
+        if let Some(slo_ms) = slo_ms {
+            spec.slo_ms = slo_ms;
+        }
+    }
 }
 
 fn random_replica_subset(n_replicas: usize, subset_size: u32) -> Vec<usize> {
@@ -336,7 +351,8 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let mut graph = CallGraph::from_file(&args.callgraph)?;
     graph.apply_scale(args.scale)?;
     let graph = Arc::new(graph);
-    let load = load_spec_from_file(&args.load_file)?;
+    let mut load = load_spec_from_file(&args.load_file)?;
+    apply_load_overrides(&mut load, args.rps, args.slo_ms);
     graph.validate_load(&load)?;
 
     let busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>> =
@@ -697,6 +713,8 @@ mod tests {
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
             seed: Some(seed),
+            rps: None,
+            slo_ms: None,
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
@@ -714,6 +732,8 @@ mod tests {
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
             seed: Some(1),
+            rps: None,
+            slo_ms: None,
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
@@ -763,6 +783,8 @@ mod tests {
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
             seed: Some(99),
+            rps: None,
+            slo_ms: None,
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
@@ -796,6 +818,8 @@ mod tests {
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
             seed: Some(1),
+            rps: None,
+            slo_ms: None,
             format: OutputFormat::Json,
             trace: false,
             trace_limit: 5,
@@ -828,5 +852,71 @@ mod tests {
             first.by_api["handle"].e2e_ms,
             second.by_api["handle"].e2e_ms
         );
+    }
+
+    #[test]
+    fn load_overrides_apply_to_all_apis() {
+        let mut load = LoadSpec::from([
+            (
+                "a".to_string(),
+                ApiLoad {
+                    rps: 10.0,
+                    slo_ms: 20.0,
+                },
+            ),
+            (
+                "b".to_string(),
+                ApiLoad {
+                    rps: 30.0,
+                    slo_ms: 40.0,
+                },
+            ),
+        ]);
+
+        apply_load_overrides(&mut load, Some(1234.0), Some(56.0));
+
+        for spec in load.values() {
+            assert_eq!(spec.rps, 1234.0);
+            assert_eq!(spec.slo_ms, 56.0);
+        }
+    }
+
+    #[test]
+    fn rps_override_changes_arrival_rate_enough_to_affect_utilization() {
+        let mut low = client_server_args(11);
+        low.rps = Some(1.0);
+        let mut high = client_server_args(11);
+        high.rps = Some(100.0);
+
+        let low_stats = run(&low).unwrap().expect("low stats");
+        let high_stats = run(&high).unwrap().expect("high stats");
+
+        assert!(
+            high_stats.utilization_pct["server"] > low_stats.utilization_pct["server"],
+            "expected higher rps override to increase utilization"
+        );
+    }
+
+    #[test]
+    fn slo_override_changes_reported_slo_and_violation_probability() {
+        let mut args = client_server_args(13);
+        args.slo_ms = Some(1.0);
+
+        let stats = run(&args).unwrap().expect("stats");
+        let api = &stats.by_api["handle"];
+
+        assert_eq!(api.slo_latency_ms, 1.0);
+        assert!(api.prob_latency_gt_slo > 0.0);
+    }
+
+    #[test]
+    fn non_positive_overrides_are_rejected_by_load_validation() {
+        let mut bad_rps = client_server_args(17);
+        bad_rps.rps = Some(0.0);
+        assert!(run(&bad_rps).is_err());
+
+        let mut bad_slo = client_server_args(17);
+        bad_slo.slo_ms = Some(0.0);
+        assert!(run(&bad_slo).is_err());
     }
 }

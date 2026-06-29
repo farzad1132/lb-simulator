@@ -18,6 +18,10 @@ struct Args {
     lb_subset_size: u32,
     #[arg(long)]
     seed: Option<u64>,
+    #[arg(long)]
+    rps: Option<f64>,
+    #[arg(long)]
+    slo_ms: Option<f64>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
     #[arg(long)]
@@ -37,6 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lb_policy: cli.lb_policy,
         lb_subset_size: cli.lb_subset_size,
         seed: cli.seed,
+        rps: cli.rps,
+        slo_ms: cli.slo_ms,
         format: cli.format,
         trace: cli.trace,
         trace_limit: cli.trace_limit,
@@ -81,5 +87,24 @@ mod tests {
         ]);
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::PowerOfTwo);
         assert_eq!(cli.scale, 0);
+        assert_eq!(cli.rps, None);
+        assert_eq!(cli.slo_ms, None);
+    }
+
+    #[test]
+    fn parses_load_overrides() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--rps",
+            "2500",
+            "--slo-ms",
+            "12.5",
+        ]);
+        assert_eq!(cli.rps, Some(2500.0));
+        assert_eq!(cli.slo_ms, Some(12.5));
     }
 }

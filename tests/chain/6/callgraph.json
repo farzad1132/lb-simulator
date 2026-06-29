@@ -1,0 +1,109 @@
+{
+    "nodes": [
+        {
+            "id": "USER",
+            "interfaces": [
+                {
+                    "name": "USER"
+                }
+            ]
+        },
+        {
+            "id": "frontend",
+            "interfaces": [
+                {
+                    "name": "handle",
+                    "avg_rt": 0.1
+                }
+            ],
+            "cpu": 4,
+            "replicas": 1
+        },
+        {
+            "id": "backend1",
+            "interfaces": [
+                {
+                    "name": "f1",
+                    "avg_rt": 1
+                }
+            ],
+            "cpu": 10,
+            "replicas": 10
+        },
+        {
+            "id": "backend2",
+            "interfaces": [
+                {
+                    "name": "f2",
+                    "avg_rt": 1
+                }
+            ],
+            "cpu": 10,
+            "replicas": 10
+        },
+        {
+            "id": "backend3",
+            "interfaces": [
+                {
+                    "name": "f3",
+                    "avg_rt": 1
+                }
+            ],
+            "cpu": 10,
+            "replicas": 10
+        },
+        {
+            "id": "backend4",
+            "interfaces": [
+                {
+                    "name": "f4",
+                    "avg_rt": 1
+                }
+            ],
+            "cpu": 10,
+            "replicas": 10
+        },
+        {
+            "id": "backend5",
+            "interfaces": [
+                {
+                    "name": "f5",
+                    "avg_rt": 1
+                }
+            ],
+            "cpu": 10,
+            "replicas": 10
+        }
+    ],
+    "edges": [
+        {
+            "source": "USER",
+            "target": "frontend:handle"
+        },
+        {
+            "source": "frontend:handle",
+            "target": "backend1:f1",
+            "api": "handle"
+        },
+        {
+            "source": "backend1:f1",
+            "target": "backend2:f2",
+            "api": "handle"
+        },
+        {
+            "source": "backend2:f2",
+            "target": "backend3:f3",
+            "api": "handle"
+        },
+        {
+            "source": "backend3:f3",
+            "target": "backend4:f4",
+            "api": "handle"
+        },
+        {
+            "source": "backend4:f4",
+            "target": "backend5:f5",
+            "api": "handle"
+        }
+    ]
+}
