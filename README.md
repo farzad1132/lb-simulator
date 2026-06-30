@@ -165,6 +165,20 @@ JSON output shape (with `--slo 5.0`):
 
 Without `--slo`, `slo_latency` and `prob_latency_gt_slo` are omitted from JSON.
 
+## Plot scripts overview
+
+Python plotting scripts live in the repo root. Each runs the simulator (or compares simulators), collects metrics, and writes a PDF under `output/`.
+
+| Script | X-axis | Y-axis | Purpose |
+|--------|--------|--------|---------|
+| [`plot_cdfs.py`](plot_cdfs.py) (lb) | e2e latency (s, log) | CDF | Full latency distribution for a single lb run; optional SLO / threshold marks |
+| [`plot_cdfs.py`](plot_cdfs.py) (ms) | e2e latency (ms, log) | CDF | Per-API latency distribution for the microservice simulator |
+| [`plot_lb_sweep.py`](plot_lb_sweep.py) | sweep param (load, clients, …) | configurable metric (default p99) | Compare LB policies (one line each) while sweeping one simulator parameter |
+| [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6) | Heatmap of SLO violation rate (%) across load for chain topologies |
+| [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
+
+Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script.
+
 ## Plot e2e CDF
 
 `plot_cdfs.py` builds the release binary once, runs the simulator, and writes an e2e latency CDF to `output/e2e_cdf.pdf`. The x-axis uses a log scale. Pass `--slo` to mark the SLO threshold on the plot.
@@ -263,65 +277,117 @@ python plot_cdfs.py --simulator ms \
 
 Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms, `power-of-two` for lb), `--lb-subset-size`, `--lb-subset-policy`, `--seed`, `--binary`, `--comment`.
 
-## Plot SLO violation probability vs load
+## Plot LB parameter sweep
 
-`plot_load_sweep.py` runs the simulator at each load point (default 0.1, 0.2, …, 1.0), computes P(latency > SLO) at the given `--slo`, and writes a line plot to `output/slo_violation.pdf`. A progress bar shows sweep status on stderr.
+`plot_lb_sweep.py` runs the lb simulator over a grid of `(lb-policy, sweep-value)` pairs and writes a line plot with one line per LB policy. Choose the x-axis parameter with `--sweep` (default `load`); all other simulator parameters stay fixed unless they are the sweep axis. Choose the y-axis with `--metric` (default `p99`).
 
 ```bash
-python plot_load_sweep.py --slo 5.0 --n 100000
+python plot_lb_sweep.py --sweep load --servers 10 --n 100000
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--output` | `output/slo_violation.pdf` | Output PDF path |
+| `--sweep` | `load` | X-axis parameter: `load`, `clients`, `servers`, `concurrency`, `lb-subset-size` |
+| `--series` | `lb-policy` | Legend lines (v1: `lb-policy` only) |
+| `--metric` | `p99` | Y-axis: `p99`, `p50`, `p90`, `utilization`, `slo-violation`, or `p{N}` |
+| `--output` | `output/lb_{sweep}_{metric}.pdf` | Output PDF path |
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
-| `--load-min` / `--load-max` / `--load-step` | `0.1` / `1.0` / `0.1` | Load sweep range |
-| `--slo` | (required) | SLO latency threshold in seconds |
-| `--n` | `1000000` | Tasks per load point |
+| `--load` | (see below) | Fixed load, or multiple values when `--sweep load` |
+| `--load-min` / `--load-max` / `--load-step` | `0.1` / `1.0` / `0.1` | Load range when `--sweep load` and `--load` omitted |
+| `--clients` | (see below) | Fixed client count, or multiple when `--sweep clients` |
+| `--clients-min` / `--clients-max` / `--clients-step` | `1` / `8` / `1` | Client range when `--sweep clients` and `--clients` omitted |
+| `--servers` | (see below) | Fixed server count, or multiple when `--sweep servers` |
+| `--servers-min` / `--servers-max` / `--servers-step` | `1` / `8` / `1` | Server range when `--sweep servers` and `--servers` omitted |
+| `--concurrency` | (see below) | Fixed concurrency, or multiple when `--sweep concurrency` |
+| `--concurrency-min` / `--concurrency-max` / `--concurrency-step` | `1` / `4` / `1` | Concurrency range when `--sweep concurrency` and `--concurrency` omitted |
+| `--lb-subset-size` | (see below) | Fixed subset size (`0` = all), or multiple when `--sweep lb-subset-size` |
+| `--subset-min` / `--subset-max` / `--subset-step` | (none) / (none) / `1` | Subset range when sweeping subset size |
+| `--n` | `1000000` | Tasks per run |
 | `--service-dist` | `exponential` | Service distribution (`exponential`, `constant`, or `bimodal`) |
 | `--service-modes` | (none) | Two exponential means for bimodal |
 | `--service-mode-probs` | (none) | Two mode probabilities for bimodal |
-| `--servers` | `1` | Number of servers |
-| `--concurrency` | `1` | Concurrent tasks per server |
-| `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
-| `--lb-subset-size` | `0` | Subset size(s) per LB (`0` = all servers); pass multiple values to compare on one plot |
-| `--format` | `human` | `human` (summary + e2e latency percentiles per load) or `compact` (one line per load) |
+| `--lb-policy` | all four policies | Policies to compare (series lines) |
+| `--slo` | (none) | SLO threshold in seconds (required for `--metric slo-violation`) |
+| `--seed` | (none) | RNG seed for reproducible runs |
+| `--format` | `compact` | `human` (summary + e2e percentiles) or `compact` (one line per run) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
+| `--no-build` | (off) | Do not run `cargo build --release` |
 
-Example comparing subset sizes:
+When a parameter is **not** the sweep axis, pass a single value (e.g. `--load 0.8`, `--clients 4`). When it **is** the sweep axis, pass multiple values (`--load 0.5 0.7 0.9`) or use the param-specific min/max/step flags. For `--sweep lb-subset-size` with no explicit values, subset sizes default to powers of two from `1` through `--servers`, then `0` (full pool; x-axis label `all`).
+
+Sweep load (replaces former `plot_load_sweep.py`):
 
 ```bash
-python plot_load_sweep.py \
-  --slo 5.0 \
+python plot_lb_sweep.py \
+  --sweep load \
+  --load-min 0.3 \
+  --load-max 0.95 \
+  --load-step 0.05 \
+  --lb-policy power-of-two least-request \
+  --lb-subset-size 4 \
+  --n 100000 \
+  --comment subset4
+# writes output/lb_load_p99_subset4.pdf
+```
+
+Sweep subset size (replaces former `plot_lb_subset_sweep.py`):
+
+```bash
+python plot_lb_sweep.py \
+  --sweep lb-subset-size \
+  --load 0.8 \
   --servers 10 \
-  --lb-subset-size 0 2 4 8 \
-  --n 100000 \
-  --comment subset_cmp
-# writes output/slo_violation_subset_cmp.pdf with legend k=0, k=2, k=4, k=8
+  --clients 10 \
+  --concurrency 4 \
+  --n 500000 \
+  --lb-subset-size 0 1 2 3 5 10 \
+  --comment multi_client
+# writes output/lb_lb_subset_size_p99_multi_client.pdf
 ```
 
-Example:
+Sweep client count:
 
 ```bash
-python plot_load_sweep.py \
-  --slo 5.0 \
-  --n 100000 \
-  --comment random_lb \
-  --load-min 0.1 \
-  --load-max 1.0 \
-  --load-step 0.1
-# writes output/slo_violation_random_lb.pdf
+python plot_lb_sweep.py \
+  --sweep clients \
+  --clients 1 2 4 8 \
+  --load 0.8 \
+  --n 100000
+# writes output/lb_clients_p99.pdf
 ```
 
-Another example with an explicit output path:
+## Plot microservice chain SLO heatmap
+
+`plot_ms_chain_slo_heatmap.py` runs the ms simulator on chain3 and chain6 fixtures at each load level and writes a heatmap of SLO violation rate (%) to `output/ms_chain_slo_heatmap.pdf`. Cell color encodes the violation percentage; rows are chain depth, columns are load.
 
 ```bash
-python plot_load_sweep.py \
-  --slo 5.0 \
-  --n 100000 \
-  --load-min 0.1 \
-  --load-max 1.0 \
-  --load-step 0.1 \
-  --output output/slo_violation.pdf
+python plot_ms_chain_slo_heatmap.py --n 100000
 ```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `output/ms_chain_slo_heatmap.pdf` | Output PDF path |
+| `--comment` | (none) | Suffix appended to output filename before `.pdf` |
+| `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range |
+| `--n` | `100000` | Requests per run |
+| `--lb-policy` | `power-of-two` | Load-balancing policy |
+| `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas) |
+| `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |
+
+## Compare lb and ms simulators
+
+`compare_lb_ms.py` runs equivalent lb and ms topologies and checks that utilization and latency percentiles (p50, p90, p99) match within tolerance. Pass `--plot` to write overlay CDF plots to `output/`.
+
+```bash
+python compare_lb_ms.py --scenario all --plot
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--scenario` | `all` | `single`, `multi`, or `all` fixture topologies |
+| `--n` | `200000` | Total requests per run |
+| `--load` | `0.8` | Target utilization for lb (ms `load.json` rps must match) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators |
+| `--plot` | (off) | Write lb vs ms overlay CDF plots to `--output-dir` |
+| `--output-dir` | `output/` | Directory for optional CDF plots |
+| `--no-build` | (off) | Do not run `cargo build --release` |
