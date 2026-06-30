@@ -360,6 +360,8 @@ struct Args {
     seed: Option<u64>,
     #[arg(long)]
     slo: Option<f64>,
+    #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
+    verbose: u8,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -401,6 +403,9 @@ fn run_simulation(
             i,
             args.lb_subset_size,
         );
+        if args.verbose >= 1 {
+            eprintln!("client {i} subset: {server_indices:?}");
+        }
         let mut load_balancer = LoadBalancer::new(
             args.lb_policy.build(),
             args.lb_policy,
@@ -643,5 +648,19 @@ mod tests {
     fn validate_slo_rejects_non_positive() {
         assert!(validate_slo(Some(0.0)).is_err());
         assert!(validate_slo(Some(-1.0)).is_err());
+    }
+
+    #[test]
+    fn verbose_defaults_to_zero() {
+        let args = Args::try_parse_from(["lb"]).unwrap();
+        assert_eq!(args.verbose, 0);
+    }
+
+    #[test]
+    fn verbose_count_flag() {
+        let args = Args::try_parse_from(["lb", "-v"]).unwrap();
+        assert_eq!(args.verbose, 1);
+        let args = Args::try_parse_from(["lb", "-vv"]).unwrap();
+        assert_eq!(args.verbose, 2);
     }
 }

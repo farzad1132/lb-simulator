@@ -33,6 +33,8 @@ struct Args {
     trace_limit: u32,
     #[arg(long, default_value_t = 0)]
     scale: u32,
+    #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
+    verbose: u8,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trace: cli.trace,
         trace_limit: cli.trace_limit,
         scale: cli.scale,
+        verbose: cli.verbose,
     };
 
     let stats = run(&args)?;
@@ -111,5 +114,30 @@ mod tests {
         ]);
         assert_eq!(cli.rps, Some(2500.0));
         assert_eq!(cli.slo_ms, Some(12.5));
+    }
+
+    #[test]
+    fn verbose_defaults_to_zero() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+        ]);
+        assert_eq!(cli.verbose, 0);
+    }
+
+    #[test]
+    fn verbose_count_flag() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "-v",
+        ]);
+        assert_eq!(cli.verbose, 1);
     }
 }

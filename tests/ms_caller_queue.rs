@@ -19,6 +19,7 @@ fn caller_queue_args(seed: u64, n: u32) -> MsArgs {
         trace: false,
         trace_limit: 5,
         scale: 0,
+        verbose: 0,
     }
 }
 
@@ -60,6 +61,7 @@ fn f1_nested_callgraph_completes() {
         trace: false,
         trace_limit: 5,
         scale: 0,
+        verbose: 0,
     })
     .unwrap()
     .expect("stats");

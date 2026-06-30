@@ -50,6 +50,7 @@ pub struct MsArgs {
     pub trace: bool,
     pub trace_limit: u32,
     pub scale: u32,
+    pub verbose: u8,
 }
 
 #[derive(Serialize)]
@@ -426,6 +427,9 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             api_index,
             args.lb_subset_size,
         );
+        if args.verbose >= 1 {
+            eprintln!("api {api} subset: {replica_indices:?}");
+        }
 
         let balancer = EdgeBalancer::new(
             args.lb_policy.build(),
@@ -480,15 +484,18 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             let mut downstream_indices = HashMap::new();
             for target in downstream_targets(&graph, service_id) {
                 let target_replicas = graph.services[&target].replicas as usize;
-                downstream_indices.insert(
-                    target.clone(),
-                    subset::assign_subset(
-                        args.lb_subset_policy,
-                        target_replicas,
-                        replica_idx,
-                        args.lb_subset_size,
-                    ),
+                let indices = subset::assign_subset(
+                    args.lb_subset_policy,
+                    target_replicas,
+                    replica_idx,
+                    args.lb_subset_size,
                 );
+                if args.verbose >= 1 {
+                    eprintln!(
+                        "replica {service_id}/{replica_idx} -> {target} subset: {indices:?}"
+                    );
+                }
+                downstream_indices.insert(target.clone(), indices);
             }
 
             let downstream_loads: HashMap<String, LoadRegistry> = downstream_indices
@@ -748,6 +755,7 @@ mod tests {
             trace: false,
             trace_limit: 5,
             scale: 0,
+            verbose: 0,
         }
     }
 
@@ -768,6 +776,7 @@ mod tests {
             trace: false,
             trace_limit: 5,
             scale: 0,
+            verbose: 0,
         })
         .unwrap()
         .expect("stats");
@@ -820,6 +829,7 @@ mod tests {
             trace: false,
             trace_limit: 5,
             scale: 0,
+            verbose: 0,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -856,6 +866,7 @@ mod tests {
             trace: false,
             trace_limit: 5,
             scale: 0,
+            verbose: 0,
         })
         .unwrap()
         .expect("stats");
