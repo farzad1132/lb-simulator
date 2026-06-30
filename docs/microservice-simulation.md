@@ -97,8 +97,8 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Picks an entry-service replica for user traffic (local inflight view) |
-| **ReplicaBalancer** | one per replica | Outbound only: picks downstream replicas using local inflight view |
+| **EdgeBalancer** | one per API | Picks an entry-service replica for user traffic (true load for power-of-two; local inflight otherwise) |
+| **ReplicaBalancer** | one per replica | Outbound only: picks downstream replicas (true load for power-of-two; local inflight otherwise) |
 | **Replica** | `replicas` per microservice | Strict FIFO queue, local processing, nested dispatch/return |
 
 ### What a microservice models
@@ -163,10 +163,10 @@ While waiting on a downstream RPC, a replica may process other queue items (new 
 | Direction | Path |
 |-----------|------|
 | **User ingress** | `UserArrival` → `EdgeBalancer(api)` → entry-service replica |
-| **Outbound** (child RPC) | Caller replica → **caller's `ReplicaBalancer`** → downstream replica (local inflight view) |
+| **Outbound** (child RPC) | Caller replica → **caller's `ReplicaBalancer`** → downstream replica (true load for power-of-two; local inflight otherwise) |
 | **Return** | Callee replica → **specific caller replica** via `CallerRef` (not load-balanced) |
 
-Each `ReplicaBalancer` tracks only the outstanding RPCs **it** has dispatched to each downstream replica. It does not observe global callee queue depth.
+Each replica publishes true load (`in_flight + queue.len()`) to a shared `LoadRegistry` per service. **Power-of-two** balancers read this at routing time; **least-request** and other policies still use each balancer's local outbound inflight counters.
 
 Example: frontend/0 → backend1 uses **ReplicaBalancer(frontend/0)** to pick a backend1 replica. backend1/0 → shared uses **ReplicaBalancer(backend1/0)** to pick a shared replica.
 

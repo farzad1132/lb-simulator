@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 use crate::rng;
 
@@ -78,7 +79,7 @@ impl LoadBalancePolicy for LeastRequestPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum LoadBalancePolicyKind {
     Random,
     PowerOfTwo,
@@ -97,5 +98,9 @@ impl LoadBalancePolicyKind {
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
         }
+    }
+
+    pub fn uses_true_load(self) -> bool {
+        matches!(self, Self::PowerOfTwo)
     }
 }

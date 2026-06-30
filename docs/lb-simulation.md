@@ -105,7 +105,7 @@ A **Task** is the unit of work flowing through the simulation.
 ### End-to-end flow
 
 1. **Arrival.** `exp_source` schedules `Task { start, duration }` to the client's load balancer `input`.
-2. **Routing.** The load balancer fills a scratch buffer with its local inflight counts for servers in its subset, calls the policy to pick a server, increments `local_inflight[server]`, sets `task.lb_id`, and sends the task on `outputs[server]`.
+2. **Routing.** The load balancer fills a scratch buffer with load values for servers in its subset (true load for power-of-two; local inflight for other policies), calls the policy to pick a server, increments `local_inflight[server]`, sets `task.lb_id`, and sends the task on `outputs[server]`.
 3. **Queueing.** The server accepts the task into service immediately if `in_flight < max_concurrency`, otherwise pushes it onto a FIFO queue.
 4. **Service.** `begin_service` increments `in_flight` and schedules a completion event after `task.duration`.
 5. **Completion.** `Server::complete` sets `finish`, sends the task to the stats sink, sends `server_idx` on `release_outputs[task.lb_id]`, decrements `in_flight`, and drains the queue.
@@ -125,12 +125,23 @@ Each load balancer maintains `local_inflight: Vec<u32>` with one counter per ser
 
 This models partial observability: the balancer only sees its own outstanding requests.
 
-When routing, the load balancer copies subset loads into `load_scratch`:
+When routing with **least-request**, the load balancer copies subset loads into `load_scratch`:
 
 ```
 for each server in server_indices:
     load_scratch[k] = local_inflight[server_indices[k]]
 ```
+
+### True load (power-of-two)
+
+Each server publishes its current load — `in_flight + queue.len()` — to a shared `LoadRegistry` on every state change. When routing with **power-of-two**, the load balancer reads these values at decision time:
+
+```
+for each server in server_indices:
+    load_scratch[k] = load_registry.get(server_indices[k])
+```
+
+This models load probes against downstream servers: all load balancers see the same queue depth and in-flight work, not just their own outstanding dispatches. The routed request is not counted until the server receives it.
 
 ### Server subset
 
@@ -152,7 +163,7 @@ The load-balancing policy only chooses among servers in this subset.
 
 | Policy | CLI flag | Behavior |
 |--------|----------|----------|
-| **power-of-two** | `--lb-policy power-of-two` (default) | Sample two random servers from the subset; route to the one with lower local inflight |
+| **power-of-two** | `--lb-policy power-of-two` (default) | Sample two random servers from the subset; route to the one with lower true load (`in_flight + queue depth`) |
 | **least-request** | `--lb-policy least-request` | Route to the server with lowest local inflight; random tie-break among minima |
 | **random** | `--lb-policy random` | Uniform random server from the subset (ignores load slice) |
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
@@ -226,8 +237,8 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Network latency between client, load balancer, and server
 - Failures, retries, or timeouts
 - Request cancellation
-- Cross–load-balancer load visibility (each LB sees only its own inflight counts)
-- Global server queue depth or shared load atomics
+- Cross–load-balancer load visibility for least-request (each LB sees only its own inflight counts)
+- True load visibility for least-request, random, or round-robin (only power-of-two reads shared load)
 - Connection limits or backpressure on load balancer outputs
 
 ## Source file map
@@ -235,6 +246,7 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 | File | Responsibility |
 |------|----------------|
 | `src/main.rs` | CLI, simulation assembly, Poisson source, metrics |
+| `src/load_registry.rs` | Shared true-load store for power-of-two |
 | `src/load_balancer.rs` | Routing, local inflight tracking, release handler |
-| `src/server.rs` | Queueing, concurrency, completion, release notifications |
+| `src/server.rs` | Queueing, concurrency, completion, release notifications, load publishing |
 | `src/policy.rs` | Load-balancing algorithms |

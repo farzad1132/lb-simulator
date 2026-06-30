@@ -1,3 +1,4 @@
+use lb::load_registry::LoadRegistry;
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use nexosim::time::MonotonicTime;
@@ -31,6 +32,8 @@ pub struct Server {
     max_concurrency: u32,
     in_flight: u32,
     queue: Vec<Task>,
+    #[serde(skip)]
+    load_registry: LoadRegistry,
 }
 
 impl Server {
@@ -38,6 +41,7 @@ impl Server {
         max_concurrency: u32,
         server_idx: usize,
         release_outputs: Vec<Output<usize>>,
+        load_registry: LoadRegistry,
     ) -> Self {
         Self {
             output: Output::default(),
@@ -46,14 +50,22 @@ impl Server {
             max_concurrency: max_concurrency.max(1),
             in_flight: 0,
             queue: Vec::new(),
+            load_registry,
         }
+    }
+
+    fn publish_load(&self) {
+        self.load_registry
+            .set(self.server_idx, self.in_flight + self.queue.len() as u32);
     }
 
     fn begin_service(&mut self, task: Task, cx: &Context<Self>) {
         self.in_flight += 1;
+        self.publish_load();
         if let Err(t) = cx.schedule_event(task.duration, schedulable!(Self::complete), task) {
             eprintln!("could not schedule complete. err: {}", t);
             self.in_flight -= 1;
+            self.publish_load();
         }
     }
 
@@ -72,6 +84,7 @@ impl Server {
             self.begin_service(task, cx);
         } else {
             self.queue.push(task);
+            self.publish_load();
         }
     }
 
@@ -84,6 +97,7 @@ impl Server {
             .send(self.server_idx)
             .await;
         self.in_flight -= 1;
+        self.publish_load();
         self.drain_queue(cx);
     }
 }

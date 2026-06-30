@@ -20,7 +20,7 @@ See [docs/lb-simulation.md](docs/lb-simulation.md) for the full design (port wir
 Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
 
 - **random** — uniform random server selection
-- **power-of-two** — sample two random servers and route to the one with fewer locally in-flight requests (dispatched by this LB but not yet completed)
+- **power-of-two** — sample two random servers and route to the one with lower true load (in-flight work plus queue depth at the server)
 - **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 

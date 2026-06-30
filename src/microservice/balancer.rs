@@ -1,6 +1,8 @@
 use super::hop::{Hop, OutboundCall, OutboundRelease, ReplicaInput};
 use super::trace::MsTracer;
+use crate::load_registry::LoadRegistry;
 use crate::policy::LoadBalancePolicy;
+use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
@@ -16,11 +18,14 @@ fn default_policy() -> Box<dyn LoadBalancePolicy> {
 pub struct EdgeBalancer {
     #[serde(skip, default = "default_policy")]
     policy: Box<dyn LoadBalancePolicy>,
+    lb_policy: LoadBalancePolicyKind,
     api: String,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
     #[serde(skip)]
     local_inflight: Vec<u32>,
+    #[serde(skip)]
+    load_registry: LoadRegistry,
     #[serde(skip)]
     replica_indices: Vec<usize>,
     #[serde(skip)]
@@ -31,9 +36,11 @@ pub struct EdgeBalancer {
 impl EdgeBalancer {
     pub fn new(
         policy: Box<dyn LoadBalancePolicy>,
+        lb_policy: LoadBalancePolicyKind,
         api: String,
         n_replicas: usize,
         replica_indices: Vec<usize>,
+        load_registry: LoadRegistry,
         tracer: Option<Arc<MsTracer>>,
     ) -> Self {
         debug_assert!(
@@ -42,9 +49,11 @@ impl EdgeBalancer {
         );
         Self {
             policy,
+            lb_policy,
             api,
             tracer,
             local_inflight: vec![0; n_replicas],
+            load_registry,
             load_scratch: vec![0; replica_indices.len()],
             replica_indices,
             outputs: (0..n_replicas).map(|_| Output::default()).collect(),
@@ -60,7 +69,11 @@ impl EdgeBalancer {
             .iter_mut()
             .zip(self.replica_indices.iter())
         {
-            *scratch = self.local_inflight[replica_idx];
+            *scratch = if self.lb_policy.uses_true_load() {
+                self.load_registry.get(replica_idx)
+            } else {
+                self.local_inflight[replica_idx]
+            };
         }
         let local_idx = self
             .policy
@@ -90,6 +103,7 @@ impl EdgeBalancer {
 pub struct ReplicaBalancer {
     #[serde(skip, default = "default_policy")]
     policy: Box<dyn LoadBalancePolicy>,
+    lb_policy: LoadBalancePolicyKind,
     #[serde(skip)]
     service_id: String,
     #[serde(skip)]
@@ -98,6 +112,8 @@ pub struct ReplicaBalancer {
     tracer: Option<Arc<MsTracer>>,
     #[serde(skip)]
     local_outbound_inflight: HashMap<String, Vec<u32>>,
+    #[serde(skip)]
+    downstream_loads: HashMap<String, LoadRegistry>,
     #[serde(skip)]
     downstream_indices: HashMap<String, Vec<usize>>,
     #[serde(skip)]
@@ -108,9 +124,11 @@ pub struct ReplicaBalancer {
 impl ReplicaBalancer {
     pub fn new(
         policy: Box<dyn LoadBalancePolicy>,
+        lb_policy: LoadBalancePolicyKind,
         service_id: String,
         replica_idx: usize,
         downstream_indices: HashMap<String, Vec<usize>>,
+        downstream_loads: HashMap<String, LoadRegistry>,
         graph_replicas: &HashMap<String, u32>,
         tracer: Option<Arc<MsTracer>>,
     ) -> Self {
@@ -133,10 +151,12 @@ impl ReplicaBalancer {
             .collect();
         Self {
             policy,
+            lb_policy,
             service_id,
             replica_idx,
             tracer,
             local_outbound_inflight,
+            downstream_loads,
             downstream_indices,
             outbound_scratch: Vec::new(),
             downstream_outputs,
@@ -172,12 +192,16 @@ impl ReplicaBalancer {
             .local_outbound_inflight
             .get(&target)
             .expect("missing outbound inflight table");
+        let use_true_load = self.lb_policy.uses_true_load();
+        let downstream_load = self.downstream_loads.get(&target);
         self.outbound_scratch.clear();
-        self.outbound_scratch.extend(
-            indices
-                .iter()
-                .map(|&i| inflight.get(i).copied().unwrap_or(0)),
-        );
+        self.outbound_scratch.extend(indices.iter().map(|&i| {
+            if use_true_load {
+                downstream_load.map(|r| r.get(i)).unwrap_or(0)
+            } else {
+                inflight.get(i).copied().unwrap_or(0)
+            }
+        }));
         let local_idx = self
             .policy
             .select(&self.outbound_scratch)

@@ -6,6 +6,7 @@ mod rng {
 mod server;
 
 use clap::{Parser, ValueEnum};
+use lb::load_registry::LoadRegistry;
 use load_balancer::LoadBalancer;
 use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
@@ -386,6 +387,7 @@ fn run_simulation(
     };
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
+    let load_registry = LoadRegistry::new(n_servers);
     let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
 
     let task_counts = split_tasks(args.n, n_clients);
@@ -401,9 +403,11 @@ fn run_simulation(
         );
         let mut load_balancer = LoadBalancer::new(
             args.lb_policy.build(),
+            args.lb_policy,
             n_servers,
             server_indices,
             i,
+            load_registry.clone(),
         );
         for j in 0..n_servers {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
@@ -424,7 +428,7 @@ fn run_simulation(
         for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
             release_outputs[lb_id].connect(LoadBalancer::release, lb_address);
         }
-        let mut server = Server::new(concurrency, i, release_outputs);
+        let mut server = Server::new(concurrency, i, release_outputs, load_registry.clone());
         server.output.connect_sink(sink.clone());
         bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
     }
