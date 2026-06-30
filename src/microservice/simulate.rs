@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::policy::LoadBalancePolicyKind;
 use crate::rng;
+use crate::subset::{self, SubsetPolicyKind};
 use super::balancer::{EdgeBalancer, ReplicaBalancer};
 use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub struct MsArgs {
     pub n: u32,
     pub lb_policy: LoadBalancePolicyKind,
     pub lb_subset_size: u32,
+    pub lb_subset_policy: SubsetPolicyKind,
     pub seed: Option<u64>,
     pub rps: Option<f64>,
     pub slo_ms: Option<f64>,
@@ -173,18 +175,6 @@ fn apply_load_overrides(load: &mut LoadSpec, rps: Option<f64>, slo_ms: Option<f6
             spec.slo_ms = slo_ms;
         }
     }
-}
-
-fn random_replica_subset(n_replicas: usize, subset_size: u32) -> Vec<usize> {
-    let k = if subset_size == 0 {
-        n_replicas
-    } else {
-        (subset_size as usize).min(n_replicas).max(1)
-    };
-    let mut indices: Vec<usize> = (0..n_replicas).collect();
-    rng::shuffle(&mut indices);
-    indices.truncate(k);
-    indices
 }
 
 fn new_bench(seed: Option<u64>) -> SimInit {
@@ -393,20 +383,6 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         }
     }
 
-    let mut downstream_indices_by_service: HashMap<String, HashMap<String, Vec<usize>>> =
-        HashMap::new();
-    for service_id in &graph.service_order {
-        let mut downstream_indices = HashMap::new();
-        for target in downstream_targets(&graph, service_id) {
-            let target_replicas = graph.services[&target].replicas as usize;
-            downstream_indices.insert(
-                target.clone(),
-                random_replica_subset(target_replicas, args.lb_subset_size),
-            );
-        }
-        downstream_indices_by_service.insert(service_id.clone(), downstream_indices);
-    }
-
     struct PendingEdgeBalancer {
         balancer: EdgeBalancer,
         mailbox: Mailbox<EdgeBalancer>,
@@ -428,10 +404,18 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let mut edge_balancer_addresses: HashMap<String, nexosim::simulation::Address<EdgeBalancer>> =
         HashMap::new();
 
-    for (api, entry_endpoint) in &graph.entrypoints {
+    let mut apis: Vec<_> = graph.entrypoints.keys().cloned().collect();
+    apis.sort();
+    for (api_index, api) in apis.iter().enumerate() {
+        let entry_endpoint = &graph.entrypoints[api];
         let entry_service = service_for_endpoint(graph.as_ref(), entry_endpoint)?;
         let n_replicas = graph.services[&entry_service].replicas as usize;
-        let replica_indices = random_replica_subset(n_replicas, args.lb_subset_size);
+        let replica_indices = subset::assign_subset(
+            args.lb_subset_policy,
+            n_replicas,
+            api_index,
+            args.lb_subset_size,
+        );
 
         let balancer = EdgeBalancer::new(
             args.lb_policy.build(),
@@ -475,13 +459,23 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     > = HashMap::new();
 
     for service_id in &graph.service_order {
-        let downstream_indices = downstream_indices_by_service
-            .get(service_id)
-            .cloned()
-            .unwrap_or_default();
         let n_replicas = graph.services[service_id].replicas as usize;
 
         for replica_idx in 0..n_replicas {
+            let mut downstream_indices = HashMap::new();
+            for target in downstream_targets(&graph, service_id) {
+                let target_replicas = graph.services[&target].replicas as usize;
+                downstream_indices.insert(
+                    target.clone(),
+                    subset::assign_subset(
+                        args.lb_subset_policy,
+                        target_replicas,
+                        replica_idx,
+                        args.lb_subset_size,
+                    ),
+                );
+            }
+
             let balancer = ReplicaBalancer::new(
                 args.lb_policy.build(),
                 service_id.clone(),
@@ -712,6 +706,7 @@ mod tests {
             n: 5_000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
+            lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(seed),
             rps: None,
             slo_ms: None,
@@ -731,6 +726,7 @@ mod tests {
             n: 1000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
+            lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(1),
             rps: None,
             slo_ms: None,
@@ -782,6 +778,7 @@ mod tests {
             n: 1000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
+            lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(99),
             rps: None,
             slo_ms: None,
@@ -817,6 +814,7 @@ mod tests {
             n: 1000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
             lb_subset_size: 0,
+            lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(1),
             rps: None,
             slo_ms: None,

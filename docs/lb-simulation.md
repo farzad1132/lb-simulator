@@ -61,7 +61,7 @@ Each load balancer has:
   - `LoadBalancer::release` — receives `usize` (server index) when a task completes
 - **`outputs: Vec<Output<Task>>`** — length equals total server count; `outputs[j]` connects to `Server::input` on server `j`'s mailbox
 
-All load balancers connect to all servers. Subset restrictions (`--lb-subset-size`) affect routing choices only, not wiring.
+All load balancers connect to all servers. Subset restrictions (`--lb-subset-size`, `--lb-subset-policy`) affect routing choices only, not wiring.
 
 ### Server
 
@@ -134,12 +134,19 @@ for each server in server_indices:
 
 ### Server subset
 
-Each load balancer is assigned a random subset of servers at startup via `--lb-subset-size`:
+Each load balancer is assigned a subset of servers at startup via `--lb-subset-size` and `--lb-subset-policy`:
 
 - `0` (default) — all servers
-- `k > 0` — `min(k, servers)` servers, sampled without replacement
+- `k > 0` — `min(k, servers)` servers per balancer
 
-The policy only chooses among servers in this subset.
+**Subset policies** (`--lb-subset-policy`, default `deterministic`):
+
+| Policy | Behavior |
+|--------|----------|
+| **deterministic** | Partition clients into rounds of size `n // k`. Within each round, shuffle all server indices with a seed derived from the round number, then assign each client a disjoint slice of size `k`. Client id is the load balancer index (`0 .. clients-1`). |
+| **random** | Shuffle all server indices and take the first `k` (independent per load balancer). |
+
+The load-balancing policy only chooses among servers in this subset.
 
 ### Policies
 

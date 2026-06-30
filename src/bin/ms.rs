@@ -1,6 +1,7 @@
 use clap::Parser;
 use lb::microservice::{MsArgs, MsStats, OutputFormat, print_human_stats, run};
 use lb::policy::LoadBalancePolicyKind;
+use lb::subset::SubsetPolicyKind;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -16,6 +17,8 @@ struct Args {
     lb_policy: LoadBalancePolicyKind,
     #[arg(long, default_value_t = 0)]
     lb_subset_size: u32,
+    #[arg(long, value_enum, default_value_t = SubsetPolicyKind::Deterministic)]
+    lb_subset_policy: SubsetPolicyKind,
     #[arg(long)]
     seed: Option<u64>,
     #[arg(long)]
@@ -40,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         n: cli.n,
         lb_policy: cli.lb_policy,
         lb_subset_size: cli.lb_subset_size,
+        lb_subset_policy: cli.lb_subset_policy,
         seed: cli.seed,
         rps: cli.rps,
         slo_ms: cli.slo_ms,
@@ -86,6 +90,7 @@ mod tests {
             "tests/fanin/load.json",
         ]);
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::PowerOfTwo);
+        assert_eq!(cli.lb_subset_policy, SubsetPolicyKind::Deterministic);
         assert_eq!(cli.scale, 0);
         assert_eq!(cli.rps, None);
         assert_eq!(cli.slo_ms, None);

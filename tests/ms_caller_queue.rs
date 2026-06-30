@@ -1,5 +1,6 @@
 use lb::microservice::{MsArgs, OutputFormat, run};
 use lb::policy::LoadBalancePolicyKind;
+use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
 
 fn caller_queue_args(seed: u64, n: u32) -> MsArgs {
@@ -10,6 +11,7 @@ fn caller_queue_args(seed: u64, n: u32) -> MsArgs {
         n,
         lb_policy: LoadBalancePolicyKind::LeastRequest,
         lb_subset_size: 0,
+        lb_subset_policy: SubsetPolicyKind::Deterministic,
         seed: Some(seed),
         rps: None,
         slo_ms: None,
@@ -50,6 +52,7 @@ fn f1_nested_callgraph_completes() {
         n: 200,
         lb_policy: LoadBalancePolicyKind::LeastRequest,
         lb_subset_size: 0,
+        lb_subset_policy: SubsetPolicyKind::Deterministic,
         seed: Some(7),
         rps: None,
         slo_ms: None,

@@ -11,6 +11,7 @@ use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, Sin
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
 use policy::LoadBalancePolicyKind;
+use lb::subset::{self, SubsetPolicyKind};
 use rand::Rng;
 use serde::Serialize;
 use server::{Server, Task};
@@ -350,6 +351,8 @@ struct Args {
     lb_policy: LoadBalancePolicyKind,
     #[arg(long, default_value_t = 0)]
     lb_subset_size: u32,
+    #[arg(long, value_enum, default_value_t = SubsetPolicyKind::Deterministic)]
+    lb_subset_policy: SubsetPolicyKind,
     #[arg(long, default_value_t = 1)]
     clients: u32,
     #[arg(long)]
@@ -358,18 +361,6 @@ struct Args {
     slo: Option<f64>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
-}
-
-fn random_server_subset(n_servers: usize, subset_size: u32) -> Vec<usize> {
-    let k = if subset_size == 0 {
-        n_servers
-    } else {
-        (subset_size as usize).min(n_servers).max(1)
-    };
-    let mut indices: Vec<usize> = (0..n_servers).collect();
-    rng::shuffle(&mut indices);
-    indices.truncate(k);
-    indices
 }
 
 fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
@@ -402,7 +393,12 @@ fn run_simulation(
     let mut lb_addresses = Vec::with_capacity(n_clients as usize);
 
     for i in 0..n_clients as usize {
-        let server_indices = random_server_subset(n_servers, args.lb_subset_size);
+        let server_indices = subset::assign_subset(
+            args.lb_subset_policy,
+            n_servers,
+            i,
+            args.lb_subset_size,
+        );
         let mut load_balancer = LoadBalancer::new(
             args.lb_policy.build(),
             n_servers,

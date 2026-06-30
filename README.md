@@ -24,7 +24,7 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 
-Each load balancer can be restricted to a random subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB independently samples `min(k, servers)` servers at startup and only routes among that subset using its own local inflight counts.
+Each load balancer can be restricted to a subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
 
 ## Metrics
 
@@ -95,6 +95,7 @@ cargo build --release
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
 | `--lb-policy` | `least-request` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
+| `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
 | `--format` | `human` | `human` or `json` |
 | `--scale` | `0` | Add this many cores and replicas to every microservice |
@@ -142,6 +143,7 @@ Options:
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
+| `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
 | `--slo` | (none) | SLO latency threshold in seconds; when set, reports P(latency > SLO) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
@@ -183,6 +185,7 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--clients` | `1` | Number of independent clients |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
+| `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible simulation |
 | `--slo` | (none) | SLO latency threshold in seconds (marked on CDF when set) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
@@ -258,7 +261,7 @@ python plot_cdfs.py --simulator ms \
   --mark 25 --mark 50
 ```
 
-Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms, `power-of-two` for lb), `--lb-subset-size`, `--seed`, `--binary`, `--comment`.
+Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms, `power-of-two` for lb), `--lb-subset-size`, `--lb-subset-policy`, `--seed`, `--binary`, `--comment`.
 
 ## Plot SLO violation probability vs load
 

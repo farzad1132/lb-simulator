@@ -112,6 +112,15 @@ All interfaces of a service share the same replica pool. The queue is per-replic
 
 User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-service replicas.
 
+### Replica subsetting
+
+When `--lb-subset-size k > 0`, each balancer only routes among `min(k, replicas)` targets. Subset assignment is controlled by `--lb-subset-policy` (default `deterministic`):
+
+- **EdgeBalancer:** client id is the API index (APIs sorted lexicographically).
+- **ReplicaBalancer:** client id is `replica_idx` within the calling service. Each replica balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
+
+See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm.
+
 ### What is NOT modeled
 
 - Network latency between services
@@ -286,6 +295,7 @@ cargo build --release
 | `--n` | Total requests, split across APIs proportional to RPS |
 | `--lb-policy` | Load-balancing policy: `random`, `power-of-two`, `least-request` (default), or `round-robin` |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all) |
+| `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
 | `--seed` | Optional RNG seed for reproducible runs (uses single-threaded simulation) |
 | `--format` | `human` or `json` |
 | `--trace` | Emit a human-readable request-flow timeline on stderr |
