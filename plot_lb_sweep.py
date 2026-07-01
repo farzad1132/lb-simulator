@@ -24,7 +24,9 @@ from plot_cdfs import (
 )
 from plotting_primitive import (
     ACM_COMPACT_HALF,
+    PlotStyle,
     SubplotGrid,
+    configure_y_axis_ticks,
     ecdf_probability,
     percentile,
     plot_line,
@@ -214,7 +216,7 @@ def metric_ylabel(metric: str) -> str:
     if kind == "utilization":
         return "Utilization (%)"
     if kind == "slo-violation":
-        return "P(latency > SLO)"
+        return "SLO Violation Ratio"
     return f"p{int(pct)} e2e latency (s)"
 
 
@@ -264,6 +266,56 @@ def format_run_summary(
         parts.append(f"p{int(pct)}={metric_value:.6f}s")
     parts.append(f"utilization={data['utilization_pct']:.1f}%")
     return "  ".join(parts)
+
+
+def _slo_violation_y_step(y_top: float, *, target_ticks: int = 5) -> float:
+    import math
+
+    if y_top <= 0:
+        return 1e-4
+    magnitude = 10 ** math.floor(math.log10(y_top))
+    nice_steps = [
+        magnitude * scale * mult
+        for scale in (1, 0.1, 0.01)
+        for mult in (1, 2, 5)
+    ]
+    best_step = nice_steps[0]
+    best_error = float("inf")
+    for candidate in nice_steps:
+        tick_count = y_top / candidate
+        if tick_count < 2:
+            continue
+        error = abs(tick_count - target_ticks)
+        if error < best_error:
+            best_error = error
+            best_step = candidate
+    return best_step
+
+
+def _configure_slo_violation_y_axis(
+    ax,
+    series: list[tuple[str, list[float]]],
+    style: PlotStyle,
+) -> None:
+    all_y = [v for _, ys in series for v in ys]
+    if not all_y or max(all_y) == 0.0:
+        ax.set_ylim(0.0, 1e-4)
+        ax.set_yticks([0.0])
+        ax.set_yticklabels(["0"], fontsize=style.font_size - 1)
+        return
+
+    y_max = min(1.0, max(all_y))
+    pad = style.axis_guard_fraction * y_max
+    y_top = min(1.0, y_max + pad)
+    y_step = _slo_violation_y_step(y_top)
+    configure_y_axis_ticks(
+        ax,
+        y_data=all_y,
+        style=style,
+        ylim=(0.0, y_top),
+        y_step=y_step,
+    )
+    ax.set_ylim(0.0, y_top)
 
 
 def default_output_path(sweep: str, metric: str) -> Path:
@@ -327,6 +379,7 @@ def plot_sweep(
     sweep_spec: ParamSpec,
     metric: str,
     output_path: Path,
+    title: str | None = None,
 ) -> None:
     style = ACM_COMPACT_HALF
     grid = SubplotGrid(style, layout="1x1")
@@ -360,15 +413,27 @@ def plot_sweep(
 
     ylabel = metric_ylabel(metric)
     if parse_metric(metric)[0] == "slo-violation":
-        ax.set_ylim(0.0, 1.0)
+        _configure_slo_violation_y_axis(ax, series, style)
 
     grid.configure_labels(
         pattern="leftmost_y_bottom_x",
         xlabel=sweep_spec.xlabel,
         ylabel=ylabel,
+        title=title or "",
     )
     grid.add_shared_legend(position="top")
     grid.save(output_path)
+
+
+def plot_title(args: argparse.Namespace, sweep: str) -> str | None:
+    parts: list[str] = []
+    if sweep != "load":
+        parts.append(f"load={fixed_param_value(args, 'load'):g}")
+    if sweep != "clients":
+        parts.append(f"clients={fixed_param_value(args, 'clients')}")
+    if sweep != "servers":
+        parts.append(f"servers={fixed_param_value(args, 'servers')}")
+    return "  ".join(parts) if parts else None
 
 
 def parse_args() -> argparse.Namespace:
@@ -389,7 +454,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--metric",
-        default="p99",
+        default="slo-violation",
         help="Y-axis metric: p99, p50, p90, utilization, slo-violation, or p{N}",
     )
     parser.add_argument(
@@ -556,12 +621,14 @@ def main() -> None:
 
     output_path = args.output or default_output_path(args.sweep, args.metric)
     output_path = output_path_with_comment(output_path, args.comment)
+    title = plot_title(args, args.sweep)
     plot_sweep(
         sweep_values,
         series,
         sweep_spec=sweep_spec,
         metric=args.metric,
         output_path=output_path,
+        title=title,
     )
     print(f"wrote {output_path}", file=sys.stderr)
 
