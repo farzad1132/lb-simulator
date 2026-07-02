@@ -27,6 +27,7 @@ os.environ.setdefault("XDG_CACHE_HOME", str(_XDG_CACHE))
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from tqdm import tqdm
+import numpy as np
 
 from plot_cdfs import (
     REPO_ROOT,
@@ -42,7 +43,13 @@ from plot_lb_sweep import (
     parse_metric,
     range_values,
 )
-from plotting_primitive import ACM_COMPACT_HALF, SubplotGrid, configure_y_axis_ticks, plot_line
+from plotting_primitive import (
+    ACM_COMPACT_HALF,
+    SubplotGrid,
+    configure_y_axis_ticks,
+    distinct_series_styles,
+    plot_line,
+)
 
 DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
@@ -63,6 +70,7 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("P2C-11", "power-of-two", 10, 11),
     ExperimentConfig("P2C-12", "power-of-two", 10, 12),
     ExperimentConfig("P2C-13", "power-of-two", 10, 13),
+    ExperimentConfig("P2C-14", "power-of-two", 10, 14)
 ]
 
 
@@ -94,7 +102,10 @@ def reference_arrival_rates(
         step_flag="--ref-load-step",
     )
     ref_capacity = max(ref_servers, 1) * max(ref_concurrency, 1)
-    return [load * ref_capacity / service_mean for load in ref_loads]
+    return [
+        round(load * ref_capacity / service_mean, 1)
+        for load in ref_loads
+    ]
 
 
 def resolve_service_mean(args: argparse.Namespace) -> float:
@@ -135,7 +146,7 @@ def format_run_summary(
     measured_rate = float(data["total_arrival_rate"])
     parts = [
         f"label={config.label}",
-        f"rate={arrival_rate:g} task/s",
+        f"rate={arrival_rate:.1f} task/s",
         f"load={load:g}",
         f"servers={config.servers}",
         f"clients={config.clients}",
@@ -206,16 +217,33 @@ def run_comparison_sweep(
     return series
 
 
-def _nice_axis_step(span: float, target_ticks: int = 5) -> float:
+def _y_ticks_in_range(y_min: float, y_max: float, step: float) -> list[float]:
+    tick_start = math.floor(y_min / step) * step
+    tick_end = math.ceil(y_max / step) * step
+    ticks = np.arange(tick_start, tick_end + step / 2, step)
+    return [float(t) for t in ticks if y_min - 1e-9 <= t <= y_max + 1e-9]
+
+
+def _nice_axis_step(y_min: float, y_max: float, min_ticks: int = 5) -> float:
+    span = y_max - y_min
     if span <= 0:
         return 1.0
-    raw = span / max(target_ticks - 1, 1)
-    magnitude = 10 ** math.floor(math.log10(raw))
-    for mult in (1, 2, 5, 10):
-        step = mult * magnitude
-        if span / step <= target_ticks:
-            return step
-    return 10 * magnitude
+    raw = span / max(min_ticks - 1, 1)
+    magnitude = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
+    candidates: list[float] = []
+    for scale in (0.01, 0.1, 1, 10):
+        for mult in (1, 2, 5, 10):
+            step = mult * magnitude * scale
+            if step > 0:
+                candidates.append(step)
+    valid = [
+        step
+        for step in sorted(set(candidates))
+        if len(_y_ticks_in_range(y_min, y_max, step)) >= min_ticks
+    ]
+    if valid:
+        return max(valid)
+    return span / max(min_ticks - 1, 1)
 
 
 def plot_comparison(
@@ -229,19 +257,23 @@ def plot_comparison(
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
 
-    for color_idx, (label, _xs, y_values) in enumerate(series):
+    series_styles = distinct_series_styles(len(series), style)
+    for i, (label, _xs, y_values) in enumerate(series):
+        line_style = series_styles[i]
         plot_line(
             ax,
             arrival_rates,
             y_values,
             label=label,
             style=style,
-            color_idx=color_idx,
             show_markers=True,
+            color=line_style["color"],
+            marker=line_style["marker"],
+            linestyle=line_style["linestyle"],
         )
 
     ax.set_xticks(arrival_rates)
-    ax.set_xticklabels([f"{rate:g}" for rate in arrival_rates])
+    ax.set_xticklabels([f"{rate:.1f}" for rate in arrival_rates])
     ax.set_xlim(min(arrival_rates), max(arrival_rates))
 
     all_y = [v for _, _, ys in series for v in ys]
@@ -249,7 +281,7 @@ def plot_comparison(
         y_min = min(all_y)
         y_max = 4 * y_min
         y_floor = 0.0
-        y_step = _nice_axis_step(y_max - y_floor)
+        y_step = _nice_axis_step(y_floor, y_max, min_ticks=5)
         configure_y_axis_ticks(
             ax,
             y_data=all_y,

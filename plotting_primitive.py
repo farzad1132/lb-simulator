@@ -105,6 +105,125 @@ ACM_QUARTER = PlotStyle(width_points=120, font_size=TEXT_SIZE, title_size=TEXT_S
 ACM_COMPACT_HALF = PlotStyle(width_points=240, font_size=TEXT_SIZE, title_size=TEXT_SIZE, legend_size=TEXT_SIZE, marker_size=4)  # 3.33 inches (full column)
 ACM_COMPACT_FULL = PlotStyle(width_points=504, font_size=TEXT_SIZE, legend_size=TEXT_SIZE, title_size=TEXT_SIZE, marker_size=4)  # 7 inches (double column)
 
+_EXTRA_MARKERS = ["h", "H", "+", "x", "X", "d", "<", ">", "1", "2", "3", "4"]
+_EXTRA_LINE_STYLES = [
+    (0, (6, 2)),
+    (0, (3, 1, 1, 1)),
+    (0, (5, 1, 2, 1)),
+    (0, (1, 1)),
+    (0, (4, 4)),
+    (0, (8, 2, 2, 2)),
+    (0, (2, 4)),
+    (0, (6, 1, 2, 1, 2, 1)),
+]
+
+
+def _unique_pool(base: list, extra: list) -> list:
+    pool: list = []
+    for item in base + extra:
+        if item not in pool:
+            pool.append(item)
+    return pool
+
+
+def distinct_colors(n: int, style: PlotStyle) -> list[str]:
+    """Return *n* unique colors, extending the style palette if needed."""
+    if n <= 0:
+        return []
+    if n <= len(style.colors):
+        return style.colors[:n]
+
+    from matplotlib import colors as mcolors
+    import matplotlib.pyplot as plt
+
+    palette = list(style.colors)
+    cmap = plt.get_cmap("tab20")
+    idx = 0
+    while len(palette) < n:
+        hex_color = mcolors.to_hex(cmap(idx % 20))
+        if hex_color not in palette:
+            palette.append(hex_color)
+        idx += 1
+        if idx > 200:
+            raise ValueError(f"unable to find {n} unique colors")
+    return palette[:n]
+
+
+def distinct_markers(n: int, style: PlotStyle) -> list[str]:
+    """Return *n* unique marker shapes."""
+    pool = _unique_pool(list(style.markers), _EXTRA_MARKERS)
+    if n > len(pool):
+        raise ValueError(
+            f"need {n} unique markers but only {len(pool)} distinct shapes available"
+        )
+    return pool[:n]
+
+
+def distinct_line_styles(n: int, style: PlotStyle) -> list[Any]:
+    """Return *n* line styles (unique where the pool allows)."""
+    pool = _unique_pool(list(style.line_styles), _EXTRA_LINE_STYLES)
+    if n <= len(pool):
+        return pool[:n]
+    out = list(pool)
+    while len(out) < n:
+        out.extend(style.line_styles)
+    return out[:n]
+
+
+def distinct_series_styles(
+    n: int,
+    style: Optional[PlotStyle] = None,
+) -> list[dict[str, Any]]:
+    """Per-series color, marker, and linestyle with no repeated colors or markers."""
+    style = style or ACM_COMPACT_HALF
+    colors = distinct_colors(n, style)
+    markers = distinct_markers(n, style)
+    line_styles = distinct_line_styles(n, style)
+    return [
+        {"color": colors[i], "marker": markers[i], "linestyle": line_styles[i]}
+        for i in range(n)
+    ]
+
+
+def legend_ncol_for_plot_width(
+    fig,
+    handles,
+    labels: List[str],
+    max_width_inches: float,
+    *,
+    fontsize: float,
+    handlelength: float = 1.5,
+    handletextpad: float = 0.4,
+    columnspacing: float = 0.8,
+    borderaxespad: float = 0.2,
+) -> int:
+    """Pick legend column count so rendered width fits within *max_width_inches*."""
+    n = len(labels)
+    if n <= 1:
+        return 1
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    for ncol in range(n, 0, -1):
+        leg = fig.legend(
+            handles,
+            labels,
+            loc="center",
+            ncol=ncol,
+            frameon=False,
+            fontsize=fontsize,
+            handletextpad=handletextpad,
+            columnspacing=columnspacing,
+            handlelength=handlelength,
+            borderaxespad=borderaxespad,
+        )
+        bbox = leg.get_window_extent(renderer).transformed(fig.dpi_scale_trans.inverted())
+        leg.remove()
+        if bbox.width <= max_width_inches:
+            return ncol
+    return 1
+
 
 class SubplotGrid:
     """Flexible multi-panel figure manager with compact ACM styling.
@@ -357,8 +476,18 @@ class SubplotGrid:
                 **kwargs
             )
     
+    def _legend_max_width_inches(self) -> float:
+        """Width of the widest subplot in inches (after layout)."""
+        self.fig.canvas.draw()
+        widths = [
+            ax.get_window_extent().transformed(self.fig.dpi_scale_trans.inverted()).width
+            for ax in self.axes
+        ]
+        return max(widths) if widths else self.style.width_inches
+
     def add_shared_legend(self, position: str = "top", ncol: Optional[int] = None,
-                         handles=None, labels=None, two_rows: bool = False):
+                         handles=None, labels=None, two_rows: bool = False,
+                         wrap_to_plot_width: bool = True):
         """Add figure-level legend shared across all subplots.
         
         Constrained layout automatically allocates space for the legend.
@@ -369,6 +498,8 @@ class SubplotGrid:
             handles: Legend handles (auto-collected from axes if None)
             labels: Legend labels (auto-collected from axes if None)
             two_rows: Split legend into two rows (sets ncol = ceil(n/2))
+            wrap_to_plot_width: When ncol is None and two_rows is False, reduce
+                columns until the legend fits within the subplot width
         """
         import math
         
@@ -386,7 +517,18 @@ class SubplotGrid:
             return
         
         if ncol is None:
-            ncol = math.ceil(len(labels) / 2) if two_rows else len(labels)
+            if two_rows:
+                ncol = math.ceil(len(labels) / 2)
+            elif wrap_to_plot_width:
+                ncol = legend_ncol_for_plot_width(
+                    self.fig,
+                    handles,
+                    labels,
+                    self._legend_max_width_inches(),
+                    fontsize=self.style.legend_size,
+                )
+            else:
+                ncol = len(labels)
         
         loc_map = {
             "top": "outside upper center",
