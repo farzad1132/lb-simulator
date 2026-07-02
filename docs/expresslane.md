@@ -2,6 +2,8 @@
 
 Express lane mode adds a dedicated overflow path for tasks that would otherwise wait too long in regular-server queues. Regular servers evict excess queued work to a shared express load balancer, which routes to a separate pool of express servers using least-request policy.
 
+**lb only** — not available in the microservice simulator (`ms`). See [lb-vs-ms.md](lb-vs-ms.md).
+
 Enable with `--expresslane`, which requires `--express-size` and exactly one of `--express-th` or `--express-del-th`.
 
 ## Topology

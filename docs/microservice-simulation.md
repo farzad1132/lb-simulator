@@ -2,6 +2,8 @@
 
 This document describes how the microservice simulator works: inputs, internal model, request flow, and metrics. The simulator is implemented as a separate binary (`ms`) and module (`src/microservice/`) that does not modify the flat load-balancer simulator (`lb`).
 
+See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the flat load-balancer simulator (including which features are shared, lb-only, or ms-only).
+
 ## Overview
 
 The simulator models a microservice application as a directed graph of endpoints. User requests arrive as independent Poisson processes (one per API), enter through a **per-API edge load balancer**, and traverse the callgraph as **nested synchronous RPCs**: each replica performs local work, calls downstream services sequentially (edge order) via its **own replica load balancer**, waits for each subtree to return, then returns directly to its caller replica. Queueing happens at each replica.
@@ -275,7 +277,7 @@ python compare_lb_ms.py --scenario all --n 200000
 
 Automated check: `cargo test lb_ms_equivalence`.
 
-Nested multi-hop metrics (`f1`, etc.) differ from the old flat-path simulator by design.
+Nested multi-hop metrics (`f1`, etc.) differ from the old flat-path simulator by design. Express lane mode is not available in `ms`; see [lb-vs-ms.md](lb-vs-ms.md).
 
 ## CLI and output
 
@@ -293,7 +295,7 @@ cargo build --release
 | `--callgraph` | Path to callgraph JSON (required) |
 | `--load-file` | Path to per-API load JSON (`rps` + `slo_ms`) (required) |
 | `--n` | Total requests, split across APIs proportional to RPS |
-| `--lb-policy` | Load-balancing policy: `random`, `power-of-two`, `least-request` (default), or `round-robin` |
+| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, or `round-robin` |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all) |
 | `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
 | `--seed` | Optional RNG seed for reproducible runs (uses single-threaded simulation) |

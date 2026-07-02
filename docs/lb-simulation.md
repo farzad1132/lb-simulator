@@ -2,6 +2,8 @@
 
 This document describes how the main load-balancer simulator works: simulation entities, port wiring, task flow, load-balancing behavior, and metrics. The simulator is implemented as the `lb` binary and the modules `src/main.rs`, `src/load_balancer.rs`, `src/server.rs`, and `src/policy.rs`.
 
+See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the microservice simulator.
+
 ## Overview
 
 The simulator models a pool of FCFS servers with configurable concurrency (CPU cores). Tasks arrive as independent Poisson processes from one or more clients, are routed by each client's load balancer to a shared server pool, and complete with sampled service times. Completed tasks are collected in a shared sink for post-run metrics.

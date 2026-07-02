@@ -17,6 +17,8 @@ With `--clients 1`, this reduces to a single client → load balancer → server
 
 See [docs/lb-simulation.md](docs/lb-simulation.md) for the full design (port wiring, task flow, load balancing, metrics).
 
+For a side-by-side feature comparison with the microservice simulator, see [docs/lb-vs-ms.md](docs/lb-vs-ms.md).
+
 **Express lane mode** (`--expresslane`) adds a dedicated overflow path to express servers when regular-server queues exceed a threshold. Delay eviction supports an optional `--ideal` work-based threshold; see [docs/expresslane.md](docs/expresslane.md).
 
 Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
@@ -79,7 +81,7 @@ The binary is at `target/release/lb`.
 
 ## Microservice simulator (`ms`)
 
-A separate binary simulates microservice applications from a callgraph and per-API load file. Callgraph service times are in **milliseconds**; `load.json` specifies per-API **RPS** and **SLO latency (`slo_ms`)**. See [docs/microservice-simulation.md](docs/microservice-simulation.md) for the full design (request flow, metrics, wiring).
+A separate binary simulates microservice applications from a callgraph and per-API load file. Callgraph service times are in **milliseconds**; `load.json` specifies per-API **RPS** and **SLO latency (`slo_ms`)**. See [docs/microservice-simulation.md](docs/microservice-simulation.md) for the full design (request flow, metrics, wiring). Feature differences vs `lb`: [docs/lb-vs-ms.md](docs/lb-vs-ms.md).
 
 ```bash
 cargo build --release
@@ -95,7 +97,7 @@ cargo build --release
 | `--callgraph` | (required) | Path to callgraph JSON |
 | `--load-file` | (required) | Path to per-API load JSON (`rps` + `slo_ms`) |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `least-request` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
@@ -277,7 +279,7 @@ python plot_cdfs.py --simulator ms \
   --mark 25 --mark 50
 ```
 
-Shared flags with lb mode: `--n`, `--lb-policy` (default `least-request` for ms, `power-of-two` for lb), `--lb-subset-size`, `--lb-subset-policy`, `--seed`, `--binary`, `--comment`.
+Shared flags with lb mode: `--n`, `--lb-policy` (default `power-of-two` for both), `--lb-subset-size`, `--lb-subset-policy`, `--seed`, `--binary`, `--comment`.
 
 ## Plot LB parameter sweep
 
