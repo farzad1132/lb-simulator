@@ -290,7 +290,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ideal",
         action="store_true",
-        help="Use work-based delay estimate for express-del-th eviction",
+        help="Immediate oracle eviction when projected delay exceeds threshold (default: monitored timer)",
     )
     parser.add_argument("--n", type=int, default=1_000_000)
     parser.add_argument(

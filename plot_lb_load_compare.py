@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Compare centralized vs push LB policies at equal offered load (task/s).
+"""Compare lb experiment configs while sweeping raw load on the x-axis.
 
-Each experiment config may use a different server count; --load is scaled so
-all configs share the same total arrival rate on the x-axis.
+Each config may differ in policy, topology, and lb-subset-size. All configs
+share the same load values (target utilization) on the x-axis.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
-_CACHE_ROOT = Path(tempfile.gettempdir()) / "lb-centralized-compare-plot-cache"
+_CACHE_ROOT = Path(tempfile.gettempdir()) / "lb-load-compare-plot-cache"
 _MPL_CACHE = _CACHE_ROOT / "matplotlib"
 _XDG_CACHE = _CACHE_ROOT / "xdg"
 _MPL_CACHE.mkdir(parents=True, exist_ok=True)
@@ -25,14 +25,12 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
 os.environ.setdefault("XDG_CACHE_HOME", str(_XDG_CACHE))
 os.environ.setdefault("MPLBACKEND", "Agg")
 
-from tqdm import tqdm
 import numpy as np
+from tqdm import tqdm
 
 from lb_plot_configs import ExperimentConfig, select_configs
 from plot_cdfs import (
     REPO_ROOT,
-    SERVICE_MEAN,
-    bimodal_service_mean,
     ensure_release_binary,
     output_path_with_comment,
     run_simulation,
@@ -55,114 +53,74 @@ DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
-    ExperimentConfig("CQ-10", "centralized", 10, 10),
-    ExperimentConfig("P2C-10", "power-of-two", 10, 10),
-    ExperimentConfig("P2C-11", "power-of-two", 10, 11),
-    ExperimentConfig("P2C-12", "power-of-two", 10, 12),
-    ExperimentConfig("P2C-13", "power-of-two", 10, 13),
-    ExperimentConfig("P2C-14", "power-of-two", 10, 14)
+    ExperimentConfig("CQ", "centralized", 10, 10),
+    ExperimentConfig("P2C-all", "power-of-two", 10, 10, lb_subset_size=0),
+    ExperimentConfig("LR-k1", "least-request", 10, 10, lb_subset_size=1),
+    ExperimentConfig("LR-k2", "least-request", 10, 10, lb_subset_size=2),
+    ExperimentConfig("LR-k4", "least-request", 10, 10, lb_subset_size=4),
+    ExperimentConfig("LR-all", "least-request", 10, 10, lb_subset_size=0),
 ]
 
 
-def load_for_arrival_rate(
-    arrival_rate: float,
-    servers: int,
-    concurrency: int = 1,
-    *,
-    service_mean: float = SERVICE_MEAN,
-) -> float:
-    capacity = max(servers, 1) * max(concurrency, 1)
-    return arrival_rate * service_mean / capacity
-
-
-def reference_arrival_rates(
-    ref_load_min: float,
-    ref_load_max: float,
-    ref_load_step: float,
-    *,
-    ref_servers: int,
-    ref_concurrency: int = 1,
-    service_mean: float = SERVICE_MEAN,
-) -> list[float]:
-    ref_loads = range_values(
-        ref_load_min,
-        ref_load_max,
-        ref_load_step,
+def resolve_load_values(args: argparse.Namespace) -> list[float]:
+    if args.load is not None:
+        return list(args.load)
+    return range_values(
+        args.load_min,
+        args.load_max,
+        args.load_step,
         value_type=float,
-        step_flag="--ref-load-step",
+        step_flag="--load-step",
     )
-    ref_capacity = max(ref_servers, 1) * max(ref_concurrency, 1)
-    return [
-        round(load * ref_capacity / service_mean, 1)
-        for load in ref_loads
-    ]
-
-
-def resolve_service_mean(args: argparse.Namespace) -> float:
-    if args.service_dist == "bimodal":
-        if args.service_modes is None or args.service_mode_probs is None:
-            raise SystemExit(
-                "--service-modes and --service-mode-probs are required "
-                "with --service-dist bimodal"
-            )
-        return bimodal_service_mean(args.service_modes, args.service_mode_probs)
-    return SERVICE_MEAN
 
 
 def format_run_summary(
     *,
     config: ExperimentConfig,
-    arrival_rate: float,
     load: float,
     metric_name: str,
     metric_value: float,
     data: dict[str, Any],
 ) -> str:
     kind, pct = parse_metric(metric_name)
-    measured_rate = float(data["total_arrival_rate"])
     parts = [
         f"label={config.label}",
-        f"rate={arrival_rate:.1f} task/s",
         f"load={load:g}",
+        f"k={config.lb_subset_size}",
+        f"policy={config.lb_policy}",
         f"servers={config.servers}",
         f"clients={config.clients}",
-        f"measured_rate={measured_rate:.4f}",
     ]
     if kind == "utilization":
         parts.append(f"utilization={metric_value:.1f}%")
+    elif kind == "slo-violation":
+        parts.append(f"P(latency>SLO)={metric_value:.6f}")
     else:
         parts.append(f"p{int(pct)}={metric_value:.6f}s")
     parts.append(f"utilization={data['utilization_pct']:.1f}%")
     return "  ".join(parts)
 
 
-def run_comparison_sweep(
+def run_load_sweep(
     binary: Path,
     configs: list[ExperimentConfig],
-    arrival_rates: list[float],
+    load_values: list[float],
     *,
     base_kwargs: dict[str, Any],
-    service_mean: float,
     metric: str,
     slo: float | None,
-) -> list[tuple[str, list[float], list[float]]]:
-    """Return (label, x arrival rates, y metric values) per config."""
-    series: list[tuple[str, list[float], list[float]]] = [
-        (config.label, [], []) for config in configs
+) -> list[tuple[str, list[float]]]:
+    """Return (label, y metric values) per config; x is shared load_values."""
+    series: list[tuple[str, list[float]]] = [
+        (config.label, []) for config in configs
     ]
-    pairs = list(product(configs, arrival_rates))
+    pairs = list(product(configs, load_values))
 
-    for config, arrival_rate in tqdm(
+    for config, load in tqdm(
         pairs,
-        desc="config × arrival rate",
+        desc="config × load",
         unit="run",
     ):
-        load = load_for_arrival_rate(
-            arrival_rate,
-            config.servers,
-            config.concurrency,
-            service_mean=service_mean,
-        )
         sim_kwargs = {
             **base_kwargs,
             "load": load,
@@ -178,12 +136,10 @@ def run_comparison_sweep(
             sys.exit(1)
         metric_value = extract_metric(data, metric, slo=slo)
         idx = configs.index(config)
-        series[idx][1].append(arrival_rate)
-        series[idx][2].append(metric_value)
+        series[idx][1].append(metric_value)
         tqdm.write(
             format_run_summary(
                 config=config,
-                arrival_rate=arrival_rate,
                 load=load,
                 metric_name=metric,
                 metric_value=metric_value,
@@ -222,9 +178,9 @@ def _nice_axis_step(y_min: float, y_max: float, min_ticks: int = 5) -> float:
     return span / max(min_ticks - 1, 1)
 
 
-def plot_comparison(
-    arrival_rates: list[float],
-    series: list[tuple[str, list[float], list[float]]],
+def plot_load_compare(
+    load_values: list[float],
+    series: list[tuple[str, list[float]]],
     *,
     metric: str,
     output_path: Path,
@@ -234,11 +190,11 @@ def plot_comparison(
     ax = grid.get_ax(0, 0)
 
     series_styles = distinct_series_styles(len(series), style)
-    for i, (label, _xs, y_values) in enumerate(series):
+    for i, (label, y_values) in enumerate(series):
         line_style = series_styles[i]
         plot_line(
             ax,
-            arrival_rates,
+            load_values,
             y_values,
             label=label,
             style=style,
@@ -248,11 +204,11 @@ def plot_comparison(
             linestyle=line_style["linestyle"],
         )
 
-    ax.set_xticks(arrival_rates)
-    ax.set_xticklabels([f"{rate:.1f}" for rate in arrival_rates])
-    ax.set_xlim(min(arrival_rates), max(arrival_rates))
+    ax.set_xticks(load_values)
+    ax.set_xticklabels([f"{load:g}" for load in load_values])
+    ax.set_xlim(min(load_values), max(load_values))
 
-    all_y = [v for _, _, ys in series for v in ys]
+    all_y = [v for _, ys in series for v in ys]
     if all_y:
         y_min = min(all_y)
         y_max = 4 * y_min
@@ -269,7 +225,7 @@ def plot_comparison(
 
     grid.configure_labels(
         pattern="leftmost_y_bottom_x",
-        xlabel="Total arrival rate (task/s)",
+        xlabel="Load",
         ylabel=metric_ylabel(metric),
         title="",
     )
@@ -279,14 +235,13 @@ def plot_comparison(
 
 def default_output_path(metric: str) -> Path:
     metric_slug = metric.replace("-", "_")
-    return DEFAULT_OUTPUT_DIR / f"lb_centralized_compare_{metric_slug}.pdf"
+    return DEFAULT_OUTPUT_DIR / f"lb_load_compare_{metric_slug}.pdf"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare centralized vs push LB policies at equal offered load "
-            "(task/s), scaling --load per server count."
+            "Compare lb experiment configs while sweeping raw load on the x-axis."
         ),
     )
     parser.add_argument(
@@ -317,34 +272,29 @@ def parse_args() -> argparse.Namespace:
         help="Suffix appended to output filename before .pdf",
     )
     parser.add_argument(
-        "--ref-load-min",
+        "--load",
         type=float,
-        default=0.1,
-        help="Reference load sweep minimum (default: 0.1)",
+        nargs="*",
+        default=None,
+        help="Explicit load values for x-axis (overrides min/max/step)",
     )
     parser.add_argument(
-        "--ref-load-max",
+        "--load-min",
+        type=float,
+        default=0.1,
+        help="Load sweep minimum (default: 0.1)",
+    )
+    parser.add_argument(
+        "--load-max",
         type=float,
         default=0.9,
-        help="Reference load sweep maximum (default: 0.9)",
+        help="Load sweep maximum (default: 0.9)",
     )
     parser.add_argument(
-        "--ref-load-step",
+        "--load-step",
         type=float,
         default=0.1,
-        help="Reference load sweep step (default: 0.1)",
-    )
-    parser.add_argument(
-        "--ref-servers",
-        type=int,
-        default=10,
-        help="Reference server count for load-to-rate mapping (default: 10)",
-    )
-    parser.add_argument(
-        "--ref-concurrency",
-        type=int,
-        default=1,
-        help="Reference concurrency for load-to-rate mapping (default: 1)",
+        help="Load sweep step (default: 0.1)",
     )
     parser.add_argument(
         "--config-index",
@@ -354,7 +304,7 @@ def parse_args() -> argparse.Namespace:
         metavar="I",
         help="Run only these DEFAULT_CONFIGS indices (0-based)",
     )
-    parser.add_argument("--n", type=int, default=100_000_0)
+    parser.add_argument("--n", type=int, default=1_000_000)
     parser.add_argument(
         "--service-dist",
         choices=["exponential", "constant", "bimodal"],
@@ -394,17 +344,9 @@ def main() -> None:
     parse_metric(args.metric)
 
     configs = select_configs(DEFAULT_CONFIGS, args.config_index)
-    service_mean = resolve_service_mean(args)
-    arrival_rates = reference_arrival_rates(
-        args.ref_load_min,
-        args.ref_load_max,
-        args.ref_load_step,
-        ref_servers=args.ref_servers,
-        ref_concurrency=args.ref_concurrency,
-        service_mean=service_mean,
-    )
-    if not arrival_rates:
-        raise SystemExit("no arrival rates in reference load range")
+    load_values = resolve_load_values(args)
+    if not load_values:
+        raise SystemExit("no load values in sweep range")
 
     if args.no_build:
         binary = args.binary or DEFAULT_BINARY
@@ -423,20 +365,19 @@ def main() -> None:
         "slo": args.slo,
     }
 
-    series = run_comparison_sweep(
+    series = run_load_sweep(
         binary,
         configs,
-        arrival_rates,
+        load_values,
         base_kwargs=base_kwargs,
-        service_mean=service_mean,
         metric=args.metric,
         slo=args.slo,
     )
 
     output_path = args.output or default_output_path(args.metric)
     output_path = output_path_with_comment(output_path, args.comment)
-    plot_comparison(
-        arrival_rates,
+    plot_load_compare(
+        load_values,
         series,
         metric=args.metric,
         output_path=output_path,

@@ -179,11 +179,12 @@ Python plotting scripts live in the repo root. Each runs the simulator (or compa
 | [`plot_cdfs.py`](plot_cdfs.py) (lb) | e2e latency (s, log) | CDF | Full latency distribution for a single lb run; optional SLO / threshold marks |
 | [`plot_cdfs.py`](plot_cdfs.py) (ms) | e2e latency (ms, log) | CDF | Per-API latency distribution for the microservice simulator |
 | [`plot_lb_sweep.py`](plot_lb_sweep.py) | sweep param (load, clients, …) | configurable metric (default p99) | Compare LB policies (one line each) while sweeping one simulator parameter |
+| [`plot_lb_load_compare.py`](plot_lb_load_compare.py) | load | configurable metric (default p99) | Compare experiment configs (policy, topology, subset size) at equal utilization |
 | [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) | total arrival rate (task/s) | configurable metric (default p99) | Compare centralized vs power-of-two at equal offered load with different server counts |
 | [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6) | Heatmap of SLO violation rate (%) across load for chain topologies |
 | [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
 
-Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script.
+Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script. Use [`plot_lb_load_compare.py`](plot_lb_load_compare.py) when comparing named configs (different policies, server counts, or subset sizes) at the same load levels.
 
 ## Plot e2e CDF
 
@@ -360,6 +361,44 @@ python plot_lb_sweep.py \
   --load 0.8 \
   --n 100000
 # writes output/lb_clients_p99.pdf
+```
+
+## Plot LB config load compare
+
+`plot_lb_load_compare.py` compares named experiment configs while sweeping **raw load** on the x-axis. Each config can differ in LB policy, client/server counts, concurrency, and `lb_subset_size`. All configs share the same load values (target utilization).
+
+Use this when you want to compare specific topologies at equal utilization. Use [`plot_lb_sweep.py`](plot_lb_sweep.py) for generic one-parameter sweeps with one line per policy. Use [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) when the x-axis should be equal offered load (task/s) across different server counts.
+
+Edit experiment configs in the `DEFAULT_CONFIGS` list at the top of [`plot_lb_load_compare.py`](plot_lb_load_compare.py). Use `--config-index` to run a subset without editing the file.
+
+```bash
+python plot_lb_load_compare.py --n 100000 --seed 42
+# writes output/lb_load_compare_p99.pdf
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--metric` | `p99` | Y-axis: `p99`, `p50`, `p90`, `utilization`, `slo-violation`, or `p{N}` |
+| `--output` | `output/lb_load_compare_{metric}.pdf` | Output PDF path |
+| `--comment` | (none) | Suffix appended to output filename before `.pdf` |
+| `--load` | (see below) | Explicit load values for x-axis |
+| `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range when `--load` omitted |
+| `--config-index` | (all) | Run only these `DEFAULT_CONFIGS` indices (0-based) |
+| `--n` | `1000000` | Tasks per run |
+| `--service-dist` | `exponential` | Service distribution (`exponential`, `constant`, or `bimodal`) |
+| `--seed` | (none) | RNG seed for reproducible runs |
+| `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
+| `--no-build` | (off) | Do not run `cargo build --release` |
+
+Example comparing subset sizes at fixed topology:
+
+```bash
+python plot_lb_load_compare.py \
+  --config-index 1 2 3 4 5 \
+  --load-min 0.3 --load-max 0.9 --load-step 0.1 \
+  --n 100000 \
+  --comment subset
+# writes output/lb_load_compare_p99_subset.pdf
 ```
 
 ## Plot centralized vs scaled power-of-two
