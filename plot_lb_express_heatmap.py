@@ -27,6 +27,11 @@ except ModuleNotFoundError:
     def tqdm(iterable, **_kwargs):
         return iterable
 
+from express_lane_grid import (
+    express_del_th_values,
+    express_size_values,
+    format_run_summary,
+)
 from plot_cdfs import (
     LB_POLICIES,
     REPO_ROOT,
@@ -39,60 +44,11 @@ from plot_lb_sweep import (
     extract_metric,
     metric_ylabel,
     parse_metric,
-    range_values,
 )
 from plotting_primitive import ACM_COMPACT_HALF, SubplotGrid, plot_heatmap
 
 DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
-
-
-def express_size_values(args: argparse.Namespace) -> list[int]:
-    if args.express_size is not None:
-        values = list(args.express_size)
-    else:
-        values = range_values(
-            args.express_size_min,
-            args.express_size_max,
-            args.express_size_step,
-            value_type=int,
-            step_flag="--express-size-step",
-        )
-    max_size = args.servers - 1
-    if max_size < 1:
-        raise SystemExit(f"--servers must be >= 2 for express lane (got {args.servers})")
-    filtered = [v for v in values if 1 <= v <= max_size]
-    if not filtered:
-        raise SystemExit(
-            f"no valid express-size values in [1, {max_size}]; "
-            f"check --express-size or --express-size-min/max/step"
-        )
-    if len(filtered) < len(values):
-        dropped = [v for v in values if v not in filtered]
-        print(
-            f"dropping invalid express-size values (must be in [1, {max_size}]): {dropped}",
-            file=sys.stderr,
-        )
-    return filtered
-
-
-def express_del_th_values(args: argparse.Namespace) -> list[float]:
-    if args.express_del_th is not None:
-        values = [float(v) for v in args.express_del_th]
-    else:
-        values = range_values(
-            args.express_del_th_min,
-            args.express_del_th_max,
-            args.express_del_th_step,
-            value_type=float,
-            step_flag="--express-del-th-step",
-        )
-    if not values:
-        raise SystemExit("no express-del-th values in sweep range")
-    for value in values:
-        if value <= 0:
-            raise SystemExit(f"--express-del-th values must be positive (got {value:g})")
-    return values
 
 
 def annotation_fmt(metric: str) -> str:
@@ -102,33 +58,6 @@ def annotation_fmt(metric: str) -> str:
     if kind == "slo-violation":
         return "{:.3f}"
     return "{:.3f}"
-
-
-def format_run_summary(
-    *,
-    sim_kwargs: dict,
-    metric_name: str,
-    metric_value: float,
-    data: dict,
-) -> str:
-    parts = [
-        f"policy={sim_kwargs['lb_policy']}",
-        f"load={sim_kwargs['load']:g}",
-        f"servers={sim_kwargs['servers']}",
-        f"express_size={sim_kwargs['express_size']}",
-        f"express_del_th={sim_kwargs['express_del_th']:g}",
-    ]
-    if sim_kwargs.get("ideal"):
-        parts.append("ideal")
-    kind, pct = parse_metric(metric_name)
-    if kind == "utilization":
-        parts.append(f"utilization={metric_value:.1f}%")
-    elif kind == "slo-violation":
-        parts.append(f"P(latency>SLO)={metric_value:.6f}")
-    else:
-        parts.append(f"p{int(pct)}={metric_value:.6f}s")
-    parts.append(f"utilization={data['utilization_pct']:.1f}%")
-    return "  ".join(parts)
 
 
 def default_output_path(metric: str) -> Path:

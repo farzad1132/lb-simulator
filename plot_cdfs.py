@@ -231,6 +231,7 @@ def run_simulation(
     expresslane: bool = False,
     express_size: int | None = None,
     express_del_th: float | None = None,
+    express_th: int | None = None,
     ideal: bool = False,
 ) -> dict:
     cmd = [
@@ -266,6 +267,8 @@ def run_simulation(
         cmd.append("--expresslane")
         cmd.extend(["--express-size", str(express_size)])
         cmd.extend(["--express-del-th", str(express_del_th)])
+        if express_th is not None:
+            cmd.extend(["--express-th", str(express_th)])
         if ideal:
             cmd.append("--ideal")
     result = run_subprocess(cmd, label="simulator")

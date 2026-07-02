@@ -181,6 +181,8 @@ Python plotting scripts live in the repo root. Each runs the simulator (or compa
 | [`plot_lb_sweep.py`](plot_lb_sweep.py) | sweep param (load, clients, …) | configurable metric (default p99) | Compare LB policies (one line each) while sweeping one simulator parameter |
 | [`plot_lb_load_compare.py`](plot_lb_load_compare.py) | load | configurable metric (default p99) | Compare experiment configs (policy, topology, subset size) at equal utilization |
 | [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) | total arrival rate (task/s) | configurable metric (default p99) | Compare centralized vs power-of-two at equal offered load with different server counts |
+| [`plot_lb_express_heatmap.py`](plot_lb_express_heatmap.py) | express pool size | express delay threshold | Heatmap of a metric across express-size vs express-del-th |
+| [`optimize_express_lane.py`](optimize_express_lane.py) | — | — | Grid-search express_size × express_del_th × express_th; human-readable log only (no plots) |
 | [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6) | Heatmap of SLO violation rate (%) across load for chain topologies |
 | [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
 
@@ -442,6 +444,37 @@ python plot_lb_centralized_compare.py \
   --ref-load-min 0.1 --ref-load-max 0.5 --ref-load-step 0.1 \
   --n 100000
 ```
+
+## Optimize express lane parameters
+
+`optimize_express_lane.py` grid-searches `express_size`, `express_del_th`, and `express_th` (combined eviction mode) to minimize a metric (default **p99**). There is **no plot or PDF output** — progress is written to a human-readable log under `optimizer_logs/` (gitignored). The log is rewritten after each simulation with a results table, current optimum, and optimum history; rows where a new best is found are marked `NEW OPTIMUM`.
+
+Default grid (with `--servers 10`): express_size 1–4, express_del_th 1–10, express_th 0–6 → 280 runs. Values `express_size=0` and `express_del_th=0` are dropped.
+
+```bash
+python optimize_express_lane.py \
+  --comment bimodal-p2c \
+  --servers 10 --load 0.8 --n 100000
+
+# Resume after interrupt:
+python optimize_express_lane.py --resume optimizer_logs/express_lane_20250702_153045_bimodal-p2c.log
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--comment` | (none) | Label included in log filename (`express_lane_{timestamp}_{comment}_n{N}.log`) |
+| `--log-dir` | `optimizer_logs/` | Directory for optimizer logs |
+| `--resume` | (none) | Continue from an existing log file |
+| `--metric` | `p99` | Objective metric (`p99`, `p50`, `utilization`, `slo-violation`, or `p{N}`) |
+| `--express-size-min/max/step` | `0` / `4` / `1` | Express pool size sweep |
+| `--express-del-th-min/max/step` | `0` / `10` / `1` | Express delay threshold sweep (seconds) |
+| `--express-th-min/max/step` | `0` / `6` / `1` | Express queue depth threshold sweep |
+| `--load` | `0.8` | Target utilization |
+| `--servers` | `10` | Total servers (regular + express) |
+| `--n` | `1000000` | Tasks per run |
+| `--lb-policy` | `power-of-two` | Client LB policy for regular pool |
+| `--seed` | (none) | RNG seed |
+| `--binary` / `--no-build` | (build release) | Prebuilt binary options |
 
 ## Plot microservice chain SLO heatmap
 
