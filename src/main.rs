@@ -15,7 +15,7 @@ use policy::LoadBalancePolicyKind;
 use lb::subset::{self, SubsetPolicyKind};
 use rand::Rng;
 use serde::Serialize;
-use server::{Server, Task};
+use server::{ExpressEvictionPolicy, Server, Task};
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -190,10 +190,24 @@ fn compute_rates(args: &Args, service_mean: f32) -> Rates {
 
 struct ServiceStats {
     utilization_pct: f64,
+    regular_utilization_pct: Option<f64>,
+    express_utilization_pct: Option<f64>,
     unloaded_latency_p99: f64,
     e2e: Vec<f64>,
     processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
+    regular_e2e: Option<Vec<f64>>,
+    express_e2e: Option<Vec<f64>>,
+    regular_queueing_delays: Option<Vec<f64>>,
+    express_queueing_delays: Option<Vec<f64>>,
+    pre_eviction_queueing_delays: Option<Vec<f64>>,
+    post_eviction_queueing_delays: Option<Vec<f64>>,
+}
+
+struct ExpressLaneStatsConfig {
+    n_regular: u32,
+    express_size: u32,
+    concurrency: u32,
 }
 
 #[derive(Serialize)]
@@ -203,6 +217,10 @@ struct RunOutput {
     total_arrival_rate: f64,
     per_client_arrival_rate: f64,
     utilization_pct: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    regular_utilization_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    express_utilization_pct: Option<f64>,
     unloaded_latency_p99: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     slo_latency: Option<f64>,
@@ -211,6 +229,18 @@ struct RunOutput {
     e2e: Vec<f64>,
     processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    regular_e2e: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    express_e2e: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    regular_queueing_delays: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    express_queueing_delays: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pre_eviction_queueing_delays: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_eviction_queueing_delays: Option<Vec<f64>>,
 }
 
 fn validate_slo(slo: Option<f64>) -> Result<Option<f64>, String> {
@@ -230,55 +260,167 @@ fn prob_latency_gt_slo(e2e: &[f64], slo: f64) -> f64 {
     e2e.iter().filter(|&&latency| latency > slo).count() as f64 / e2e.len() as f64
 }
 
+fn pool_utilization_pct(busy: Duration, observation: Duration, pool_capacity: u32) -> f64 {
+    if observation.is_zero() || pool_capacity == 0 {
+        0.0
+    } else {
+        busy.as_secs_f64() / (observation.as_secs_f64() * f64::from(pool_capacity)) * 100.0
+    }
+}
+
+fn duration_secs(d: Duration) -> f64 {
+    d.as_secs_f64()
+}
+
 fn calculate_stats(
     output: &mut EventQueueReader<Task>,
     observation: Duration,
     total_capacity: u32,
+    express_lane: Option<&ExpressLaneStatsConfig>,
 ) -> Option<ServiceStats> {
-    let mut task_samples = Vec::new();
+    let mut task_samples: Vec<(f64, f64, bool, Option<f64>, Option<f64>)> = Vec::new();
     let mut busy = Duration::ZERO;
+    let mut regular_busy = Duration::ZERO;
+    let mut express_busy = Duration::ZERO;
 
     while let Some(task) = output.try_read() {
         busy += task.duration;
+        if task.served_by_express {
+            express_busy += task.duration;
+        } else {
+            regular_busy += task.duration;
+        }
         let unloaded_ns = task.duration.as_nanos();
         if unloaded_ns == 0 {
             continue;
         }
         let e2e_ns = task.finish.duration_since(task.start).as_nanos();
-        task_samples.push((e2e_ns as f64 / 1e9, unloaded_ns as f64 / 1e9));
+        let (pre_eviction, post_eviction) = if task.served_by_express {
+            let evicted_at = task.evicted_at.expect("express task must have evicted_at");
+            let service_started_at = task
+                .service_started_at
+                .expect("express task must have service_started_at");
+            (
+                Some(duration_secs(evicted_at.duration_since(task.start))),
+                Some(duration_secs(
+                    service_started_at.duration_since(evicted_at),
+                )),
+            )
+        } else {
+            (None, None)
+        };
+        task_samples.push((
+            e2e_ns as f64 / 1e9,
+            unloaded_ns as f64 / 1e9,
+            task.served_by_express,
+            pre_eviction,
+            post_eviction,
+        ));
     }
 
     if task_samples.is_empty() {
         return None;
     }
 
-    let mut unloaded_samples: Vec<f64> =
-        task_samples.iter().map(|(_, duration)| *duration).collect();
+    let mut unloaded_samples: Vec<f64> = task_samples
+        .iter()
+        .map(|(_, duration, _, _, _)| *duration)
+        .collect();
     unloaded_samples.sort_by(f64::total_cmp);
     let unloaded_latency_p99 = percentile(&unloaded_samples, 99.0);
     if unloaded_latency_p99 == 0.0 {
         return None;
     }
 
-    let e2e: Vec<f64> = task_samples.iter().map(|(e2e, _)| *e2e).collect();
-    let processing_times: Vec<f64> = task_samples.iter().map(|(_, duration)| *duration).collect();
+    let e2e: Vec<f64> = task_samples.iter().map(|(e2e, _, _, _, _)| *e2e).collect();
+    let processing_times: Vec<f64> = task_samples
+        .iter()
+        .map(|(_, duration, _, _, _)| *duration)
+        .collect();
     let queueing_delays: Vec<f64> = task_samples
         .iter()
-        .map(|(e2e, duration)| e2e - duration)
+        .map(|(e2e, duration, _, _, _)| e2e - duration)
         .collect();
 
-    let utilization_pct = if observation.is_zero() || total_capacity == 0 {
-        0.0
-    } else {
-        busy.as_secs_f64() / (observation.as_secs_f64() * f64::from(total_capacity)) * 100.0
+    let utilization_pct = pool_utilization_pct(busy, observation, total_capacity);
+
+    let (
+        regular_utilization_pct,
+        express_utilization_pct,
+        regular_e2e,
+        express_e2e,
+        regular_queueing_delays,
+        express_queueing_delays,
+        pre_eviction_queueing_delays,
+        post_eviction_queueing_delays,
+    ) = match express_lane {
+        Some(cfg) => {
+            let regular_capacity = cfg.n_regular * cfg.concurrency;
+            let express_capacity = cfg.express_size * cfg.concurrency;
+            let regular_e2e: Vec<f64> = task_samples
+                .iter()
+                .filter(|(_, _, express, _, _)| !express)
+                .map(|(e2e, _, _, _, _)| *e2e)
+                .collect();
+            let express_e2e: Vec<f64> = task_samples
+                .iter()
+                .filter(|(_, _, express, _, _)| *express)
+                .map(|(e2e, _, _, _, _)| *e2e)
+                .collect();
+            let regular_q: Vec<f64> = task_samples
+                .iter()
+                .filter(|(_, _, express, _, _)| !express)
+                .map(|(e2e, duration, _, _, _)| e2e - duration)
+                .collect();
+            let express_q: Vec<f64> = task_samples
+                .iter()
+                .filter(|(_, _, express, _, _)| *express)
+                .map(|(e2e, duration, _, _, _)| e2e - duration)
+                .collect();
+            let pre_q: Vec<f64> = task_samples
+                .iter()
+                .filter_map(|(_, _, _, pre, _)| *pre)
+                .collect();
+            let post_q: Vec<f64> = task_samples
+                .iter()
+                .filter_map(|(_, _, _, _, post)| *post)
+                .collect();
+            (
+                Some(pool_utilization_pct(
+                    regular_busy,
+                    observation,
+                    regular_capacity,
+                )),
+                Some(pool_utilization_pct(
+                    express_busy,
+                    observation,
+                    express_capacity,
+                )),
+                Some(regular_e2e),
+                Some(express_e2e),
+                Some(regular_q),
+                Some(express_q),
+                Some(pre_q),
+                Some(post_q),
+            )
+        }
+        None => (None, None, None, None, None, None, None, None),
     };
 
     Some(ServiceStats {
         utilization_pct,
+        regular_utilization_pct,
+        express_utilization_pct,
         unloaded_latency_p99,
         e2e,
         processing_times,
         queueing_delays,
+        regular_e2e,
+        express_e2e,
+        regular_queueing_delays,
+        express_queueing_delays,
+        pre_eviction_queueing_delays,
+        post_eviction_queueing_delays,
     })
 }
 
@@ -301,6 +443,10 @@ fn print_percentile_table(label: &str, values: &mut [f64]) {
     println!();
 }
 
+fn print_section_header(label: &str, count: usize) {
+    println!("\n--- {label} (N={count}) ---");
+}
+
 fn print_human_stats(stats: &ServiceStats, rates: &Rates, slo: Option<f64>) {
     println!("total service rate: {:.4} tasks/s", rates.total_service_rate);
     println!(
@@ -313,6 +459,12 @@ fn print_human_stats(stats: &ServiceStats, rates: &Rates, slo: Option<f64>) {
         rates.per_client_arrival_rate
     );
     println!("utilization: {:.2}%", stats.utilization_pct);
+    if let Some(regular) = stats.regular_utilization_pct {
+        println!("regular utilization: {:.2}%", regular);
+    }
+    if let Some(express) = stats.express_utilization_pct {
+        println!("express utilization: {:.2}%", express);
+    }
     println!("unloaded latency (p99): {:.6}s", stats.unloaded_latency_p99);
     if let Some(slo) = slo {
         println!(
@@ -323,6 +475,32 @@ fn print_human_stats(stats: &ServiceStats, rates: &Rates, slo: Option<f64>) {
     print_percentile_table("e2e latency (s):", &mut stats.e2e.clone());
     print_percentile_table("processing time (s):", &mut stats.processing_times.clone());
     print_percentile_table("queueing delay (s):", &mut stats.queueing_delays.clone());
+
+    if let (
+        Some(regular_e2e),
+        Some(regular_q),
+        Some(express_e2e),
+        Some(express_q),
+    ) = (
+        stats.regular_e2e.as_ref(),
+        stats.regular_queueing_delays.as_ref(),
+        stats.express_e2e.as_ref(),
+        stats.express_queueing_delays.as_ref(),
+    ) {
+        print_section_header("regular tasks", regular_e2e.len());
+        print_percentile_table("e2e latency (s):", &mut regular_e2e.clone());
+        print_percentile_table("queueing delay (s):", &mut regular_q.clone());
+
+        print_section_header("evicted tasks", express_e2e.len());
+        print_percentile_table("e2e latency (s):", &mut express_e2e.clone());
+        print_percentile_table("queueing delay (s):", &mut express_q.clone());
+        if let Some(pre) = stats.pre_eviction_queueing_delays.as_ref() {
+            print_percentile_table("pre-eviction queueing delay (s):", &mut pre.clone());
+        }
+        if let Some(post) = stats.post_eviction_queueing_delays.as_ref() {
+            print_percentile_table("post-eviction queueing delay (s):", &mut post.clone());
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Default)]
@@ -364,6 +542,112 @@ struct Args {
     verbose: u8,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
+    #[arg(long)]
+    expresslane: bool,
+    #[arg(long)]
+    express_size: Option<u32>,
+    #[arg(long)]
+    express_th: Option<u32>,
+    #[arg(long)]
+    express_del_th: Option<f64>,
+    #[arg(long)]
+    ideal: bool,
+}
+
+#[derive(Debug)]
+enum ExpressEvictionConfig {
+    QueueDepth(u32),
+    QueueDelay {
+        threshold: Duration,
+        ideal: bool,
+    },
+}
+
+#[derive(Debug)]
+struct ExpressLaneConfig {
+    express_size: u32,
+    eviction: ExpressEvictionConfig,
+}
+
+fn validate_express_del_th(value: f64) -> Result<Duration, String> {
+    if value > 0.0 && value.is_finite() {
+        Ok(Duration::from_secs_f64(value))
+    } else {
+        Err("--express-del-th must be positive and finite".into())
+    }
+}
+
+fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String> {
+    let has_express_flags = args.express_size.is_some()
+        || args.express_th.is_some()
+        || args.express_del_th.is_some();
+
+    if args.ideal {
+        if !args.expresslane {
+            return Err("--ideal requires --expresslane".into());
+        }
+        if args.express_th.is_some() {
+            return Err("--ideal requires --express-del-th".into());
+        }
+        if args.express_del_th.is_none() {
+            return Err("--ideal requires --express-del-th".into());
+        }
+    }
+
+    if !args.expresslane {
+        if has_express_flags {
+            return Err(
+                "--express-size, --express-th, and --express-del-th require --expresslane".into(),
+            );
+        }
+        return Ok(None);
+    }
+
+    let express_size = args
+        .express_size
+        .ok_or("--express-size is required with --expresslane")?;
+
+    match (args.express_th, args.express_del_th) {
+        (Some(_), Some(_)) => {
+            Err("only one of --express-th and --express-del-th may be set".into())
+        }
+        (None, None) => Err(
+            "one of --express-th or --express-del-th is required with --expresslane".into(),
+        ),
+        (Some(express_th), None) => {
+            if express_size == 0 {
+                return Err("--express-size must be positive".into());
+            }
+            if express_size >= args.servers {
+                return Err(format!(
+                    "--express-size ({express_size}) must be less than --servers ({})",
+                    args.servers
+                ));
+            }
+            Ok(Some(ExpressLaneConfig {
+                express_size,
+                eviction: ExpressEvictionConfig::QueueDepth(express_th),
+            }))
+        }
+        (None, Some(express_del_th)) => {
+            if express_size == 0 {
+                return Err("--express-size must be positive".into());
+            }
+            if express_size >= args.servers {
+                return Err(format!(
+                    "--express-size ({express_size}) must be less than --servers ({})",
+                    args.servers
+                ));
+            }
+            Ok(Some(ExpressLaneConfig {
+                express_size,
+                eviction: ExpressEvictionConfig::QueueDelay {
+                    threshold: validate_express_del_th(express_del_th)?,
+                    ideal: args.ideal,
+                },
+            }))
+        }
+    }
 }
 
 fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
@@ -376,11 +660,20 @@ fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
 fn run_simulation(
     args: &Args,
     service_time: &ServiceTimeConfig,
+    express_lane: Option<&ExpressLaneConfig>,
 ) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
-    let n_clients = args.clients.max(1);
+    let n_clients = args.clients.max(1) as usize;
     let n_servers = args.servers.max(1) as usize;
     let concurrency = args.concurrency.max(1);
     let total_capacity = args.servers.max(1) * concurrency;
+
+    let (n_regular, express_lb_id) = match express_lane {
+        Some(cfg) => {
+            let n_regular = n_servers - cfg.express_size as usize;
+            (n_regular, n_clients)
+        }
+        None => (n_servers, n_clients),
+    };
 
     let mut bench = if args.seed.is_some() {
         SimInit::with_num_threads(1)
@@ -392,14 +685,20 @@ fn run_simulation(
     let load_registry = LoadRegistry::new(n_servers);
     let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
 
-    let task_counts = split_tasks(args.n, n_clients);
-    let mut inputs = Vec::with_capacity(n_clients as usize);
-    let mut lb_addresses = Vec::with_capacity(n_clients as usize);
+    let task_counts = split_tasks(args.n, args.clients.max(1));
+    let mut inputs = Vec::with_capacity(n_clients);
+    let mut lb_addresses = Vec::with_capacity(n_clients);
 
-    for i in 0..n_clients as usize {
+    let client_lb_pool = if express_lane.is_some() {
+        n_regular
+    } else {
+        n_servers
+    };
+
+    for i in 0..n_clients {
         let server_indices = subset::assign_subset(
             args.lb_subset_policy,
-            n_servers,
+            client_lb_pool,
             i,
             args.lb_subset_size,
         );
@@ -409,12 +708,13 @@ fn run_simulation(
         let mut load_balancer = LoadBalancer::new(
             args.lb_policy.build(),
             args.lb_policy,
-            n_servers,
+            client_lb_pool,
             server_indices,
             i,
             load_registry.clone(),
+            false,
         );
-        for j in 0..n_servers {
+        for j in 0..client_lb_pool {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
         }
         let lb_mailbox = Mailbox::new();
@@ -426,14 +726,73 @@ fn run_simulation(
         inputs.push(input);
     }
 
+    let mut express_lb_address = None;
+    if express_lane.is_some() {
+        let express_indices: Vec<usize> = (n_regular..n_servers).collect();
+        let mut express_lb = LoadBalancer::new(
+            LoadBalancePolicyKind::LeastRequest.build(),
+            LoadBalancePolicyKind::LeastRequest,
+            n_servers,
+            express_indices,
+            express_lb_id,
+            load_registry.clone(),
+            true,
+        );
+        for j in n_regular..n_servers {
+            express_lb.outputs[j].connect(Server::input, &server_mailboxes[j]);
+        }
+        let express_lb_mailbox = Mailbox::new();
+        express_lb_address = Some(express_lb_mailbox.address());
+        bench = bench.add_model(express_lb, express_lb_mailbox, "express-load-balancer");
+    }
+
+    let express_eviction = express_lane.map(|cfg| match cfg.eviction {
+        ExpressEvictionConfig::QueueDepth(th) => ExpressEvictionPolicy::QueueDepth(th),
+        ExpressEvictionConfig::QueueDelay { threshold, ideal } => {
+            ExpressEvictionPolicy::QueueDelay { threshold, ideal }
+        }
+    });
     for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
-        let mut release_outputs: Vec<_> = (0..n_clients as usize)
-            .map(|_| Output::default())
-            .collect();
+        let is_express = express_lane.is_some() && i >= n_regular;
+        let n_release = if is_express { n_clients + 1 } else { n_clients };
+        let mut release_outputs: Vec<_> = (0..n_release).map(|_| Output::default()).collect();
         for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
             release_outputs[lb_id].connect(LoadBalancer::release, lb_address);
         }
-        let mut server = Server::new(concurrency, i, release_outputs, load_registry.clone());
+        if is_express {
+            if let Some(express_addr) = express_lb_address.as_ref() {
+                release_outputs[express_lb_id]
+                    .connect(LoadBalancer::release, express_addr);
+            }
+        }
+
+        let server_express_eviction = if express_lane.is_some() && !is_express {
+            express_eviction
+        } else {
+            None
+        };
+        let server_express_lb_id = if is_express {
+            Some(express_lb_id)
+        } else {
+            None
+        };
+
+        let mut server = Server::new(
+            concurrency,
+            i,
+            release_outputs,
+            load_registry.clone(),
+            server_express_eviction,
+            is_express,
+            server_express_lb_id,
+        );
+        if express_lane.is_some() && !is_express {
+            if let Some(express_addr) = express_lb_address.as_ref() {
+                server
+                    .express_output
+                    .connect(LoadBalancer::input, express_addr);
+            }
+        }
         server.output.connect_sink(sink.clone());
         bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
     }
@@ -460,7 +819,17 @@ fn run_simulation(
     simu.run()?;
 
     let observation = simu.time().duration_since(t0);
-    Ok(calculate_stats(&mut output, observation, total_capacity))
+    let stats_config = express_lane.map(|cfg| ExpressLaneStatsConfig {
+        n_regular: (n_servers - cfg.express_size as usize) as u32,
+        express_size: cfg.express_size,
+        concurrency,
+    });
+    Ok(calculate_stats(
+        &mut output,
+        observation,
+        total_capacity,
+        stats_config.as_ref(),
+    ))
 }
 
 fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> RunOutput {
@@ -478,12 +847,20 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             total_arrival_rate: rates.total_arrival_rate,
             per_client_arrival_rate: rates.per_client_arrival_rate,
             utilization_pct: stats.utilization_pct,
+            regular_utilization_pct: stats.regular_utilization_pct,
+            express_utilization_pct: stats.express_utilization_pct,
             unloaded_latency_p99: stats.unloaded_latency_p99,
             slo_latency,
             prob_latency_gt_slo,
             e2e: stats.e2e,
             processing_times: stats.processing_times,
             queueing_delays: stats.queueing_delays,
+            regular_e2e: stats.regular_e2e,
+            express_e2e: stats.express_e2e,
+            regular_queueing_delays: stats.regular_queueing_delays,
+            express_queueing_delays: stats.express_queueing_delays,
+            pre_eviction_queueing_delays: stats.pre_eviction_queueing_delays,
+            post_eviction_queueing_delays: stats.post_eviction_queueing_delays,
         },
         None => RunOutput {
             total_service_rate: rates.total_service_rate,
@@ -491,12 +868,20 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             total_arrival_rate: rates.total_arrival_rate,
             per_client_arrival_rate: rates.per_client_arrival_rate,
             utilization_pct: 0.0,
+            regular_utilization_pct: None,
+            express_utilization_pct: None,
             unloaded_latency_p99: 0.0,
             slo_latency,
             prob_latency_gt_slo,
             e2e: Vec::new(),
             processing_times: Vec::new(),
             queueing_delays: Vec::new(),
+            regular_e2e: None,
+            express_e2e: None,
+            regular_queueing_delays: None,
+            express_queueing_delays: None,
+            pre_eviction_queueing_delays: None,
+            post_eviction_queueing_delays: None,
         },
     }
 }
@@ -504,10 +889,11 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    let express_lane = validate_expresslane(&args)?;
     let service_time = resolve_service_time(&args)?;
     let rates = compute_rates(&args, service_time.mean);
     rng::enter_run(args.seed);
-    let stats = run_simulation(&args, &service_time);
+    let stats = run_simulation(&args, &service_time, express_lane.as_ref());
     rng::exit_run();
     let stats = stats?;
 
@@ -662,5 +1048,328 @@ mod tests {
         assert_eq!(args.verbose, 1);
         let args = Args::try_parse_from(["lb", "-vv"]).unwrap();
         assert_eq!(args.verbose, 2);
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_orphan_flags() {
+        let err = validate_expresslane(
+            &Args::try_parse_from(["lb", "--express-size", "2"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--expresslane"));
+
+        let err = validate_expresslane(
+            &Args::try_parse_from(["lb", "--express-th", "5"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--expresslane"));
+
+        let err = validate_expresslane(
+            &Args::try_parse_from(["lb", "--express-del-th", "0.5"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--expresslane"));
+    }
+
+    #[test]
+    fn validate_expresslane_requires_size_and_one_threshold() {
+        let err = validate_expresslane(
+            &Args::try_parse_from(["lb", "--expresslane", "--express-size", "2"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("one of --express-th or --express-del-th"));
+
+        let err = validate_expresslane(
+            &Args::try_parse_from(["lb", "--expresslane", "--express-th", "5"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--express-size"));
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_both_thresholds() {
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-th",
+                "5",
+                "--express-del-th",
+                "0.5",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("only one of --express-th and --express-del-th"));
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_invalid_delay_threshold() {
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-del-th",
+                "0",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--express-del-th must be positive"));
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_invalid_size() {
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "0",
+                "--express-th",
+                "5",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("must be positive"));
+
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "10",
+                "--express-th",
+                "5",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("must be less than"));
+    }
+
+    #[test]
+    fn validate_expresslane_accepts_valid_config() {
+        let cfg = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-th",
+                "5",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+        .expect("expected express lane config");
+        assert_eq!(cfg.express_size, 2);
+        match cfg.eviction {
+            ExpressEvictionConfig::QueueDepth(th) => assert_eq!(th, 5),
+            ExpressEvictionConfig::QueueDelay { .. } => panic!("expected queue depth eviction"),
+        }
+    }
+
+    #[test]
+    fn validate_expresslane_accepts_delay_threshold_config() {
+        let cfg = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-del-th",
+                "0.5",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+        .expect("expected express lane config");
+        assert_eq!(cfg.express_size, 2);
+        match cfg.eviction {
+            ExpressEvictionConfig::QueueDelay { threshold, ideal } => {
+                assert_eq!(threshold, Duration::from_secs_f64(0.5));
+                assert!(!ideal);
+            }
+            ExpressEvictionConfig::QueueDepth(_) => panic!("expected queue delay eviction"),
+        }
+    }
+
+    #[test]
+    fn validate_expresslane_accepts_ideal_delay_threshold_config() {
+        let cfg = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-del-th",
+                "0.5",
+                "--ideal",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+        .expect("expected express lane config");
+        assert_eq!(cfg.express_size, 2);
+        match cfg.eviction {
+            ExpressEvictionConfig::QueueDelay { threshold, ideal } => {
+                assert_eq!(threshold, Duration::from_secs_f64(0.5));
+                assert!(ideal);
+            }
+            ExpressEvictionConfig::QueueDepth(_) => panic!("expected queue delay eviction"),
+        }
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_ideal_without_expresslane() {
+        let err = validate_expresslane(
+            &Args::try_parse_from(["lb", "--ideal", "--express-del-th", "0.5"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--ideal requires --expresslane"));
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_ideal_with_express_th() {
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-th",
+                "5",
+                "--ideal",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--ideal requires --express-del-th"));
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_ideal_without_express_del_th() {
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--ideal",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--ideal requires --express-del-th"));
+    }
+
+    #[test]
+    fn expresslane_subset_uses_regular_pool_only() {
+        let n_regular = 8;
+        let subset = subset::assign_subset(SubsetPolicyKind::Deterministic, n_regular, 0, 0);
+        assert!(subset.iter().all(|&idx| idx < n_regular));
+        assert_eq!(subset.len(), n_regular);
+    }
+
+    #[test]
+    fn expresslane_simulation_completes_tasks() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--expresslane",
+            "--express-size",
+            "1",
+            "--express-th",
+            "2",
+            "--servers",
+            "3",
+            "--n",
+            "1000",
+            "--load",
+            "0.8",
+            "--seed",
+            "42",
+        ])
+        .unwrap();
+        let express_lane = validate_expresslane(&args).unwrap();
+        let service_time = resolve_service_time(&args).unwrap();
+        rng::enter_run(args.seed);
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        rng::exit_run();
+        let stats = stats.expect("expected completed tasks");
+        assert_eq!(stats.e2e.len(), 1000);
+        assert!(stats.regular_utilization_pct.is_some());
+        assert!(stats.express_utilization_pct.is_some());
+        let regular_e2e = stats.regular_e2e.as_ref().unwrap();
+        let express_e2e = stats.express_e2e.as_ref().unwrap();
+        assert_eq!(regular_e2e.len() + express_e2e.len(), 1000);
+        let regular_q = stats.regular_queueing_delays.as_ref().unwrap();
+        let express_q = stats.express_queueing_delays.as_ref().unwrap();
+        assert_eq!(regular_q.len() + express_q.len(), 1000);
+        assert!(!express_q.is_empty(), "expected some express-served tasks");
+        let pre_q = stats.pre_eviction_queueing_delays.as_ref().unwrap();
+        let post_q = stats.post_eviction_queueing_delays.as_ref().unwrap();
+        assert_eq!(pre_q.len(), express_q.len());
+        assert_eq!(post_q.len(), express_q.len());
+        for ((pre, post), total) in pre_q.iter().zip(post_q.iter()).zip(express_q.iter()) {
+            assert!(
+                (pre + post - total).abs() < 1e-9,
+                "pre({pre}) + post({post}) should equal express queueing ({total})"
+            );
+        }
+    }
+
+    #[test]
+    fn non_express_run_has_no_split_metrics() {
+        let args = Args::try_parse_from(["lb", "--n", "100", "--seed", "42"]).unwrap();
+        let express_lane = validate_expresslane(&args).unwrap();
+        assert!(express_lane.is_none());
+        let service_time = resolve_service_time(&args).unwrap();
+        rng::enter_run(args.seed);
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        rng::exit_run();
+        let stats = stats.expect("expected completed tasks");
+        assert!(stats.regular_utilization_pct.is_none());
+        assert!(stats.express_utilization_pct.is_none());
+        assert!(stats.regular_e2e.is_none());
+        assert!(stats.express_e2e.is_none());
+        assert!(stats.regular_queueing_delays.is_none());
+        assert!(stats.express_queueing_delays.is_none());
+        assert!(stats.pre_eviction_queueing_delays.is_none());
+        assert!(stats.post_eviction_queueing_delays.is_none());
+
+        let output = run_output(Some(stats), &compute_rates(&args, service_time.mean), None);
+        let json = serde_json::to_value(&output).unwrap();
+        assert!(json.get("regular_utilization_pct").is_none());
+        assert!(json.get("express_utilization_pct").is_none());
+        assert!(json.get("regular_e2e").is_none());
+        assert!(json.get("express_e2e").is_none());
+        assert!(json.get("regular_queueing_delays").is_none());
+        assert!(json.get("express_queueing_delays").is_none());
+        assert!(json.get("pre_eviction_queueing_delays").is_none());
+        assert!(json.get("post_eviction_queueing_delays").is_none());
     }
 }

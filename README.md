@@ -17,6 +17,8 @@ With `--clients 1`, this reduces to a single client → load balancer → server
 
 See [docs/lb-simulation.md](docs/lb-simulation.md) for the full design (port wiring, task flow, load balancing, metrics).
 
+**Express lane mode** (`--expresslane`) adds a dedicated overflow path to express servers when regular-server queues exceed a threshold. Delay eviction supports an optional `--ideal` work-based threshold; see [docs/expresslane.md](docs/expresslane.md).
+
 Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
 
 - **random** — uniform random server selection

@@ -228,6 +228,10 @@ def run_simulation(
     service_mode_probs: list[float] | None = None,
     seed: int | None = None,
     slo: float | None = None,
+    expresslane: bool = False,
+    express_size: int | None = None,
+    express_del_th: float | None = None,
+    ideal: bool = False,
 ) -> dict:
     cmd = [
         str(binary),
@@ -258,6 +262,12 @@ def run_simulation(
         cmd.extend(["--service-mode-probs", ",".join(str(p) for p in service_mode_probs)])
     if slo is not None:
         cmd.extend(["--slo", str(slo)])
+    if expresslane:
+        cmd.append("--expresslane")
+        cmd.extend(["--express-size", str(express_size)])
+        cmd.extend(["--express-del-th", str(express_del_th)])
+        if ideal:
+            cmd.append("--ideal")
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")

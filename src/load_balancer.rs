@@ -25,6 +25,7 @@ pub struct LoadBalancer {
     server_indices: Vec<usize>,
     #[serde(skip)]
     load_scratch: Vec<u32>,
+    preserve_client_metadata: bool,
     pub outputs: Vec<Output<Task>>,
 }
 
@@ -36,6 +37,7 @@ impl LoadBalancer {
         server_indices: Vec<usize>,
         lb_id: usize,
         load_registry: LoadRegistry,
+        preserve_client_metadata: bool,
     ) -> Self {
         Self {
             policy,
@@ -45,6 +47,7 @@ impl LoadBalancer {
             load_registry,
             load_scratch: vec![0; server_indices.len()],
             server_indices,
+            preserve_client_metadata,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
         }
     }
@@ -67,7 +70,10 @@ impl LoadBalancer {
         let local_idx = self.policy.select(&self.load_scratch);
         let global_idx = self.server_indices[local_idx];
         self.local_inflight[global_idx] += 1;
-        task.lb_id = self.lb_id;
+        if !self.preserve_client_metadata {
+            task.lb_id = self.lb_id;
+            task.origin_server_idx = global_idx;
+        }
         self.outputs[global_idx].send(task).await;
     }
 
