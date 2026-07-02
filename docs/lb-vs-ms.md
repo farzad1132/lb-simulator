@@ -13,7 +13,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
-| Load-balancing policies | yes | yes | `random`, `power-of-two`, `least-request`, `round-robin` |
+| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`) is **lb-only**. |
 | Power-of-two true load | yes | yes | Reads shared `LoadRegistry`: `in_flight + queue.len()` at routing time |
 | Least-request / random / round-robin | yes | yes | Use each balancer's **local inflight** counters, not true load |
 | Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`) |
@@ -23,7 +23,8 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | SLO violation rate | yes | yes | lb: optional `--slo` (seconds); ms: `slo_ms` per API in `load.json` |
 | Unloaded latency p99 | yes | yes | lb: p99 of service durations; ms: p99 of `processing_time_ms` |
 | **Express lane** | yes | — | lb-only; see [expresslane.md](expresslane.md) |
-| Multiple ingress client LBs | yes | — | `--clients`: independent Poisson sources, each with its own LB |
+| **Centralized pull dispatch** | yes | — | One global queue; servers pull on spare capacity. See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based). |
+| Multiple ingress client LBs | yes | — | `--clients`: independent Poisson sources; push policies use one LB per client; centralized uses one shared dispatcher |
 | Per-API ingress LB | — | yes | `EdgeBalancer`: one per API, routes user traffic to entry replicas |
 | Per-replica outbound LB | — | yes | `ReplicaBalancer`: one per replica, routes downstream RPCs |
 | Flat topology CLI | yes | — | `--servers`, `--concurrency`, `--load` |
@@ -71,6 +72,10 @@ For `least-request`, `random`, and `round-robin`, balancers fill the load slice 
 | ms | `ReplicaBalancer` | Per downstream-service replica (one table per downstream target) |
 
 These counters do **not** reflect other balancers' traffic, tasks waiting in downstream queues, or in-flight work dispatched by someone else.
+
+### Push policies vs centralized pull (lb only)
+
+Push policies (`random`, `power-of-two`, `least-request`, `round-robin`) dispatch on arrival via `LoadBalancePolicy::select()`. **Centralized** is a different architecture: tasks queue at a single load balancer and servers pull work when they have spare capacity. It does not map to the microservice simulator's per-replica outbound balancers and direct return routing, so `ms --lb-policy centralized` is rejected at startup.
 
 ### Multiple LBs: ingress vs egress
 

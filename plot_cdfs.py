@@ -29,7 +29,7 @@ LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e")
 MS_REQUIRED_JSON_KEYS = ("utilization_pct", "by_api")
 MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
-LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
+LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized")
 SIMULATORS = ("lb", "ms")
 
 

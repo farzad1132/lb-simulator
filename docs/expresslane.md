@@ -54,6 +54,10 @@ flowchart TB
 
 Exactly one of `--express-th` and `--express-del-th` must be set when `--expresslane` is enabled.
 
+## Compatibility
+
+**`--lb-policy centralized` is not supported with `--expresslane`.** The simulator rejects the combination at startup. Express lane requires push-based client load balancers and regular-server queue eviction; centralized policy holds all backlog at the central dispatcher with no server-side queues.
+
 ## Client LB subset isolation
 
 Client load balancers never see express servers. Subset assignment (`--lb-subset-size`, `--lb-subset-policy`) operates on the regular pool only:

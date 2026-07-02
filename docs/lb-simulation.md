@@ -6,7 +6,9 @@ See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the microserv
 
 ## Overview
 
-The simulator models a pool of FCFS servers with configurable concurrency (CPU cores). Tasks arrive as independent Poisson processes from one or more clients, are routed by each client's load balancer to a shared server pool, and complete with sampled service times. Completed tasks are collected in a shared sink for post-run metrics.
+The simulator models a pool of FCFS servers with configurable concurrency (CPU cores). Tasks arrive as independent Poisson processes from one or more clients, are routed to a shared server pool, and complete with sampled service times. Completed tasks are collected in a shared sink for post-run metrics.
+
+**Push policies** (default): each client has its own load balancer that pushes tasks to servers on arrival.
 
 ```
 Poisson source(s) ──▶ LoadBalancer(s) ──▶ Server(s) ──▶ shared stats sink
@@ -14,16 +16,18 @@ Poisson source(s) ──▶ LoadBalancer(s) ──▶ Server(s) ──▶ shared
                             └── release ───────┘
 ```
 
-With `--clients 1`, this reduces to a single source → load balancer → servers path.
+**Centralized policy** (`--lb-policy centralized`): one global queue at a single dispatcher; servers pull work when they have spare capacity. See [Centralized policy (pull-based)](#centralized-policy-pull-based).
+
+With `--clients 1` and a push policy, this reduces to a single source → load balancer → servers path.
 
 ## Simulation entities
 
-| Entity | Count | Role |
-|--------|-------|------|
-| **Poisson source** (`exp_source` in `src/main.rs`) | one per client | Schedules `Task` arrivals at derived inter-arrival times |
-| **LoadBalancer** (`src/load_balancer.rs`) | `--clients` | Routes tasks to servers via a pluggable policy |
-| **Server** (`src/server.rs`) | `--servers` | FCFS queue + `--concurrency` concurrent workers |
-| **Stats sink** (`event_queue`) | 1 shared | Collects completed tasks for post-run metrics |
+| Entity | Count (push policies) | Count (`centralized`) | Role |
+|--------|----------------------|------------------------|------|
+| **Poisson source** (`exp_source` in `src/main.rs`) | one per client | one per client | Schedules `Task` arrivals at derived inter-arrival times |
+| **LoadBalancer** (`src/load_balancer.rs`) | `--clients` | **1** | Routes tasks to servers (push on arrival, or pull-based queue) |
+| **Server** (`src/server.rs`) | `--servers` | `--servers` | FCFS queue + `--concurrency` concurrent workers (no local queue under centralized) |
+| **Stats sink** (`event_queue`) | 1 shared | 1 shared | Collects completed tasks for post-run metrics |
 
 Each entity is a [nexosim](https://github.com/asynchronics/nexosim) model with a mailbox. Messages are delivered asynchronously to model handler methods (`input`, `release`, etc.).
 
@@ -169,8 +173,73 @@ The load-balancing policy only chooses among servers in this subset.
 | **least-request** | `--lb-policy least-request` | Route to the server with lowest local inflight; random tie-break among minima |
 | **random** | `--lb-policy random` | Uniform random server from the subset (ignores load slice) |
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
+| **centralized** | `--lb-policy centralized` | Pull-based: global FIFO queue at one dispatcher; servers request work on spare capacity ([details below](#centralized-policy-pull-based)) |
 
-Local inflight tracking runs for all policies so switching `--lb-policy` does not require different wiring.
+Local inflight tracking runs for all push policies so switching among them does not require different wiring.
+
+## Centralized policy (pull-based)
+
+With `--lb-policy centralized`, routing is **pull-based** instead of push-on-arrival. This is an architecture change, not a fifth `select()` algorithm — dispatch logic lives in queue and pull handlers on `LoadBalancer`, not in `LoadBalancePolicy::select()`.
+
+```mermaid
+flowchart LR
+  subgraph clients [Clients]
+    ES0["Poisson source 0"]
+    ES1["Poisson source 1"]
+  end
+  subgraph central [CentralDispatcher]
+    Q["FIFO queue"]
+    CLB["LoadBalancer\n(centralized)"]
+  end
+  subgraph pool [ServerPool]
+    S0["Server 0"]
+    S1["Server N"]
+  end
+  ES0 --> CLB
+  ES1 --> CLB
+  CLB --> Q
+  S0 -->|"pull when spare capacity"| CLB
+  S1 -->|"pull when spare capacity"| CLB
+  CLB -->|"assign task"| S0
+  CLB -->|"assign task"| S1
+  S0 -->|"release on complete"| CLB
+  S1 -->|"release on complete"| CLB
+```
+
+### Design choices
+
+| Choice | Decision | Rationale / implications |
+|--------|----------|--------------------------|
+| **Simulator scope** | `lb` only | Pull semantics require a global dispatcher and different port wiring. The `ms` simulator rejects `--lb-policy centralized` at startup. |
+| **Push vs pull** | Pull-based | Push policies call `select()` on arrival. Centralized queues tasks at the LB; servers initiate assignment. |
+| **Queue location** | Single global queue at one central `LoadBalancer` | Even with `--clients > 1`, all Poisson sources feed the same dispatcher; per-client LBs are **not** created. |
+| **Multi-client semantics** | Arrivals split, routing unified | `--clients C` still creates C Poisson sources and splits `--n` across them (aggregate rate unchanged). Routing is through one queue — this does **not** model multiple independent frontends with partial observability. |
+| **Subset routing** | Ignored when centralized | `--lb-subset-size` and `--lb-subset-policy` have no effect; all servers pull from the global queue. |
+| **Pull trigger** | Spare capacity | A server sends a pull whenever `in_flight < max_concurrency`. One pull requests one task; after each completion, one new pull is sent. At sim start, `concurrency` pulls per server are scheduled so the pool is warm. |
+| **Assignment order** | FCFS on both sides | Tasks dequeue from the front of the LB queue. Waiting pullers are tracked in FIFO order. First waiter gets the next task — no load comparison or random tie-break. |
+| **Server queueing** | Disabled | Regular servers never enqueue locally; all backlog lives at the central LB. Server `input` always starts service immediately. |
+| **Load visibility** | No load probes | Centralized does not use `LoadRegistry` or load values for routing (only `local_inflight` for release accounting). |
+| **Release lifecycle** | Same inflight accounting | `local_inflight` increments on dispatch (pull matched), decrements on `release` at completion. Single central LB (`lb_id = 0`) for all tasks. |
+| **Express lane** | Not supported | `--expresslane` cannot be combined with `--lb-policy centralized`. |
+| **Policy trait** | `select()` unused | `LoadBalancePolicyKind::Centralized` exists for CLI parity; dispatch logic lives in `LoadBalancer` pull/queue handlers. |
+
+### Port wiring (centralized)
+
+- **`LoadBalancer::input`** — receives `Task` from all Poisson sources; enqueues and tries to match waiting pullers
+- **`LoadBalancer::pull`** — receives `usize` (server index); dispatches a queued task or records the server as waiting
+- **`LoadBalancer::release`** — receives `usize` (server index) on task completion
+- **`LoadBalancer::outputs[j]`** → `Server::input`
+- **`Server::pull_output`** → `LoadBalancer::pull`
+- **`Server::release_outputs[0]`** → `LoadBalancer::release` (single central LB)
+
+### Task lifecycle (centralized)
+
+1. **Arrival.** `exp_source` schedules a task to the central load balancer `input`.
+2. **Enqueue.** The load balancer pushes the task onto its FIFO queue and assigns it to the first waiting puller if any.
+3. **Pull.** When a server has spare capacity, it sends a pull. If the queue is non-empty, the LB dispatches the front task; otherwise the server is recorded as waiting.
+4. **Service.** The server starts service immediately (no local queue). `begin_service` schedules completion after `task.duration`.
+5. **Completion.** `Server::complete` sets `finish`, sends the task to the stats sink, sends `server_idx` on `release_outputs[0]`, decrements `in_flight`, and sends a new pull.
+6. **Release.** The load balancer's `release` handler decrements `local_inflight[server_idx]`.
 
 ## Server concurrency model
 
@@ -242,6 +311,11 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Cross–load-balancer load visibility for least-request (each LB sees only its own inflight counts)
 - True load visibility for least-request, random, or round-robin (only power-of-two reads shared load)
 - Connection limits or backpressure on load balancer outputs
+- Per-client partial observability under centralized (one global queue)
+- Subset routing under centralized
+- Load-probe-based server selection under centralized (assignment is pull-order FCFS)
+- Centralized policy in the `ms` simulator
+- Express lane with `--lb-policy centralized`
 
 ## Source file map
 

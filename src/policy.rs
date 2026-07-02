@@ -79,12 +79,22 @@ impl LoadBalancePolicy for LeastRequestPolicy {
     }
 }
 
+pub struct CentralizedPolicy;
+
+impl LoadBalancePolicy for CentralizedPolicy {
+    fn select(&mut self, loads: &[u32]) -> usize {
+        let _ = loads;
+        0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum LoadBalancePolicyKind {
     Random,
     PowerOfTwo,
     RoundRobin,
     LeastRequest,
+    Centralized,
 }
 
 impl LoadBalancePolicyKind {
@@ -97,10 +107,26 @@ impl LoadBalancePolicyKind {
                 next: 0,
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
+            Self::Centralized => Box::new(CentralizedPolicy),
         }
     }
 
     pub fn uses_true_load(self) -> bool {
         matches!(self, Self::PowerOfTwo)
+    }
+
+    pub fn is_centralized(self) -> bool {
+        matches!(self, Self::Centralized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centralized_policy_kind_is_centralized() {
+        assert!(LoadBalancePolicyKind::Centralized.is_centralized());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_centralized());
     }
 }

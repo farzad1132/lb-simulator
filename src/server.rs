@@ -75,10 +75,12 @@ fn queue_delay_estimate(
 pub struct Server {
     pub output: Output<Task>,
     pub express_output: Output<Task>,
+    pub pull_output: Output<usize>,
     server_idx: usize,
     release_outputs: Vec<Output<usize>>,
     max_concurrency: u32,
     in_flight: u32,
+    centralized: bool,
     #[serde(skip)]
     in_flight_services: Vec<InFlightService>,
     queue: Vec<Task>,
@@ -98,14 +100,17 @@ impl Server {
         express_eviction: Option<ExpressEvictionPolicy>,
         is_express: bool,
         express_lb_id: Option<usize>,
+        centralized: bool,
     ) -> Self {
         Self {
             output: Output::default(),
             express_output: Output::default(),
+            pull_output: Output::default(),
             server_idx,
             release_outputs,
             max_concurrency: max_concurrency.max(1),
             in_flight: 0,
+            centralized,
             in_flight_services: Vec::new(),
             queue: Vec::new(),
             express_eviction,
@@ -168,6 +173,11 @@ impl Server {
 #[Model]
 impl Server {
     pub async fn input(&mut self, task: Task, cx: &Context<Self>) {
+        if self.centralized {
+            self.begin_service(task, cx);
+            return;
+        }
+
         if self.in_flight < self.max_concurrency {
             self.begin_service(task, cx);
         } else {
@@ -178,6 +188,12 @@ impl Server {
                 self.express_output.send(evicted).await;
             }
             self.publish_load();
+        }
+    }
+
+    pub async fn request_pull(&mut self, _: (), _cx: &Context<Self>) {
+        if self.centralized && self.in_flight < self.max_concurrency {
+            self.pull_output.send(self.server_idx).await;
         }
     }
 
@@ -208,7 +224,11 @@ impl Server {
         }
         self.in_flight -= 1;
         self.publish_load();
-        self.drain_queue(cx);
+        if self.centralized {
+            self.pull_output.send(self.server_idx).await;
+        } else {
+            self.drain_queue(cx);
+        }
     }
 }
 

@@ -582,6 +582,13 @@ fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String
         || args.express_th.is_some()
         || args.express_del_th.is_some();
 
+    if args.lb_policy.is_centralized() {
+        if args.expresslane || has_express_flags {
+            return Err("--expresslane is not supported with --lb-policy centralized".into());
+        }
+        return Ok(None);
+    }
+
     if args.ideal {
         if !args.expresslane {
             return Err("--ideal requires --expresslane".into());
@@ -658,6 +665,136 @@ fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
 }
 
 fn run_simulation(
+    args: &Args,
+    service_time: &ServiceTimeConfig,
+    express_lane: Option<&ExpressLaneConfig>,
+) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
+    if args.lb_policy.is_centralized() {
+        return run_centralized_simulation(args, service_time);
+    }
+    run_push_simulation(args, service_time, express_lane)
+}
+
+fn schedule_initial_pulls(
+    sim: &Simulation,
+    pull_inputs: &[EventId<()>],
+    concurrency: u32,
+) -> Result<(), SchedulingError> {
+    let scheduler = sim.scheduler();
+    let delay = Duration::from_secs_f32(MIN_DURATION_SECS);
+    for pull_input in pull_inputs {
+        for _ in 0..concurrency {
+            scheduler.schedule_event(delay, pull_input, ())?;
+        }
+    }
+    Ok(())
+}
+
+fn run_centralized_simulation(
+    args: &Args,
+    service_time: &ServiceTimeConfig,
+) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
+    let n_clients = args.clients.max(1) as usize;
+    let n_servers = args.servers.max(1) as usize;
+    let concurrency = args.concurrency.max(1);
+    let total_capacity = args.servers.max(1) * concurrency;
+
+    let mut bench = if args.seed.is_some() {
+        SimInit::with_num_threads(1)
+    } else {
+        SimInit::new()
+    };
+    let (sink, mut output) = event_queue(SinkState::Enabled);
+
+    let load_registry = LoadRegistry::new(n_servers);
+    let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
+
+    let task_counts = split_tasks(args.n, args.clients.max(1));
+    let mut inputs = Vec::with_capacity(n_clients);
+    let mut pull_inputs = Vec::with_capacity(n_servers);
+
+    let server_indices: Vec<usize> = (0..n_servers).collect();
+    let mut load_balancer = LoadBalancer::new(
+        args.lb_policy.build(),
+        args.lb_policy,
+        n_servers,
+        server_indices,
+        0,
+        load_registry.clone(),
+        false,
+    );
+    for j in 0..n_servers {
+        load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
+    }
+    let lb_mailbox = Mailbox::new();
+    let lb_address = lb_mailbox.address();
+
+    for _ in 0..n_clients {
+        let input = EventSource::new()
+            .connect(LoadBalancer::input, &lb_mailbox)
+            .register(&mut bench);
+        inputs.push(input);
+    }
+    bench = bench.add_model(load_balancer, lb_mailbox, "central-load-balancer");
+
+    for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
+        let mut release_outputs = vec![Output::default()];
+        release_outputs[0].connect(LoadBalancer::release, &lb_address);
+
+        let mut server = Server::new(
+            concurrency,
+            i,
+            release_outputs,
+            load_registry.clone(),
+            None,
+            false,
+            None,
+            true,
+        );
+        server
+            .pull_output
+            .connect(LoadBalancer::pull, &lb_address);
+        server.output.connect_sink(sink.clone());
+        let pull_input = EventSource::new()
+            .connect(Server::request_pull, &server_mailbox)
+            .register(&mut bench);
+        pull_inputs.push(pull_input);
+        bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
+    }
+
+    let t0 = MonotonicTime::EPOCH;
+    let mut simu = bench.init(t0)?;
+
+    schedule_initial_pulls(&simu, &pull_inputs, concurrency)?;
+
+    let capacity = total_capacity as f32;
+    let arrival_mean = service_time.mean / (args.load * capacity);
+    let per_client_arrival_mean = arrival_mean * n_clients as f32;
+
+    for (input, &client_n) in inputs.iter().zip(task_counts.iter()) {
+        if client_n > 0 {
+            exp_source(
+                &simu,
+                input,
+                per_client_arrival_mean,
+                service_time,
+                client_n,
+            )?;
+        }
+    }
+
+    simu.run()?;
+
+    let observation = simu.time().duration_since(t0);
+    Ok(calculate_stats(
+        &mut output,
+        observation,
+        total_capacity,
+        None,
+    ))
+}
+
+fn run_push_simulation(
     args: &Args,
     service_time: &ServiceTimeConfig,
     express_lane: Option<&ExpressLaneConfig>,
@@ -785,6 +922,7 @@ fn run_simulation(
             server_express_eviction,
             is_express,
             server_express_lb_id,
+            false,
         );
         if express_lane.is_some() && !is_express {
             if let Some(express_addr) = express_lb_address.as_ref() {
@@ -1048,6 +1186,25 @@ mod tests {
         assert_eq!(args.verbose, 1);
         let args = Args::try_parse_from(["lb", "-vv"]).unwrap();
         assert_eq!(args.verbose, 2);
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_centralized_policy() {
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-th",
+                "5",
+                "--lb-policy",
+                "centralized",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("not supported with --lb-policy centralized"));
     }
 
     #[test]

@@ -333,6 +333,9 @@ fn calculate_stats(
 }
 
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
+    if args.lb_policy.is_centralized() {
+        return Err("--lb-policy centralized is not supported by the ms simulator".into());
+    }
     rng::enter_run(args.seed);
     let result = run_inner(args);
     rng::exit_run();
