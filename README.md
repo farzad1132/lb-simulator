@@ -179,6 +179,7 @@ Python plotting scripts live in the repo root. Each runs the simulator (or compa
 | [`plot_cdfs.py`](plot_cdfs.py) (lb) | e2e latency (s, log) | CDF | Full latency distribution for a single lb run; optional SLO / threshold marks |
 | [`plot_cdfs.py`](plot_cdfs.py) (ms) | e2e latency (ms, log) | CDF | Per-API latency distribution for the microservice simulator |
 | [`plot_lb_sweep.py`](plot_lb_sweep.py) | sweep param (load, clients, …) | configurable metric (default p99) | Compare LB policies (one line each) while sweeping one simulator parameter |
+| [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) | total arrival rate (task/s) | configurable metric (default p99) | Compare centralized vs power-of-two at equal offered load with different server counts |
 | [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6) | Heatmap of SLO violation rate (%) across load for chain topologies |
 | [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
 
@@ -359,6 +360,48 @@ python plot_lb_sweep.py \
   --load 0.8 \
   --n 100000
 # writes output/lb_clients_p99.pdf
+```
+
+## Plot centralized vs scaled power-of-two
+
+`plot_lb_centralized_compare.py` compares **centralized** against **power-of-two** at different server counts while holding **offered load (task/s)** constant on the x-axis. The question it helps answer: if power-of-two uses extra servers, does p99 latency approach centralized at the same arrival rate?
+
+The reference topology is centralized with 10 clients and 10 servers. A reference load sweep (default `0.1`–`0.9` step `0.1`) maps to arrival rates `1`–`9` task/s when service mean is 1 s and concurrency is 1. For configs with a different server count, `--load` is scaled so aggregate arrival rate matches:
+
+```
+load = arrival_rate × service_mean / (servers × concurrency)
+```
+
+With the default reference (10 servers), each +0.1 reference load adds 1 task/s. For 12 servers at 1 task/s: `load = 0.1 × (10/12)`.
+
+Edit experiment configs in the `DEFAULT_CONFIGS` list at the top of [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py). Use `--config-index` to run a subset without editing the file.
+
+```bash
+python plot_lb_centralized_compare.py --n 100000 --seed 42
+# writes output/lb_centralized_compare_p99.pdf
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--metric` | `p99` | Y-axis: `p99`, `p50`, `p90`, `utilization`, `slo-violation`, or `p{N}` |
+| `--output` | `output/lb_centralized_compare_{metric}.pdf` | Output PDF path |
+| `--comment` | (none) | Suffix appended to output filename before `.pdf` |
+| `--ref-load-min` / `--ref-load-max` / `--ref-load-step` | `0.1` / `0.9` / `0.1` | Reference load sweep (maps to x-axis task/s via `--ref-servers`) |
+| `--ref-servers` | `10` | Reference server count for load-to-rate mapping |
+| `--config-index` | (all) | Run only these `DEFAULT_CONFIGS` indices (0-based) |
+| `--n` | `100000` | Tasks per run |
+| `--service-dist` | `exponential` | Service distribution (`exponential`, `constant`, or `bimodal`) |
+| `--seed` | (none) | RNG seed for reproducible runs |
+| `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
+| `--no-build` | (off) | Do not run `cargo build --release` |
+
+Subset during development:
+
+```bash
+python plot_lb_centralized_compare.py \
+  --config-index 0 3 4 \
+  --ref-load-min 0.1 --ref-load-max 0.5 --ref-load-step 0.1 \
+  --n 100000
 ```
 
 ## Plot microservice chain SLO heatmap

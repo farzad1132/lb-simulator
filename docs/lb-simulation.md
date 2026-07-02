@@ -288,6 +288,32 @@ Example bimodal run:
 # E[S] = 0.19 s → faster arrivals than the default 1 s mean
 ```
 
+Total offered load in tasks per second:
+
+```
+total_arrival_rate = load × servers × concurrency / service_mean
+```
+
+## Comparing centralized vs push policies
+
+When server counts differ across experiment configs, sweeping raw `--load` is misleading: the same `--load` at 10 servers and 12 servers produces different aggregate arrival rates. For fair latency comparison, hold **offered load (task/s)** constant and scale `--load` per topology:
+
+```
+load = arrival_rate × service_mean / (servers × concurrency)
+```
+
+Equivalently, to match a reference config with `ref_servers` at reference load `L_ref`:
+
+```
+load = L_ref × (ref_servers / servers)    # when concurrency and service_mean match
+```
+
+Example: reference centralized with 10 servers at `load = 0.1` → 1 task/s. Power-of-two with 12 servers at the same 1 task/s needs `load = 0.1 × (10/12)`.
+
+[`plot_lb_centralized_compare.py`](../plot_lb_centralized_compare.py) automates this sweep. Default configs compare centralized (10 srv) against power-of-two at 10, 11, 12, and 13 servers, all with 10 clients. Edit `DEFAULT_CONFIGS` at the top of that script to change topologies.
+
+Note: `--clients` does not change aggregate arrival rate (each client's Poisson rate is scaled down). Client count still affects push policies through per-client partial observability; centralized uses one global queue regardless of client count.
+
 ## Metrics
 
 After the simulation completes, `calculate_stats()` reads all completed tasks from the sink.

@@ -180,7 +180,8 @@ Downstream completions return directly to the **specific caller replica** via `C
 | Script | Simulator | Purpose |
 |--------|-----------|---------|
 | [`plot_cdfs.py`](../plot_cdfs.py) | lb, ms | E2E latency CDF (`--simulator lb\|ms`) |
-| [`plot_lb_sweep.py`](../plot_lb_sweep.py) | lb | Parameter sweep vs load, clients, servers, etc. |
+| [`plot_lb_sweep.py`](../plot_lb_sweep.py) | lb | Parameter sweep vs load, clients, servers, etc. (one line per policy at fixed topology) |
+| [`plot_lb_centralized_compare.py`](../plot_lb_centralized_compare.py) | lb | Centralized vs power-of-two at equal task/s with different server counts (lb-only; `centralized` unsupported in `ms`) |
 | [`plot_lb_express_heatmap.py`](../plot_lb_express_heatmap.py) | lb | Express lane heatmap (express-size × express-del-th) |
 | [`plot_ms_chain_slo_heatmap.py`](../plot_ms_chain_slo_heatmap.py) | ms | SLO violation heatmap for chain topologies |
 | [`compare_lb_ms.py`](../compare_lb_ms.py) | both | Overlay CDFs on equivalent single-hop topologies |
