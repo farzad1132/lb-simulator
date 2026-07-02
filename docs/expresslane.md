@@ -1,10 +1,10 @@
 # Express Lane Mode
 
-Express lane mode adds a dedicated overflow path for tasks that would otherwise wait too long in regular-server queues. Regular servers evict excess queued work to a shared express load balancer, which routes to a separate pool of express servers using least-request policy.
+Express lane mode adds a dedicated overflow path for tasks that would otherwise wait too long in regular-server queues. Regular servers evict excess queued work to a shared express load balancer, which routes to a separate pool of express servers using centralized (pull-based) policy.
 
 **lb only** — not available in the microservice simulator (`ms`). See [lb-vs-ms.md](lb-vs-ms.md).
 
-Enable with `--expresslane`, which requires `--express-size` and exactly one of `--express-th` or `--express-del-th`.
+Enable with `--expresslane`, which requires `--express-size` and at least one of `--express-th` or `--express-del-th` (both may be set).
 
 ## Topology
 
@@ -23,14 +23,14 @@ flowchart TB
     RS["Regular Server\n(eviction policy applies)"]
   end
   subgraph expressPath [ExpressLane]
-    ELB["Express LoadBalancer\nleast-request"]
+    ELB["Express LoadBalancer\ncentralized"]
     XS["Express Server\n(no threshold)"]
   end
   Sink["stats sink"]
 
   ES --> CLB
   CLB -->|"normal routing"| RS
-  RS -->|"depth: queue.len() > express_th\nor delay threshold exceeded:\nevict newest task"| ELB
+  RS -->|"depth, delay, or combined threshold:\nevict newest queued task"| ELB
   ELB --> XS
   RS --> Sink
   XS --> Sink
@@ -46,17 +46,19 @@ flowchart TB
 | `--expresslane` | Enable express-lane mode |
 | `--express-size` | Number of express servers (last N in the pool) |
 | `--express-th` | Max regular-server queue depth; when exceeded, the newest queued task is evicted to the express LB |
-| `--express-del-th` | Max queueing delay (seconds) at the head of the regular-server queue; when exceeded on a new arrival, the newest queued task is evicted to the express LB |
-| `--ideal` | With `--express-del-th`, use work-based delay estimate instead of head-of-line wall-clock wait (see below) |
+| `--express-del-th` | Max queueing delay (seconds); eviction triggers when head-of-line wait or projected delay exceeds this threshold (see delay mode below) |
+| `--ideal` | With `--express-del-th` only (not with `--express-th`), immediate eviction when either in-flight elapsed time or projected delay exceeds threshold (see below) |
 | `--servers` | Total pool size (regular + express) |
 | `--lb-policy` | Load-balancing policy for client LBs → regular pool only |
 | `--lb-subset-size` | Subset size over **regular** servers only (e.g. 8, not 10, when 2 are express) |
 
-Exactly one of `--express-th` and `--express-del-th` must be set when `--expresslane` is enabled.
+At least one of `--express-th` and `--express-del-th` must be set when `--expresslane` is enabled. Both may be set together (combined mode).
 
 ## Compatibility
 
-**`--lb-policy centralized` is not supported with `--expresslane`.** The simulator rejects the combination at startup. Express lane requires push-based client load balancers and regular-server queue eviction; centralized policy holds all backlog at the central dispatcher with no server-side queues.
+**`--lb-policy centralized` is not supported with `--expresslane`.** The simulator rejects the combination at startup. Express lane requires push-based client load balancers and regular-server queue eviction; centralized policy on client LBs holds all backlog at the central dispatcher with no server-side queues.
+
+The express load balancer always uses centralized (pull-based) dispatch regardless of `--lb-policy`. That flag applies to client LBs routing to the regular pool only.
 
 ## Client LB subset isolation
 
@@ -70,26 +72,26 @@ Example: `--servers 10 --express-size 2` → client LBs subset among 8 servers (
 
 ## Eviction policy (regular servers only)
 
-When a regular server is at capacity (`in_flight == concurrency`), incoming tasks are queued. After enqueue, one of two eviction policies applies:
+When a regular server is at capacity (`in_flight == concurrency`), incoming tasks are queued. After enqueue, one of depth-only, delay-only, or combined eviction applies:
 
-### Depth mode (`--express-th`)
+### Depth mode (`--express-th` only)
 
 1. If `queue.len() > express_th`, pop the **newest** task (back of the FIFO queue).
 2. Forward it to the express load balancer.
 3. **Do not** send a release to the client LB on eviction.
 
-### Delay mode (`--express-del-th`)
+### Delay mode (`--express-del-th` only)
 
-1. Compute queueing delay as `now - queue[0].start`, where `queue[0]` is the oldest task in the queue and `Task.start` is the task’s system arrival time (set when the Poisson source creates the task).
-2. If the delay is **greater than** `--express-del-th` (seconds), pop the **newest** task (back of the FIFO queue).
-3. Forward it to the express load balancer.
-4. **Do not** send a release to the client LB on eviction.
+Delay mode evicts queued tasks when queueing delay exceeds `--express-del-th`. On each new enqueue (while the server is at capacity), eviction is triggered if **either** condition holds:
 
-Delay mode evicts new arrivals when the head-of-line task has already been waiting longer than the threshold, even if the queue is shallow.
+| Trigger | Condition | Default (monitored) | `--ideal` |
+|---------|-----------|---------------------|-----------|
+| **Head-of-line wait** | `max(now - service_started_at) > express_del_th` over in-flight tasks | Immediate eviction | Immediate eviction |
+| **Projected delay** | `ideal_delay > express_del_th` | Schedule timer at `express_del_th` later | Immediate eviction |
 
-#### Ideal delay mode (`--ideal`)
+Head-of-line wait measures how long the longest-running in-flight request has been processing since service started (`service_started_at`, set when the server begins the task). Immediate eviction always pops the **newest** task (back of the FIFO queue).
 
-When `--ideal` is passed with `--express-del-th`, eviction uses a **work-based backlog estimate** instead of head-of-line wall-clock wait:
+Projected delay for a newly queued task (back of the FIFO queue):
 
 ```
 ideal_delay = sum(task.duration for task in queue)
@@ -100,9 +102,41 @@ ideal_delay = sum(task.duration for task in queue)
 - In-flight tasks contribute **remaining** service time (duration minus elapsed since service started).
 - With `--concurrency > 1`, the minimum remaining time among all in-flight tasks is used (time until the earliest slot frees).
 
-If `ideal_delay > express_del_th`, the newest queued task is evicted — same pop-and-forward behavior as default delay mode.
+Because the simulator cannot observe live wait time the way a real system would, projected delay uses this work-based estimate to decide whether a task will exceed the threshold, then schedules eviction accordingly.
 
-Ideal mode assumes service times are known at enqueue time (as they are in this simulator). Default delay mode measures how long the oldest queued task has been waiting in wall-clock time, which can diverge from remaining work when service times vary or servers are concurrently busy.
+#### Monitored delay (default)
+
+When a task is enqueued:
+
+1. If head-of-line wait exceeds the threshold, pop the **newest** task and forward it to the express load balancer immediately.
+2. Otherwise, if `ideal_delay > express_del_th`, schedule a keyed eviction event at `express_del_th` seconds later (simulating eviction once the task's monitored wait time reaches the threshold).
+3. If the task starts service before the timer fires, cancel the pending eviction.
+4. When the timer fires, if the task is still queued, remove it and forward to the express load balancer.
+5. **Do not** send a release to the client LB on eviction.
+
+Example (projected delay): threshold = 2s, task enqueued at t=10 with projected wait 5s → eviction scheduled at t=12. If still queued at t=12, the task is evicted; if the queue drained and the task started service before t=12, no eviction occurs.
+
+Example (head-of-line wait): threshold = 2s, in-flight task started service at t=1.0, new task enqueued at t=3.5 → elapsed service time is 2.5s (> 2s), so the new arrival is evicted immediately even if its projected delay alone would not schedule a timer.
+
+#### Ideal delay mode (`--ideal`)
+
+When `--ideal` is passed with `--express-del-th`, eviction is **immediate** on enqueue if **either** head-of-line wait **or** projected delay exceeds the threshold — same pop-and-forward behavior, but without the threshold timer delay.
+
+Ideal mode is an oracle baseline: it assumes service times are known at enqueue time (as they are in this simulator) and evicts as soon as either trigger fires. Default monitored mode is more conservative for the projected-delay path: eviction happens only after the task has waited `express_del_th` seconds in the queue (unless in-flight elapsed time or service start intervenes first).
+
+`--ideal` cannot be combined with `--express-th`.
+
+### Combined mode (`--express-th` and `--express-del-th`)
+
+When both thresholds are set, eviction is triggered if **any** of three conditions holds (always monitored delay semantics for the delay triggers):
+
+| # | Condition | Action |
+|---|-----------|--------|
+| 1 | `queue.len() > express_th` | Immediate eviction |
+| 2 | `max(now - service_started_at) > express_del_th` over in-flight tasks | Immediate eviction |
+| 3 | `ideal_delay > express_del_th` | Schedule timer at `express_del_th` later |
+
+Evaluation order on enqueue: depth check first, then in-flight elapsed time, then projected-delay timer scheduling. Same pop-newest behavior as depth and delay modes.
 
 Express servers have no eviction policy — they accept and process whatever the express LB sends.
 
@@ -138,21 +172,28 @@ Queue-depth eviction:
   --load 0.9 --n 100000 --lb-policy power-of-two
 ```
 
-Queueing-delay eviction:
+Queueing-delay eviction (monitored, default):
 
 ```bash
 ./target/release/lb --expresslane --servers 10 --express-size 2 --express-del-th 0.5 \
   --load 0.9 --n 100000 --lb-policy power-of-two
 ```
 
-Ideal delay eviction (work-based threshold):
+Ideal delay eviction (immediate oracle baseline):
 
 ```bash
 ./target/release/lb --expresslane --servers 10 --express-size 2 --express-del-th 0.5 --ideal \
   --load 0.9 --n 100000 --lb-policy power-of-two
 ```
 
-Both run 8 regular servers with power-of-two client routing, evicting overflow to 2 express servers via a least-request express load balancer.
+Combined depth and delay eviction:
+
+```bash
+./target/release/lb --expresslane --servers 10 --express-size 2 --express-th 5 --express-del-th 0.5 \
+  --load 0.9 --n 100000 --lb-policy power-of-two
+```
+
+These run 8 regular servers with power-of-two client routing, evicting overflow to 2 express servers via a centralized express load balancer.
 
 ## Metrics
 

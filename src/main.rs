@@ -15,7 +15,7 @@ use policy::LoadBalancePolicyKind;
 use lb::subset::{self, SubsetPolicyKind};
 use rand::Rng;
 use serde::Serialize;
-use server::{ExpressEvictionPolicy, Server, Task};
+use server::{ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task};
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -561,6 +561,10 @@ enum ExpressEvictionConfig {
         threshold: Duration,
         ideal: bool,
     },
+    Combined {
+        depth_threshold: u32,
+        delay_threshold: Duration,
+    },
 }
 
 #[derive(Debug)]
@@ -614,47 +618,37 @@ fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String
         .express_size
         .ok_or("--express-size is required with --expresslane")?;
 
-    match (args.express_th, args.express_del_th) {
-        (Some(_), Some(_)) => {
-            Err("only one of --express-th and --express-del-th may be set".into())
-        }
-        (None, None) => Err(
-            "one of --express-th or --express-del-th is required with --expresslane".into(),
-        ),
-        (Some(express_th), None) => {
-            if express_size == 0 {
-                return Err("--express-size must be positive".into());
-            }
-            if express_size >= args.servers {
-                return Err(format!(
-                    "--express-size ({express_size}) must be less than --servers ({})",
-                    args.servers
-                ));
-            }
-            Ok(Some(ExpressLaneConfig {
-                express_size,
-                eviction: ExpressEvictionConfig::QueueDepth(express_th),
-            }))
-        }
-        (None, Some(express_del_th)) => {
-            if express_size == 0 {
-                return Err("--express-size must be positive".into());
-            }
-            if express_size >= args.servers {
-                return Err(format!(
-                    "--express-size ({express_size}) must be less than --servers ({})",
-                    args.servers
-                ));
-            }
-            Ok(Some(ExpressLaneConfig {
-                express_size,
-                eviction: ExpressEvictionConfig::QueueDelay {
-                    threshold: validate_express_del_th(express_del_th)?,
-                    ideal: args.ideal,
-                },
-            }))
-        }
+    if express_size == 0 {
+        return Err("--express-size must be positive".into());
     }
+    if express_size >= args.servers {
+        return Err(format!(
+            "--express-size ({express_size}) must be less than --servers ({})",
+            args.servers
+        ));
+    }
+
+    let eviction = match (args.express_th, args.express_del_th) {
+        (None, None) => {
+            return Err(
+                "one of --express-th or --express-del-th is required with --expresslane".into(),
+            );
+        }
+        (Some(express_th), None) => ExpressEvictionConfig::QueueDepth(express_th),
+        (None, Some(express_del_th)) => ExpressEvictionConfig::QueueDelay {
+            threshold: validate_express_del_th(express_del_th)?,
+            ideal: args.ideal,
+        },
+        (Some(express_th), Some(express_del_th)) => ExpressEvictionConfig::Combined {
+            depth_threshold: express_th,
+            delay_threshold: validate_express_del_th(express_del_th)?,
+        },
+    };
+
+    Ok(Some(ExpressLaneConfig {
+        express_size,
+        eviction,
+    }))
 }
 
 fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
@@ -864,11 +858,12 @@ fn run_push_simulation(
     }
 
     let mut express_lb_address = None;
+    let mut express_pull_inputs = Vec::new();
     if express_lane.is_some() {
         let express_indices: Vec<usize> = (n_regular..n_servers).collect();
         let mut express_lb = LoadBalancer::new(
-            LoadBalancePolicyKind::LeastRequest.build(),
-            LoadBalancePolicyKind::LeastRequest,
+            LoadBalancePolicyKind::Centralized.build(),
+            LoadBalancePolicyKind::Centralized,
             n_servers,
             express_indices,
             express_lb_id,
@@ -886,8 +881,20 @@ fn run_push_simulation(
     let express_eviction = express_lane.map(|cfg| match cfg.eviction {
         ExpressEvictionConfig::QueueDepth(th) => ExpressEvictionPolicy::QueueDepth(th),
         ExpressEvictionConfig::QueueDelay { threshold, ideal } => {
-            ExpressEvictionPolicy::QueueDelay { threshold, ideal }
+            let mode = if ideal {
+                QueueDelayEvictionMode::ImmediateIdeal
+            } else {
+                QueueDelayEvictionMode::Monitored
+            };
+            ExpressEvictionPolicy::QueueDelay { threshold, mode }
         }
+        ExpressEvictionConfig::Combined {
+            depth_threshold,
+            delay_threshold,
+        } => ExpressEvictionPolicy::Combined {
+            depth_threshold,
+            delay_threshold,
+        },
     });
     for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
         let is_express = express_lane.is_some() && i >= n_regular;
@@ -922,7 +929,7 @@ fn run_push_simulation(
             server_express_eviction,
             is_express,
             server_express_lb_id,
-            false,
+            is_express,
         );
         if express_lane.is_some() && !is_express {
             if let Some(express_addr) = express_lb_address.as_ref() {
@@ -931,12 +938,27 @@ fn run_push_simulation(
                     .connect(LoadBalancer::input, express_addr);
             }
         }
+        if is_express {
+            if let Some(express_addr) = express_lb_address.as_ref() {
+                server
+                    .pull_output
+                    .connect(LoadBalancer::pull, express_addr);
+                let pull_input = EventSource::new()
+                    .connect(Server::request_pull, &server_mailbox)
+                    .register(&mut bench);
+                express_pull_inputs.push(pull_input);
+            }
+        }
         server.output.connect_sink(sink.clone());
         bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
     }
 
     let t0 = MonotonicTime::EPOCH;
     let mut simu = bench.init(t0)?;
+
+    if !express_pull_inputs.is_empty() {
+        schedule_initial_pulls(&simu, &express_pull_inputs, concurrency)?;
+    }
 
     let capacity = total_capacity as f32;
     let arrival_mean = service_time.mean / (args.load * capacity);
@@ -1231,7 +1253,15 @@ mod tests {
     #[test]
     fn validate_expresslane_requires_size_and_one_threshold() {
         let err = validate_expresslane(
-            &Args::try_parse_from(["lb", "--expresslane", "--express-size", "2"]).unwrap(),
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
         )
         .unwrap_err();
         assert!(err.contains("one of --express-th or --express-del-th"));
@@ -1244,8 +1274,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_expresslane_rejects_both_thresholds() {
-        let err = validate_expresslane(
+    fn validate_expresslane_accepts_combined_thresholds() {
+        let cfg = validate_expresslane(
             &Args::try_parse_from([
                 "lb",
                 "--expresslane",
@@ -1260,8 +1290,22 @@ mod tests {
             ])
             .unwrap(),
         )
-        .unwrap_err();
-        assert!(err.contains("only one of --express-th and --express-del-th"));
+        .unwrap()
+        .expect("expected express lane config");
+        assert_eq!(cfg.express_size, 2);
+        match cfg.eviction {
+            ExpressEvictionConfig::Combined {
+                depth_threshold,
+                delay_threshold,
+            } => {
+                assert_eq!(depth_threshold, 5);
+                assert_eq!(delay_threshold, Duration::from_secs_f64(0.5));
+            }
+            ExpressEvictionConfig::QueueDepth(_)
+            | ExpressEvictionConfig::QueueDelay { .. } => {
+                panic!("expected combined eviction")
+            }
+        }
     }
 
     #[test]
@@ -1339,6 +1383,7 @@ mod tests {
         match cfg.eviction {
             ExpressEvictionConfig::QueueDepth(th) => assert_eq!(th, 5),
             ExpressEvictionConfig::QueueDelay { .. } => panic!("expected queue depth eviction"),
+            ExpressEvictionConfig::Combined { .. } => panic!("expected queue depth eviction"),
         }
     }
 
@@ -1366,6 +1411,7 @@ mod tests {
                 assert!(!ideal);
             }
             ExpressEvictionConfig::QueueDepth(_) => panic!("expected queue delay eviction"),
+            ExpressEvictionConfig::Combined { .. } => panic!("expected queue delay eviction"),
         }
     }
 
@@ -1394,6 +1440,7 @@ mod tests {
                 assert!(ideal);
             }
             ExpressEvictionConfig::QueueDepth(_) => panic!("expected queue delay eviction"),
+            ExpressEvictionConfig::Combined { .. } => panic!("expected queue delay eviction"),
         }
     }
 

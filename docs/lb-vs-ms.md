@@ -120,7 +120,7 @@ See [lb-simulation.md — Server subset](lb-simulation.md#server-subset) for the
 
 ### Express lane
 
-Overflow path from regular servers to a dedicated express pool when queue depth or queueing delay exceeds a threshold. Not implemented in `ms`.
+Overflow path from regular servers to a dedicated express pool when queue depth or queueing delay exceeds a threshold. Use `--express-th`, `--express-del-th`, or both (combined OR eviction). `--ideal` applies to delay-only runs. Not implemented in `ms`.
 
 Flags: `--expresslane`, `--express-size`, `--express-th`, `--express-del-th`, `--ideal`.
 

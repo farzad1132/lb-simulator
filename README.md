@@ -19,7 +19,7 @@ See [docs/lb-simulation.md](docs/lb-simulation.md) for the full design (port wir
 
 For a side-by-side feature comparison with the microservice simulator, see [docs/lb-vs-ms.md](docs/lb-vs-ms.md).
 
-**Express lane mode** (`--expresslane`) adds a dedicated overflow path to express servers when regular-server queues exceed a threshold. Delay eviction supports an optional `--ideal` work-based threshold; see [docs/expresslane.md](docs/expresslane.md).
+**Express lane mode** (`--expresslane`) adds a dedicated overflow path to express servers when regular-server queues exceed a threshold. Use `--express-th`, `--express-del-th`, or both (combined OR eviction). Delay-only runs support monitored timers by default; `--ideal` selects immediate eviction for delay triggers (not compatible with `--express-th`). See [docs/expresslane.md](docs/expresslane.md).
 
 Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
 

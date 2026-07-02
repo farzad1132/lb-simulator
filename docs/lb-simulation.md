@@ -220,7 +220,7 @@ flowchart LR
 | **Server queueing** | Disabled | Regular servers never enqueue locally; all backlog lives at the central LB. Server `input` always starts service immediately. |
 | **Load visibility** | No load probes | Centralized does not use `LoadRegistry` or load values for routing (only `local_inflight` for release accounting). |
 | **Release lifecycle** | Same inflight accounting | `local_inflight` increments on dispatch (pull matched), decrements on `release` at completion. Single central LB (`lb_id = 0`) for all tasks. |
-| **Express lane** | Not supported | `--expresslane` cannot be combined with `--lb-policy centralized`. |
+| **Express lane** | Not supported for client `--lb-policy centralized` | `--expresslane` cannot be combined with client `--lb-policy centralized`. Express lane uses an internal centralized express LB. |
 | **Policy trait** | `select()` unused | `LoadBalancePolicyKind::Centralized` exists for CLI parity; dispatch logic lives in `LoadBalancer` pull/queue handlers. |
 
 ### Port wiring (centralized)
@@ -341,7 +341,7 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Subset routing under centralized
 - Load-probe-based server selection under centralized (assignment is pull-order FCFS)
 - Centralized policy in the `ms` simulator
-- Express lane with `--lb-policy centralized`
+- Express lane with client `--lb-policy centralized`
 
 ## Source file map
 
