@@ -298,7 +298,7 @@ cargo build --release
 | `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, or `round-robin` |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all) |
 | `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
-| `--seed` | Optional RNG seed for reproducible runs (uses single-threaded simulation) |
+| `--seed` | Optional RNG seed for reproducible runs |
 | `--format` | `human` or `json` |
 | `--trace` | Emit a human-readable request-flow timeline on stderr |
 | `--trace-limit` | Number of user requests to trace (default `5`; only applies with `--trace`) |

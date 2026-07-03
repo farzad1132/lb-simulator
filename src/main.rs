@@ -693,11 +693,7 @@ fn run_centralized_simulation(
     let concurrency = args.concurrency.max(1);
     let total_capacity = args.servers.max(1) * concurrency;
 
-    let mut bench = if args.seed.is_some() {
-        SimInit::with_num_threads(1)
-    } else {
-        SimInit::new()
-    };
+    let mut bench = SimInit::with_num_threads(1);
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
     let load_registry = LoadRegistry::new(n_servers);
@@ -806,11 +802,7 @@ fn run_push_simulation(
         None => (n_servers, n_clients),
     };
 
-    let mut bench = if args.seed.is_some() {
-        SimInit::with_num_threads(1)
-    } else {
-        SimInit::new()
-    };
+    let mut bench = SimInit::with_num_threads(1);
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
     let load_registry = LoadRegistry::new(n_servers);

@@ -81,6 +81,10 @@ Each server has:
 
 All servers connect `output` to the same `event_queue` sink. After `simu.run()`, `calculate_stats()` reads completed tasks from the sink.
 
+### Execution model
+
+Simulations always run on a **single-threaded** nexosim executor (`SimInit::with_num_threads(1)`). Multi-threaded execution caused severe scheduler lock contention on this workload without improving throughput. `--seed` controls RNG reproducibility only; it is not required for fast runs.
+
 ### Wiring summary
 
 ```

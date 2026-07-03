@@ -388,7 +388,7 @@ def add_grid_args(parser: argparse.ArgumentParser) -> None:
         help="Express delay threshold(s); overrides min/max/step",
     )
     parser.add_argument("--express-del-th-min", type=float, default=0)
-    parser.add_argument("--express-del-th-max", type=float, default=10)
+    parser.add_argument("--express-del-th-max", type=float, default=15)
     parser.add_argument("--express-del-th-step", type=float, default=1)
     parser.add_argument(
         "--express-th",
@@ -408,7 +408,12 @@ def add_sim_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--clients", type=int, default=1)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--lb-subset-size", type=int, default=0)
-    parser.add_argument("--n", type=int, default=1_000_000)
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=100_000,
+        help="Tasks per simulation (default: 100000; use 1e6 for final runs but expect ~3+ min/run)",
+    )
     parser.add_argument(
         "--service-dist",
         choices=["exponential", "constant", "bimodal"],
@@ -502,6 +507,20 @@ def completed_triples(state: SearchState) -> set[tuple[int, float, int]]:
     }
 
 
+def warn_if_slow_grid(state: SearchState, *, remaining: int) -> None:
+    n = state.base_kwargs["n"]
+    if n < 500_000:
+        return
+    per_run_min = (n / 1_000_000) ** 2 * 3.5
+    total_h = per_run_min * remaining / 60
+    print(
+        f"warning: n={n:,} express-lane runs are slow "
+        f"(~{per_run_min:.0f} min/run, ~{total_h:.0f} h for {remaining} remaining). "
+        f"Use --n 100000 or --n 10000 for faster iteration.",
+        file=sys.stderr,
+    )
+
+
 def run_grid_search(
     binary: Path,
     state: SearchState,
@@ -517,6 +536,7 @@ def run_grid_search(
     ]
 
     col = metric_column_name(state.metric)
+    warn_if_slow_grid(state, remaining=len(remaining))
     for point in tqdm(remaining, desc="express lane grid search", unit="run"):
         sim_kwargs = {
             **state.base_kwargs,
@@ -525,6 +545,10 @@ def run_grid_search(
             "express_del_th": point.express_del_th,
             "express_th": point.express_th,
         }
+        tqdm.write(
+            f"run {next_run}: size={point.express_size}  del_th={point.express_del_th:g}  "
+            f"th={point.express_th}  (n={state.base_kwargs['n']:,}) ..."
+        )
         data = run_simulation(binary, **sim_kwargs)
         if not data["e2e"]:
             raise SystemExit("simulator returned no completed tasks")

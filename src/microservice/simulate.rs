@@ -179,12 +179,8 @@ fn apply_load_overrides(load: &mut LoadSpec, rps: Option<f64>, slo_ms: Option<f6
     }
 }
 
-fn new_bench(seed: Option<u64>) -> SimInit {
-    if seed.is_some() {
-        SimInit::with_num_threads(1)
-    } else {
-        SimInit::new()
-    }
+fn new_bench() -> SimInit {
+    SimInit::with_num_threads(1)
 }
 
 fn downstream_targets(graph: &CallGraph, service_id: &str) -> HashSet<String> {
@@ -386,7 +382,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         })
         .collect();
 
-    let mut bench = new_bench(args.seed);
+    let mut bench = new_bench();
     let (sink, mut completed) = event_queue(SinkState::Enabled);
 
     let mut replica_mailboxes: HashMap<(String, usize), Mailbox<Replica>> = HashMap::new();

@@ -101,7 +101,7 @@ cargo build --release
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
-| `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
+| `--seed` | (none) | RNG seed for reproducible runs |
 | `--format` | `human` | `human` or `json` |
 | `--scale` | `0` | Add this many cores and replicas to every microservice |
 
@@ -149,7 +149,7 @@ Options:
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
-| `--seed` | (none) | RNG seed for reproducible runs (single-threaded simulation) |
+| `--seed` | (none) | RNG seed for reproducible runs |
 | `--slo` | (none) | SLO latency threshold in seconds; when set, reports P(latency > SLO) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
 
