@@ -33,8 +33,21 @@ DEFAULT_LOG_DIR = REPO_ROOT / "optimizer_logs"
 
 RESULTS_HEADER = "run  express_size  express_del_th  express_th"
 RESULTS_SEP = "---  ------------  --------------  ----------"
+RESULTS_HEADER_IDEAL = "run  express_size  express_del_th"
+RESULTS_SEP_IDEAL = "---  ------------  --------------"
 RESULTS_ROW_RE = re.compile(
     r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+([\d.]+)\s*(.*)$"
+)
+RESULTS_ROW_IDEAL_RE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s*(.*)$"
+)
+OPTIMUM_HISTORY_RE = re.compile(
+    r"run\s+(\d+):\s+size=(\d+)\s+del_th=([\d.]+)\s+th=(\d+)\s+"
+    r"[\w]+=([\d.]+)\s+\*\* NEW OPTIMUM \*\*(.*)$"
+)
+OPTIMUM_HISTORY_IDEAL_RE = re.compile(
+    r"run\s+(\d+):\s+size=(\d+)\s+del_th=([\d.]+)\s+"
+    r"[\w]+=([\d.]+)\s+\*\* NEW OPTIMUM \*\*(.*)$"
 )
 HEADER_KV_RE = re.compile(r"^(\w[\w ]*):\s*(.+)$")
 
@@ -43,7 +56,7 @@ HEADER_KV_RE = re.compile(r"^(\w[\w ]*):\s*(.+)$")
 class GridPoint:
     express_size: int
     express_del_th: float
-    express_th: int
+    express_th: int | None = None
 
 
 @dataclass
@@ -72,6 +85,7 @@ class SearchState:
     express_sizes: list[int]
     express_del_ths: list[float]
     express_ths: list[int]
+    ideal: bool = False
     results: list[RunResult] = field(default_factory=list)
     optimum_history: list[OptimumEvent] = field(default_factory=list)
 
@@ -98,9 +112,19 @@ def metric_column_name(metric: str) -> str:
     return f"p{int(pct)}"
 
 
-def log_filename(*, comment: str | None, n: int, started_at: datetime) -> str:
+def log_filename(
+    *,
+    comment: str | None,
+    n: int,
+    started_at: datetime,
+    clients: int,
+    servers: int,
+    ideal: bool = False,
+) -> str:
     stamp = started_at.strftime("%Y%m%d_%H%M%S")
-    parts: list[str] = [stamp]
+    parts: list[str] = [stamp, f"c{clients}s{servers}"]
+    if ideal:
+        parts.append("ideal")
     if comment:
         safe = _sanitize_comment(comment)
         if safe:
@@ -133,6 +157,29 @@ def current_best(state: SearchState) -> RunResult | None:
     return best
 
 
+def grid_total(state: SearchState) -> int:
+    size = len(state.express_sizes) * len(state.express_del_ths)
+    if state.ideal:
+        return size
+    return size * len(state.express_ths)
+
+
+def format_point_optimum(point: GridPoint, *, ideal: bool) -> str:
+    text = (
+        f"express_size={point.express_size}  express_del_th={point.express_del_th:g}"
+    )
+    if not ideal:
+        text += f"  express_th={point.express_th}"
+    return text
+
+
+def format_point_run(point: GridPoint, *, ideal: bool) -> str:
+    text = f"size={point.express_size}  del_th={point.express_del_th:g}"
+    if not ideal:
+        text += f"  th={point.express_th}"
+    return text
+
+
 def note_for_result(result: RunResult, state: SearchState) -> str:
     parts: list[str] = []
     best = current_best(state)
@@ -145,7 +192,7 @@ def note_for_result(result: RunResult, state: SearchState) -> str:
 
 def format_log(state: SearchState) -> str:
     col = metric_column_name(state.metric)
-    total = len(state.express_sizes) * len(state.express_del_ths) * len(state.express_ths)
+    total = grid_total(state)
     completed = len(state.results)
     lines: list[str] = [
         "Express lane grid search",
@@ -157,6 +204,7 @@ def format_log(state: SearchState) -> str:
     lines.extend([
         f"objective: {state.objective}",
         f"metric: {state.metric}",
+        f"ideal: {'true' if state.ideal else 'false'}",
         "",
         "Simulation:",
         f"  load={state.base_kwargs['load']:g}",
@@ -171,7 +219,10 @@ def format_log(state: SearchState) -> str:
         "Grid:",
         f"  express_size: {format_grid_list(state.express_sizes)}",
         f"  express_del_th: {format_grid_list(state.express_del_ths)}",
-        f"  express_th: {format_grid_list(state.express_ths)}",
+    ])
+    if not state.ideal:
+        lines.append(f"  express_th: {format_grid_list(state.express_ths)}")
+    lines.extend([
         f"  progress: {completed} / {total}",
         "",
         "Current optimum",
@@ -184,8 +235,8 @@ def format_log(state: SearchState) -> str:
     else:
         p = best.point
         lines.append(
-            f"  express_size={p.express_size}  express_del_th={p.express_del_th:g}  "
-            f"express_th={p.express_th}  {col}={best.metric_value:.6f}"
+            f"  {format_point_optimum(p, ideal=state.ideal)}  "
+            f"{col}={best.metric_value:.6f}"
         )
 
     lines.extend(["", "Optimum history", "-" * 15])
@@ -200,26 +251,39 @@ def format_log(state: SearchState) -> str:
                 else "  (initial best)"
             )
             lines.append(
-                f"run {event.run:3d}: size={p.express_size}  del_th={p.express_del_th:g}  "
-                f"th={p.express_th}  {col}={event.metric_value:.6f}  "
+                f"run {event.run:3d}: {format_point_run(p, ideal=state.ideal)}  "
+                f"{col}={event.metric_value:.6f}  "
                 f"** NEW OPTIMUM **{prev}"
             )
+
+    if state.ideal:
+        results_header = RESULTS_HEADER_IDEAL
+        results_sep = RESULTS_SEP_IDEAL
+    else:
+        results_header = RESULTS_HEADER
+        results_sep = RESULTS_SEP
 
     lines.extend([
         "",
         f"Results ({completed}/{total})",
         "-" * 20,
-        f"{RESULTS_HEADER}  {col:>9}  note",
-        f"{RESULTS_SEP}  {'-' * 9}  ----",
+        f"{results_header}  {col:>9}  note",
+        f"{results_sep}  {'-' * 9}  ----",
     ])
 
     for result in state.results:
         p = result.point
         note = note_for_result(result, state)
-        lines.append(
-            f"{result.run:4d}  {p.express_size:14d}  {p.express_del_th:14g}  "
-            f"{p.express_th:10d}  {result.metric_value:9.6f}  {note}"
-        )
+        if state.ideal:
+            lines.append(
+                f"{result.run:4d}  {p.express_size:14d}  {p.express_del_th:14g}  "
+                f"{result.metric_value:9.6f}  {note}"
+            )
+        else:
+            lines.append(
+                f"{result.run:4d}  {p.express_size:14d}  {p.express_del_th:14g}  "
+                f"{p.express_th:10d}  {result.metric_value:9.6f}  {note}"
+            )
 
     lines.append("")
     return "\n".join(lines)
@@ -233,6 +297,12 @@ def rewrite_log(path: Path, state: SearchState) -> None:
 def parse_log(text: str) -> SearchState:
     lines = text.splitlines()
     header: dict[str, str] = {}
+    for line in lines:
+        kv = HEADER_KV_RE.match(line.strip())
+        if kv:
+            key = kv.group(1).strip().replace(" ", "_")
+            header[key] = kv.group(2).strip()
+
     in_results = False
     results: list[RunResult] = []
     optimum_history: list[OptimumEvent] = []
@@ -240,6 +310,7 @@ def parse_log(text: str) -> SearchState:
     express_del_ths: list[float] = []
     express_ths: list[int] = []
     base_kwargs: dict = {}
+    ideal = header.get("ideal", "false").lower() == "true"
 
     for line in lines:
         stripped = line.strip()
@@ -249,16 +320,24 @@ def parse_log(text: str) -> SearchState:
         if stripped.startswith("---") and in_results:
             continue
         if in_results:
-            match = RESULTS_ROW_RE.match(line)
+            match = RESULTS_ROW_IDEAL_RE.match(line) if ideal else RESULTS_ROW_RE.match(line)
             if match:
                 run = int(match.group(1))
-                point = GridPoint(
-                    express_size=int(match.group(2)),
-                    express_del_th=float(match.group(3)),
-                    express_th=int(match.group(4)),
-                )
-                metric_value = float(match.group(5))
-                note = match.group(6).strip()
+                if ideal:
+                    point = GridPoint(
+                        express_size=int(match.group(2)),
+                        express_del_th=float(match.group(3)),
+                    )
+                    metric_value = float(match.group(4))
+                    note = match.group(5).strip()
+                else:
+                    point = GridPoint(
+                        express_size=int(match.group(2)),
+                        express_del_th=float(match.group(3)),
+                        express_th=int(match.group(4)),
+                    )
+                    metric_value = float(match.group(5))
+                    note = match.group(6).strip()
                 results.append(
                     RunResult(
                         run=run,
@@ -270,37 +349,43 @@ def parse_log(text: str) -> SearchState:
             continue
 
         if stripped.startswith("run ") and ":" in stripped and "size=" in stripped:
-            event_match = re.match(
-                r"run\s+(\d+):\s+size=(\d+)\s+del_th=([\d.]+)\s+th=(\d+)\s+"
-                r"[\w]+=([\d.]+)\s+\*\* NEW OPTIMUM \*\*(.*)$",
-                stripped,
+            event_match = (
+                OPTIMUM_HISTORY_IDEAL_RE.match(stripped)
+                if ideal
+                else OPTIMUM_HISTORY_RE.match(stripped)
             )
             if event_match:
                 previous = None
-                tail = event_match.group(6).strip()
+                tail = event_match.group(5 if ideal else 6).strip()
                 prev_match = re.search(r"\(was ([\d.]+)\)", tail)
                 if prev_match:
                     previous = float(prev_match.group(1))
+                if ideal:
+                    point = GridPoint(
+                        express_size=int(event_match.group(2)),
+                        express_del_th=float(event_match.group(3)),
+                    )
+                    metric_value = float(event_match.group(4))
+                else:
+                    point = GridPoint(
+                        express_size=int(event_match.group(2)),
+                        express_del_th=float(event_match.group(3)),
+                        express_th=int(event_match.group(4)),
+                    )
+                    metric_value = float(event_match.group(5))
                 optimum_history.append(
                     OptimumEvent(
                         run=int(event_match.group(1)),
-                        point=GridPoint(
-                            express_size=int(event_match.group(2)),
-                            express_del_th=float(event_match.group(3)),
-                            express_th=int(event_match.group(4)),
-                        ),
-                        metric_value=float(event_match.group(5)),
+                        point=point,
+                        metric_value=metric_value,
                         previous=previous,
                     )
                 )
             continue
 
         kv = HEADER_KV_RE.match(stripped)
-        if not kv:
+        if kv:
             continue
-        key = kv.group(1).strip().replace(" ", "_")
-        value = kv.group(2).strip()
-        header[key] = value
 
     started_at = header.get("started", datetime.now().isoformat(sep=" ", timespec="seconds"))
     comment = header.get("comment")
@@ -352,8 +437,8 @@ def parse_log(text: str) -> SearchState:
         express_sizes = sorted({r.point.express_size for r in results})
     if not express_del_ths and results:
         express_del_ths = sorted({r.point.express_del_th for r in results})
-    if not express_ths and results:
-        express_ths = sorted({r.point.express_th for r in results})
+    if not express_ths and results and not ideal:
+        express_ths = sorted({r.point.express_th for r in results if r.point.express_th is not None})
 
     return SearchState(
         started_at=started_at,
@@ -364,6 +449,7 @@ def parse_log(text: str) -> SearchState:
         express_sizes=express_sizes,
         express_del_ths=express_del_ths,
         express_ths=express_ths,
+        ideal=ideal,
         results=results,
         optimum_history=optimum_history,
     )
@@ -377,8 +463,8 @@ def add_grid_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Express pool size(s); overrides min/max/step",
     )
-    parser.add_argument("--express-size-min", type=int, default=0)
-    parser.add_argument("--express-size-max", type=int, default=4)
+    parser.add_argument("--express-size-min", type=int, default=1)
+    parser.add_argument("--express-size-max", type=int, default=5)
     parser.add_argument("--express-size-step", type=int, default=1)
     parser.add_argument(
         "--express-del-th",
@@ -387,8 +473,8 @@ def add_grid_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Express delay threshold(s); overrides min/max/step",
     )
-    parser.add_argument("--express-del-th-min", type=float, default=0)
-    parser.add_argument("--express-del-th-max", type=float, default=15)
+    parser.add_argument("--express-del-th-min", type=float, default=2)
+    parser.add_argument("--express-del-th-max", type=float, default=10)
     parser.add_argument("--express-del-th-step", type=float, default=1)
     parser.add_argument(
         "--express-th",
@@ -397,14 +483,14 @@ def add_grid_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Express queue depth threshold(s); overrides min/max/step",
     )
-    parser.add_argument("--express-th-min", type=int, default=0)
+    parser.add_argument("--express-th-min", type=int, default=1)
     parser.add_argument("--express-th-max", type=int, default=6)
     parser.add_argument("--express-th-step", type=int, default=1)
 
 
 def add_sim_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--load", type=float, default=0.8)
-    parser.add_argument("--servers", type=int, default=10)
+    parser.add_argument("--servers", type=int, default=1)
     parser.add_argument("--clients", type=int, default=1)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--lb-subset-size", type=int, default=0)
@@ -465,15 +551,35 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Resume from an existing log file",
     )
+    parser.add_argument(
+        "--ideal",
+        action="store_true",
+        help="Immediate oracle eviction when projected delay exceeds threshold (default: monitored timer)",
+    )
     add_sim_args(parser)
     add_grid_args(parser)
     return parser.parse_args()
+
+
+def validate_ideal_express_th_conflict(args: argparse.Namespace) -> None:
+    if not args.ideal:
+        return
+    if args.express_th is not None:
+        raise SystemExit("--ideal cannot be combined with --express-th")
 
 
 def build_state_from_args(args: argparse.Namespace) -> SearchState:
     parse_metric(args.metric)
     if parse_metric(args.metric)[0] == "slo-violation" and args.slo is None:
         raise SystemExit("--slo is required when --metric slo-violation")
+    validate_ideal_express_th_conflict(args)
+
+    express_sizes = express_size_values(args)
+    express_del_ths = express_del_th_values(args, drop_invalid=True)
+    if args.ideal:
+        express_ths: list[int] = []
+    else:
+        express_ths = express_th_values(args)
 
     return SearchState(
         started_at=datetime.now().isoformat(sep=" ", timespec="seconds"),
@@ -494,17 +600,59 @@ def build_state_from_args(args: argparse.Namespace) -> SearchState:
             "seed": args.seed,
             "slo": args.slo,
         },
-        express_sizes=express_size_values(args),
-        express_del_ths=express_del_th_values(args, drop_invalid=True),
-        express_ths=express_th_values(args),
+        express_sizes=express_sizes,
+        express_del_ths=express_del_ths,
+        express_ths=express_ths,
+        ideal=args.ideal,
     )
 
 
-def completed_triples(state: SearchState) -> set[tuple[int, float, int]]:
+def completed_points(state: SearchState) -> set[tuple]:
+    if state.ideal:
+        return {
+            (r.point.express_size, r.point.express_del_th)
+            for r in state.results
+        }
     return {
         (r.point.express_size, r.point.express_del_th, r.point.express_th)
         for r in state.results
     }
+
+
+def build_grid(state: SearchState) -> list[GridPoint]:
+    if state.ideal:
+        return [
+            GridPoint(express_size=s, express_del_th=d)
+            for s, d in product(state.express_sizes, state.express_del_ths)
+        ]
+    return [
+        GridPoint(express_size=s, express_del_th=d, express_th=t)
+        for s, d, t in product(
+            state.express_sizes,
+            state.express_del_ths,
+            state.express_ths,
+        )
+    ]
+
+
+def point_key(point: GridPoint, *, ideal: bool) -> tuple:
+    if ideal:
+        return (point.express_size, point.express_del_th)
+    return (point.express_size, point.express_del_th, point.express_th)
+
+
+def sim_kwargs_for_point(state: SearchState, point: GridPoint) -> dict:
+    kwargs = {
+        **state.base_kwargs,
+        "expresslane": True,
+        "express_size": point.express_size,
+        "express_del_th": point.express_del_th,
+    }
+    if state.ideal:
+        kwargs["ideal"] = True
+    else:
+        kwargs["express_th"] = point.express_th
+    return kwargs
 
 
 def warn_if_slow_grid(state: SearchState, *, remaining: int) -> None:
@@ -526,28 +674,20 @@ def run_grid_search(
     state: SearchState,
     log_path: Path,
 ) -> None:
-    grid = list(product(state.express_sizes, state.express_del_ths, state.express_ths))
-    done = completed_triples(state)
+    grid = build_grid(state)
+    done = completed_points(state)
     next_run = max((r.run for r in state.results), default=0) + 1
     remaining = [
-        GridPoint(express_size=s, express_del_th=d, express_th=t)
-        for s, d, t in grid
-        if (s, d, t) not in done
+        point for point in grid if point_key(point, ideal=state.ideal) not in done
     ]
 
     col = metric_column_name(state.metric)
     warn_if_slow_grid(state, remaining=len(remaining))
     for point in tqdm(remaining, desc="express lane grid search", unit="run"):
-        sim_kwargs = {
-            **state.base_kwargs,
-            "expresslane": True,
-            "express_size": point.express_size,
-            "express_del_th": point.express_del_th,
-            "express_th": point.express_th,
-        }
+        sim_kwargs = sim_kwargs_for_point(state, point)
         tqdm.write(
-            f"run {next_run}: size={point.express_size}  del_th={point.express_del_th:g}  "
-            f"th={point.express_th}  (n={state.base_kwargs['n']:,}) ..."
+            f"run {next_run}: {format_point_run(point, ideal=state.ideal)}  "
+            f"(n={state.base_kwargs['n']:,}) ..."
         )
         data = run_simulation(binary, **sim_kwargs)
         if not data["e2e"]:
@@ -589,8 +729,8 @@ def run_grid_search(
                 else " (initial best)"
             )
             tqdm.write(
-                f"** NEW OPTIMUM ** run {next_run}: size={point.express_size}  "
-                f"del_th={point.express_del_th:g}  th={point.express_th}  "
+                f"** NEW OPTIMUM ** run {next_run}: "
+                f"{format_point_run(point, ideal=state.ideal)}  "
                 f"{col}={metric_value:.6f}{prev_text}"
             )
 
@@ -603,8 +743,8 @@ def run_grid_search(
         return
     p = best.point
     print(
-        f"best: express_size={p.express_size} express_del_th={p.express_del_th:g} "
-        f"express_th={p.express_th} {col}={best.metric_value:.6f}",
+        f"best: {format_point_optimum(p, ideal=state.ideal).replace('  ', ' ')} "
+        f"{col}={best.metric_value:.6f}",
         file=sys.stderr,
     )
     print(f"log: {log_path}", file=sys.stderr)
@@ -633,6 +773,9 @@ def main() -> None:
             comment=args.comment,
             n=args.n,
             started_at=started,
+            clients=args.clients,
+            servers=args.servers,
+            ideal=args.ideal,
         )
         rewrite_log(log_path, state)
         print(f"logging to {log_path}", file=sys.stderr)

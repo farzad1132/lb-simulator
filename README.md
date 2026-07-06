@@ -447,13 +447,18 @@ python plot_lb_centralized_compare.py \
 
 ## Optimize express lane parameters
 
-`optimize_express_lane.py` grid-searches `express_size`, `express_del_th`, and `express_th` (combined eviction mode) to minimize a metric (default **p99**). There is **no plot or PDF output** — progress is written to a human-readable log under `optimizer_logs/` (gitignored). The log is rewritten after each simulation with a results table, current optimum, and optimum history; rows where a new best is found are marked `NEW OPTIMUM`.
+`optimize_express_lane.py` grid-searches express lane parameters to minimize a metric (default **p99**). By default it searches **combined eviction mode** over `express_size`, `express_del_th`, and `express_th` (3D grid). With `--ideal`, it searches **delay-only oracle mode** over `express_size` and `express_del_th` only (2D grid; `--express-th` is not allowed). There is **no plot or PDF output** — progress is written to a human-readable log under `optimizer_logs/` (gitignored). The log is rewritten after each simulation with a results table, current optimum, and optimum history; rows where a new best is found are marked `NEW OPTIMUM`.
 
 Default grid (with `--servers 10`): express_size 1–4, express_del_th 1–10, express_th 0–6 → 280 runs. Values `express_size=0` and `express_del_th=0` are dropped.
 
 ```bash
 python optimize_express_lane.py \
   --comment bimodal-p2c \
+  --servers 10 --load 0.8 --n 100000
+
+# Delay-only oracle eviction (2D grid):
+python optimize_express_lane.py \
+  --ideal --comment ideal-p2c \
   --servers 10 --load 0.8 --n 100000
 
 # Resume after interrupt:
@@ -466,9 +471,10 @@ python optimize_express_lane.py --resume optimizer_logs/express_lane_20250702_15
 | `--log-dir` | `optimizer_logs/` | Directory for optimizer logs |
 | `--resume` | (none) | Continue from an existing log file |
 | `--metric` | `p99` | Objective metric (`p99`, `p50`, `utilization`, `slo-violation`, or `p{N}`) |
+| `--ideal` | off | Delay-only oracle eviction; 2D grid (no `express_th`) |
 | `--express-size-min/max/step` | `0` / `4` / `1` | Express pool size sweep |
 | `--express-del-th-min/max/step` | `0` / `10` / `1` | Express delay threshold sweep (seconds) |
-| `--express-th-min/max/step` | `0` / `6` / `1` | Express queue depth threshold sweep |
+| `--express-th-min/max/step` | `0` / `6` / `1` | Express queue depth threshold sweep (combined mode only) |
 | `--load` | `0.8` | Target utilization |
 | `--servers` | `10` | Total servers (regular + express) |
 | `--n` | `1000000` | Tasks per run |
