@@ -28,7 +28,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 from tqdm import tqdm
 import numpy as np
 
-from lb_plot_configs import ExperimentConfig, select_configs
+from lb_plot_configs import ExperimentConfig, select_configs, uses_express_lane
 from plot_cdfs import (
     REPO_ROOT,
     SERVICE_MEAN,
@@ -128,6 +128,14 @@ def format_run_summary(
         f"clients={config.clients}",
         f"measured_rate={measured_rate:.4f}",
     ]
+    if uses_express_lane(config):
+        parts.append(f"express_size={config.express_size}")
+        if config.express_del_th is not None:
+            parts.append(f"express_del_th={config.express_del_th:g}")
+        if config.express_th is not None:
+            parts.append(f"express_th={config.express_th}")
+        if config.ideal:
+            parts.append("ideal")
     if kind == "utilization":
         parts.append(f"utilization={metric_value:.1f}%")
     else:
@@ -172,6 +180,14 @@ def run_comparison_sweep(
             "concurrency": config.concurrency,
             "lb_subset_size": config.lb_subset_size,
         }
+        if uses_express_lane(config):
+            sim_kwargs.update(
+                expresslane=True,
+                express_size=config.express_size,
+                express_del_th=config.express_del_th,
+                express_th=config.express_th,
+                ideal=config.ideal,
+            )
         data = run_simulation(binary, **sim_kwargs)
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)

@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::load_registry::LoadRegistry;
 use crate::policy::LoadBalancePolicyKind;
 use crate::rng;
 use crate::subset::{self, SubsetPolicyKind};
@@ -373,15 +372,6 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         .map(|(id, spec)| (id.clone(), spec.replicas))
         .collect();
 
-    let replica_loads: HashMap<String, LoadRegistry> = graph
-        .service_order
-        .iter()
-        .map(|service_id| {
-            let n = graph.services[service_id].replicas as usize;
-            (service_id.clone(), LoadRegistry::new(n))
-        })
-        .collect();
-
     let mut bench = new_bench();
     let (sink, mut completed) = event_queue(SinkState::Enabled);
 
@@ -436,10 +426,6 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             api.clone(),
             n_replicas,
             replica_indices.clone(),
-            replica_loads
-                .get(&entry_service)
-                .expect("missing load registry for entry service")
-                .clone(),
             tracer.clone(),
         );
         let mailbox = Mailbox::new();
@@ -497,26 +483,12 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 downstream_indices.insert(target.clone(), indices);
             }
 
-            let downstream_loads: HashMap<String, LoadRegistry> = downstream_indices
-                .keys()
-                .map(|target| {
-                    (
-                        target.clone(),
-                        replica_loads
-                            .get(target)
-                            .expect("missing load registry for downstream service")
-                            .clone(),
-                    )
-                })
-                .collect();
-
             let balancer = ReplicaBalancer::new(
                 args.lb_policy.build(),
                 args.lb_policy,
                 service_id.clone(),
                 replica_idx,
                 downstream_indices.clone(),
-                downstream_loads,
                 &service_replica_counts,
                 tracer.clone(),
             );
@@ -641,10 +613,6 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 return_outputs: return_outputs.clone(),
                 completed: completed_output.clone(),
                 tracer: tracer.clone(),
-                load_registry: replica_loads
-                    .get(service_id)
-                    .expect("missing load registry for service")
-                    .clone(),
             });
             bench = bench.add_model(replica, mb, &format!("{service_id}-replica-{i}"));
         }

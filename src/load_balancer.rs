@@ -1,4 +1,3 @@
-use lb::load_registry::LoadRegistry;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
@@ -21,8 +20,6 @@ pub struct LoadBalancer {
     #[serde(skip)]
     local_inflight: Vec<u32>,
     #[serde(skip)]
-    load_registry: LoadRegistry,
-    #[serde(skip)]
     server_indices: Vec<usize>,
     #[serde(skip)]
     load_scratch: Vec<u32>,
@@ -41,7 +38,6 @@ impl LoadBalancer {
         n_servers: usize,
         server_indices: Vec<usize>,
         lb_id: usize,
-        load_registry: LoadRegistry,
         preserve_client_metadata: bool,
     ) -> Self {
         Self {
@@ -49,7 +45,6 @@ impl LoadBalancer {
             lb_policy,
             lb_id,
             local_inflight: vec![0; n_servers],
-            load_registry,
             load_scratch: vec![0; server_indices.len()],
             server_indices,
             queue: Vec::new(),
@@ -89,16 +84,8 @@ impl LoadBalancer {
             return;
         }
 
-        for (scratch, &server_idx) in self
-            .load_scratch
-            .iter_mut()
-            .zip(self.server_indices.iter())
-        {
-            *scratch = if self.lb_policy.uses_true_load() {
-                self.load_registry.get(server_idx)
-            } else {
-                self.local_inflight[server_idx]
-            };
+        for (scratch, &server_idx) in self.load_scratch.iter_mut().zip(self.server_indices.iter()) {
+            *scratch = self.local_inflight[server_idx];
         }
         let local_idx = self.policy.select(&self.load_scratch);
         let global_idx = self.server_indices[local_idx];

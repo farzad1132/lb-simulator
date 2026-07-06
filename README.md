@@ -24,7 +24,7 @@ For a side-by-side feature comparison with the microservice simulator, see [docs
 Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
 
 - **random** — uniform random server selection
-- **power-of-two** — sample two random servers and route to the one with lower true load (in-flight work plus queue depth at the server)
+- **power-of-two** — sample two random servers and route to the one with lower local inflight (requests this balancer has dispatched but not yet received a release for)
 - **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 - **centralized** — pull-based: one global queue at a single dispatcher; servers request work when they have spare capacity (`lb` only; ignores `--lb-subset-size`; incompatible with `--expresslane`)

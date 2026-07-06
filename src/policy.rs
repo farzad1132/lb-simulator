@@ -25,11 +25,7 @@ impl LoadBalancePolicy for PowerOfTwoPolicy {
         }
         let i = rng::random_usize_range(0..n);
         let j = rng::random_usize_range(0..n);
-        if loads[i] <= loads[j] {
-            i
-        } else {
-            j
-        }
+        if loads[i] <= loads[j] { i } else { j }
     }
 }
 
@@ -109,10 +105,6 @@ impl LoadBalancePolicyKind {
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized => Box::new(CentralizedPolicy),
         }
-    }
-
-    pub fn uses_true_load(self) -> bool {
-        matches!(self, Self::PowerOfTwo)
     }
 
     pub fn is_centralized(self) -> bool {
