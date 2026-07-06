@@ -55,12 +55,13 @@ DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
-    ExperimentConfig("CQ-10", "centralized", 10, 10),
-    ExperimentConfig("P2C-10", "power-of-two", 10, 10),
-    ExperimentConfig("P2C-11", "power-of-two", 10, 11),
-    ExperimentConfig("P2C-12", "power-of-two", 10, 12),
-    ExperimentConfig("P2C-13", "power-of-two", 10, 13),
-    ExperimentConfig("P2C-14", "power-of-two", 10, 14)
+    ExperimentConfig("CQ", "centralized", 100, 10),
+    ExperimentConfig("CL-2", "power-of-two", 2, 10),
+    ExperimentConfig("CL-5", "power-of-two", 5, 10),
+    ExperimentConfig("P2C", "power-of-two", 100, 10),
+    ExperimentConfig("LR", "least-request", 10, 11),
+    ExperimentConfig("R", "random", 10, 11),
+    
 ]
 
 

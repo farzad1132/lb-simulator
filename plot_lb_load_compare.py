@@ -53,12 +53,23 @@ DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
-    ExperimentConfig("CQ", "centralized", 10, 10),
-    ExperimentConfig("P2C-all", "power-of-two", 10, 10, lb_subset_size=0),
-    ExperimentConfig("LR-k1", "least-request", 10, 10, lb_subset_size=1),
-    ExperimentConfig("LR-k2", "least-request", 10, 10, lb_subset_size=2),
-    ExperimentConfig("LR-k4", "least-request", 10, 10, lb_subset_size=4),
-    ExperimentConfig("LR-all", "least-request", 10, 10, lb_subset_size=0),
+    ExperimentConfig("CQ", "centralized", 10, 100),
+    ExperimentConfig("P2C", "power-of-two", 10, 100),
+    ExperimentConfig("RR", "round-robin", 10, 100),
+    ExperimentConfig("R", "random", 10, 100),
+    ExperimentConfig("CL-1", "power-of-two", 1, 100),
+    ExperimentConfig("CL-2", "power-of-two", 2, 100),
+    ExperimentConfig("CL-2-K50", "power-of-two", 2, 100, lb_subset_size=50),
+    ExperimentConfig("P2C-E2033", "power-of-two", 10, 100, lb_subset_size=0, express_size=20, express_del_th=3, express_th=3),
+    #ExperimentConfig("CQ-LR-2", "least-request", 2, 10, lb_subset_size=0),
+    #ExperimentConfig("CQ-LR-5", "least-request", 5, 10, lb_subset_size=0),
+    #ExperimentConfig("CQ-P2C-2", "power-of-two", 2, 10, lb_subset_size=0),
+    #ExperimentConfig("CQ-P2C-5", "power-of-two", 5, 10, lb_subset_size=0),
+    #ExperimentConfig("P2C-E45-ideal", "power-of-two", 10, 10, lb_subset_size=0, express_size=4, express_del_th=5, ideal=True),
+    #ExperimentConfig("LR-E2021", "least-request", 10, 100, lb_subset_size=0, express_size=20, express_del_th=2, express_th=3),
+    #ExperimentConfig("P2C-E2021", "power-of-two", 10, 100, lb_subset_size=0, express_size=20, express_del_th=2, express_th=3),
+    #ExperimentConfig("P2C-E491", "power-of-two", 10, 10, lb_subset_size=0, express_size=4, express_del_th=9, express_th=1),
+    #ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
 ]
 
 
