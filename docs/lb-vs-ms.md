@@ -35,7 +35,8 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Request tracing | — | yes | `--trace`, `--trace-limit` (timeline on stderr) |
 | Topology scaling | — | yes | `--scale` adds CPU and replicas to every service |
 | Load/SLO CLI overrides | — | yes | `--rps`, `--slo-ms` override `load.json` |
-| Per-service / per-replica utilization | — | yes | `utilization_pct`, `replica_utilization_pct` |
+| Per-microservice / per-server utilization | — | yes | `microservice_utilization_pct`, `server_utilization_pct` |
+| Per-microservice visit metrics | — | yes | `by_microservice`, `total_processing_p99_ms` |
 | Processing time metric | — | yes | `processing_time_ms`; queueing = `e2e_ms − processing_time_ms` |
 | Split express metrics | yes | — | `regular_*`, `express_*`, pre/post-eviction queueing |
 
@@ -144,7 +145,8 @@ Downstream completions return directly to the **specific caller replica** via `C
 ### Metrics shape
 
 - Latencies in **milliseconds** (`e2e_ms`, `processing_time_ms`).
-- Per-service `utilization_pct` and per-replica `replica_utilization_pct`.
+- Per-microservice `microservice_utilization_pct` and per-server `server_utilization_pct`.
+- Per-microservice visit samples under `by_microservice`; top-level `total_processing_p99_ms`.
 - Per-API stats under `by_api` including always-present SLO fields from `load.json`.
 
 ## Metrics and output
@@ -153,7 +155,8 @@ Downstream completions return directly to the **specific caller replica** via `C
 |---|----|----|
 | Time units | seconds | milliseconds |
 | Primary latency fields | `e2e`, `queueing_delays` | `e2e_ms`, `processing_time_ms` |
-| Utilization | single `utilization_pct` | per-service + per-replica maps |
+| Utilization | single `utilization_pct` | per-microservice + per-server maps |
+| Visit-level metrics | — | `by_microservice` (inter-arrival, response time, queueing, …) |
 | SLO | optional (`--slo`) | required per API in `load.json`; overridable via `--slo-ms` |
 | Express split metrics | when `--expresslane` | not available |
 
@@ -166,6 +169,7 @@ Downstream completions return directly to the **specific caller replica** via `C
 | [`plot_lb_centralized_compare.py`](../plot_lb_centralized_compare.py) | lb | Centralized vs power-of-two at equal task/s with different server counts (lb-only; `centralized` unsupported in `ms`) |
 | [`plot_lb_express_heatmap.py`](../plot_lb_express_heatmap.py) | lb | Express lane heatmap (express-size × express-del-th) |
 | [`plot_ms_chain_slo_heatmap.py`](../plot_ms_chain_slo_heatmap.py) | ms | SLO violation heatmap for chain topologies |
+| [`analyze/ms_service_distributions.py`](../analyze/ms_service_distributions.py) | ms | Per-microservice visit distribution CDFs (see [analyze.md](analyze.md)) |
 | [`compare_lb_ms.py`](../compare_lb_ms.py) | both | Overlay CDFs on equivalent single-hop topologies |
 
 ## When results should match

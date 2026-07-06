@@ -2,24 +2,35 @@
 
 This document describes how the microservice simulator works: inputs, internal model, request flow, and metrics. The simulator is implemented as a separate binary (`ms`) and module (`src/microservice/`) that does not modify the flat load-balancer simulator (`lb`).
 
-See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the flat load-balancer simulator (including which features are shared, lb-only, or ms-only).
+See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the flat load-balancer simulator (including which features are shared, lb-only, or ms-only). Per-microservice visit distributions are documented in [analyze.md](analyze.md).
+
+## Vocabulary
+
+| Term | Meaning | Code / JSON |
+|------|---------|-------------|
+| **Server** | A single server with its own FIFO queue and concurrency slots | Rust type `Replica`; `server_idx`; JSON `server_utilization_pct` |
+| **Microservice** | A deployable callgraph component backed by one or more servers | `microservice_id`; callgraph node; JSON `by_microservice`, `microservice_utilization_pct` |
+| **Service** | The API-level offering; one service per entry API | Conceptual; 1:1 with an entry API in `load.json` |
+| **API** | Named user-facing entry point with independent Poisson traffic | Key in `load.json`; JSON `by_api` |
+
+In a linear chain (chain-3), one API (`handle`) belongs to one **service** and traverses three **microservices** (`frontend → backend1 → backend2`). Metrics under `by_microservice` aggregate across all **servers** of each microservice.
 
 ## Overview
 
-The simulator models a microservice application as a directed graph of endpoints. User requests arrive as independent Poisson processes (one per API), enter through a **per-API edge load balancer**, and traverse the callgraph as **nested synchronous RPCs**: each replica performs local work, calls downstream services sequentially (edge order) via its **own replica load balancer**, waits for each subtree to return, then returns directly to its caller replica. Queueing happens at each replica.
+The simulator models a microservice application as a directed graph of endpoints. User requests arrive as independent Poisson processes (one per API), enter through a **per-API edge load balancer**, and traverse the callgraph as **nested synchronous RPCs**: each server performs local work, calls downstream microservices sequentially (edge order) via its **own replica load balancer**, waits for each subtree to return, then returns directly to its caller server. Queueing happens at each server.
 
 ```
 Poisson sources (per API)
         │
         ▼
-  UserArrival ──▶ EdgeBalancer(api) ──▶ entry Replica(s)
+  UserArrival ──▶ EdgeBalancer(api) ──▶ entry server(s)
         │                                      │
         │                    return (direct)   │
         │                    ◀─────────────────┘
         │                              │
         │              outbound via caller's ReplicaBalancer
         ▼                              ▼
-                         downstream Replica(s) ──▶ … ──▶ stats sink
+                         downstream server(s) ──▶ … ──▶ stats sink
 ```
 
 ## Input files
@@ -32,17 +43,17 @@ Describes the application topology.
 
 | Node kind | Fields | Notes |
 |-----------|--------|-------|
-| `USER` | `interfaces` | Synthetic entry point. Not simulated as a service. |
-| Service (e.g. `frontend`) | `interfaces`, `cpu`, `replicas` | A deployable microservice. |
+| `USER` | `interfaces` | Synthetic entry point. Not simulated as a microservice. |
+| Microservice (e.g. `frontend`) | `interfaces`, `cpu`, `replicas` | A deployable microservice node. |
 
-Each **interface** (endpoint) on a service has a mean local processing time in **milliseconds**, specified as either:
+Each **interface** (endpoint) on a microservice has a mean local processing time in **milliseconds**, specified as either:
 
 - `"avg_rt": 0.2` — mean 0.2 ms, or
 - `"exponential": { "mean": 0.8 }` — mean 0.8 ms
 
 Both forms define the mean of an **exponential** random variable sampled when that endpoint processes a hop (converted to seconds internally for simulation).
 
-**`cpu`** is the total concurrency of the microservice (shared across all interfaces). **`replicas`** is the number of replica instances. Each replica gets `cpu / replicas` concurrent processing slots.
+**`cpu`** is the total concurrency of the microservice (shared across all interfaces). **`replicas`** is the number of server instances. Each server gets `cpu / replicas` concurrent processing slots.
 
 **`edges`** — directed calls between endpoints:
 
@@ -99,34 +110,34 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Picks an entry-service replica for user traffic using local inflight |
-| **ReplicaBalancer** | one per replica | Outbound only: picks downstream replicas using local outbound inflight |
-| **Replica** | `replicas` per microservice | Strict FIFO queue, local processing, nested dispatch/return |
+| **EdgeBalancer** | one per API | Picks an entry-microservice server for user traffic using local inflight |
+| **ReplicaBalancer** | one per server | Outbound only: picks downstream servers using local outbound inflight |
+| **Replica** (server) | `replicas` per microservice | Strict FIFO queue, local processing, nested dispatch/return |
 
 ### What a microservice models
 
-A callgraph service node becomes:
+A callgraph microservice node becomes:
 
-- `replicas` × `Replica` models, each with `max_concurrency = cpu / replicas`
-- `replicas` × `ReplicaBalancer` models (one outbound LB per replica)
+- `replicas` × `Replica` (server) models, each with `max_concurrency = cpu / replicas`
+- `replicas` × `ReplicaBalancer` models (one outbound LB per server)
 
-All interfaces of a service share the same replica pool. The queue is per-replica, not per-interface.
+All interfaces of a microservice share the same server pool. The queue is per-server, not per-interface.
 
-User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-service replicas.
+User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-microservice servers.
 
 ### Replica subsetting
 
 When `--lb-subset-size k > 0`, each balancer only routes among `min(k, replicas)` targets. Subset assignment is controlled by `--lb-subset-policy` (default `deterministic`):
 
 - **EdgeBalancer:** client id is the API index (APIs sorted lexicographically).
-- **ReplicaBalancer:** client id is `replica_idx` within the calling service. Each replica balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
+- **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
 
 See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm.
 
 ### What is NOT modeled
 
 - Network latency between services
-- Per-endpoint concurrency (only per-service `cpu`)
+- Per-endpoint concurrency (only per-microservice `cpu`)
 - Parallel fan-out / fork-join among siblings (siblings are sequential)
 - Retries, failures, or timeouts
 
@@ -236,17 +247,31 @@ Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a p
 
 | Metric | Definition |
 |--------|------------|
-| **Utilization** | `busy_time[s] / (observation_time × cpu[s]) × 100` |
+| **microservice_utilization_pct** | `busy_time[ms] / (observation_time × cpu[ms]) × 100` |
 
-`busy_time[s]` is the sum of all sampled local hop durations executed on any replica of service `s`. Visiting the same service twice in one request contributes twice.
+`busy_time[ms]` is the sum of all sampled local hop durations executed on any server of microservice `ms`. Visiting the same microservice twice in one request contributes twice.
 
-### Per replica
+### Per server
 
 | Metric | Definition |
 |--------|------------|
-| **Utilization** | `busy_time[s][r] / (observation_time × (cpu[s] / replicas[s])) × 100` |
+| **server_utilization_pct** | `busy_time[ms][s] / (observation_time × (cpu[ms] / replicas[ms])) × 100` |
 
-`busy_time[s][r]` is the sum of local hop durations executed on replica `r` of service `s`. Per-replica utilization uses that replica's concurrency slots (`cpu / replicas`) as capacity. When all replicas have equal capacity, the service-level overall utilization equals the average of per-replica utilizations.
+`busy_time[ms][s]` is the sum of local hop durations executed on server `s` of microservice `ms`. Per-server utilization uses that server's concurrency slots (`cpu / replicas`) as capacity. When all servers have equal capacity, the microservice-level overall utilization equals the average of per-server utilizations.
+
+### Per-microservice visit metrics
+
+Recorded per visit (one per microservice per request on the request path) and exported under `by_microservice`. See [analyze.md](analyze.md) for definitions, normalization, and plotting.
+
+| Field | Definition |
+|-------|------------|
+| **inter_arrival_ms** | Consecutive gaps between visit arrival timestamps (all servers merged) |
+| **inter_departure_ms** | Consecutive gaps between visit departure timestamps |
+| **response_time_ms** | `departure − arrival` (includes queueing, processing, downstream blocking) |
+| **queueing_delay_ms** | `service_start − arrival` |
+| **processing_time_ms** | Sum of local hop durations at that microservice only |
+
+Top-level **total_processing_p99_ms** is the p99 of per-request total local processing time across the full call tree (same scale used to normalize response and queueing CDFs in analyze scripts).
 
 ## Validation against `lb`
 
@@ -310,10 +335,10 @@ Use `--trace` to print a per-request timeline on **stderr** while stats still go
 
 ```
 [t=0.000449s] req=1 UserArrival api=f1 entry=frontend:f1
-[t=0.000449s] req=1 EdgeBalancer(api=f1) -> replica=0
-[t=0.000449s] req=1 Replica(frontend/0) enqueue upstream endpoint=frontend:f1 queue=1 inflight=0
-[t=0.000449s] req=1 Replica(frontend/0) serve start endpoint=frontend:f1
-[t=0.000480s] req=1 Replica(frontend/0) serve done endpoint=frontend:f1 duration_ms=0.031
+[t=0.000449s] req=1 EdgeBalancer(api=f1) -> server=0
+[t=0.000449s] req=1 Server(frontend/0) enqueue upstream endpoint=frontend:f1 queue=1 inflight=0
+[t=0.000449s] req=1 Server(frontend/0) serve start endpoint=frontend:f1
+[t=0.000480s] req=1 Server(frontend/0) serve done endpoint=frontend:f1 duration_ms=0.031
 ...
 [t=0.004599s] req=1 UserArrival complete api=f1 e2e_ms=4.15 proc_ms=4.15
 ```
@@ -333,13 +358,13 @@ Only the first `--trace-limit` user arrivals are traced. Keep this small when `-
 
 ```json
 {
-  "utilization_pct": {
+  "microservice_utilization_pct": {
     "frontend": 2.02,
     "backend1": 9.41,
     "backend2": 2.54,
     "shared": 7.46
   },
-  "replica_utilization_pct": {
+  "server_utilization_pct": {
     "frontend": { "0": 2.50, "1": 1.54 },
     "backend1": { "0": 10.2, "1": 9.1, "2": 8.9 },
     "backend2": { "0": 2.80, "1": 2.28 },
@@ -353,10 +378,20 @@ Only the first `--trace-limit` user arrivals are traced. Keep this small when `-
       "slo_latency_ms": 58.0,
       "prob_latency_gt_slo": 0.012
     }
-  }
+  },
+  "by_microservice": {
+    "frontend": {
+      "inter_arrival_ms": [0.5, 0.3],
+      "inter_departure_ms": [0.6, 0.4],
+      "response_time_ms": [4.2, 5.1],
+      "queueing_delay_ms": [1.2, 1.0],
+      "processing_time_ms": [0.5, 0.4]
+    }
+  },
+  "total_processing_p99_ms": 11.6
 }
 ```
 
-Human output lists per-replica utilization indented under each microservice.
+Human output lists per-server utilization indented under each microservice.
 
-To plot e2e latency CDFs from `plot_cdfs.py`, see [Plot microservice e2e CDF](../README.md#plot-microservice-e2e-cdf) in the README.
+To plot e2e latency CDFs from `plot_cdfs.py`, see [Plot microservice e2e CDF](../README.md#plot-microservice-e2e-cdf) in the README. For per-microservice visit distributions, see [analyze.md](analyze.md).

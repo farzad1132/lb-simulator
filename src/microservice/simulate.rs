@@ -6,6 +6,7 @@ use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,8 +19,9 @@ use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
 use super::callgraph::ApiLoad;
 use super::hop::{
     CompletedRequest, Hop, OutboundCall, ReplicaInput, sample_exp,
-    service_for_endpoint,
+    microservice_for_endpoint,
 };
+use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
 use super::replica::{Replica, ReplicaConfig};
 use super::trace::MsTracer;
 
@@ -63,9 +65,11 @@ pub struct ApiStats {
 
 #[derive(Serialize)]
 pub struct MsStats {
-    pub utilization_pct: HashMap<String, f64>,
-    pub replica_utilization_pct: HashMap<String, HashMap<usize, f64>>,
+    pub microservice_utilization_pct: HashMap<String, f64>,
+    pub server_utilization_pct: HashMap<String, HashMap<usize, f64>>,
     pub by_api: HashMap<String, ApiStats>,
+    pub by_microservice: HashMap<String, MicroserviceStats>,
+    pub total_processing_p99_ms: f64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -76,6 +80,8 @@ struct UserArrival {
     edge_balancers: HashMap<String, Output<Hop>>,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
+    #[serde(skip)]
+    next_request_id: Arc<AtomicU64>,
 }
 
 impl UserArrival {
@@ -83,11 +89,13 @@ impl UserArrival {
         graph: Arc<CallGraph>,
         edge_balancers: HashMap<String, Output<Hop>>,
         tracer: Option<Arc<MsTracer>>,
+        next_request_id: Arc<AtomicU64>,
     ) -> Self {
         Self {
             graph,
             edge_balancers,
             tracer,
+            next_request_id,
         }
     }
 }
@@ -109,9 +117,17 @@ impl UserArrival {
                 return;
             }
         };
-        let (request_id, trace) = match &self.tracer {
-            Some(tracer) => tracer.next_request_id(),
-            None => (0, false),
+        let (request_id, trace) = {
+            let id = self
+                .next_request_id
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            let trace = self
+                .tracer
+                .as_ref()
+                .map(|t| t.should_trace(id))
+                .unwrap_or(false);
+            (id, trace)
         };
         let hop = Hop {
             request_id,
@@ -182,15 +198,15 @@ fn new_bench() -> SimInit {
     SimInit::with_num_threads(1)
 }
 
-fn downstream_targets(graph: &CallGraph, service_id: &str) -> HashSet<String> {
+fn downstream_targets(graph: &CallGraph, microservice_id: &str) -> HashSet<String> {
     let mut targets = HashSet::new();
-    for (endpoint, owner) in &graph.endpoint_service {
-        if owner != service_id {
+    for (endpoint, owner) in &graph.endpoint_microservice {
+        if owner != microservice_id {
             continue;
         }
         if let Some(edges) = graph.children.get(endpoint) {
             for (target, _) in edges {
-                if let Some(downstream) = graph.endpoint_service.get(target) {
+                if let Some(downstream) = graph.endpoint_microservice.get(target) {
                     targets.insert(downstream.clone());
                 }
             }
@@ -199,11 +215,11 @@ fn downstream_targets(graph: &CallGraph, service_id: &str) -> HashSet<String> {
     targets
 }
 
-fn entry_services_by_api(graph: &CallGraph) -> HashMap<String, String> {
+fn entry_microservices_by_api(graph: &CallGraph) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for (api, endpoint) in &graph.entrypoints {
-        if let Ok(service) = service_for_endpoint(graph, endpoint) {
-            map.insert(api.clone(), service);
+        if let Ok(ms) = microservice_for_endpoint(graph, endpoint) {
+            map.insert(api.clone(), ms);
         }
     }
     map
@@ -265,6 +281,7 @@ fn calculate_stats(
     graph: &CallGraph,
     load: &LoadSpec,
     observation: Duration,
+    visit_tracker: &MicroserviceVisitTracker,
 ) -> Option<MsStats> {
     let mut by_api: HashMap<String, ApiStats> = HashMap::new();
 
@@ -290,40 +307,51 @@ fn calculate_stats(
         finalize_api_stats(stats);
     }
 
-    let mut utilization_pct = HashMap::new();
-    let mut replica_utilization_pct = HashMap::new();
+    let mut microservice_utilization_pct = HashMap::new();
+    let mut server_utilization_pct = HashMap::new();
     let obs_secs = observation.as_secs_f64();
     if obs_secs > 0.0 {
-        for service_id in &graph.service_order {
-            if let Some(spec) = graph.services.get(service_id) {
-                let replica_busy = busy_time.get(service_id);
-                let total_busy: Duration = replica_busy
+        for microservice_id in &graph.microservice_order {
+            if let Some(spec) = graph.microservices.get(microservice_id) {
+                let server_busy = busy_time.get(microservice_id);
+                let total_busy: Duration = server_busy
                     .map(|m| m.values().copied().sum())
                     .unwrap_or(Duration::ZERO);
                 let pct =
                     total_busy.as_secs_f64() / (obs_secs * f64::from(spec.cpu)) * 100.0;
-                utilization_pct.insert(service_id.clone(), pct);
+                microservice_utilization_pct.insert(microservice_id.clone(), pct);
 
                 let concurrency = (spec.cpu / spec.replicas).max(1);
-                let mut by_replica = HashMap::new();
-                let n_replicas = spec.replicas as usize;
-                for i in 0..n_replicas {
-                    let busy = replica_busy
+                let mut by_server = HashMap::new();
+                let n_servers = spec.replicas as usize;
+                for i in 0..n_servers {
+                    let busy = server_busy
                         .and_then(|m| m.get(&i).copied())
                         .unwrap_or(Duration::ZERO);
-                    let replica_pct =
+                    let server_pct =
                         busy.as_secs_f64() / (obs_secs * f64::from(concurrency)) * 100.0;
-                    by_replica.insert(i, replica_pct);
+                    by_server.insert(i, server_pct);
                 }
-                replica_utilization_pct.insert(service_id.clone(), by_replica);
+                server_utilization_pct.insert(microservice_id.clone(), by_server);
             }
         }
     }
 
+    let by_microservice = visit_tracker.into_stats(&graph.microservice_order);
+
+    let mut all_processing: Vec<f64> = Vec::new();
+    for stats in by_api.values() {
+        all_processing.extend(&stats.processing_time_ms);
+    }
+    all_processing.sort_by(f64::total_cmp);
+    let total_processing_p99_ms = percentile(&all_processing, 99.0);
+
     Some(MsStats {
-        utilization_pct,
-        replica_utilization_pct,
+        microservice_utilization_pct,
+        server_utilization_pct,
         by_api,
+        by_microservice,
+        total_processing_p99_ms,
     })
 }
 
@@ -345,18 +373,22 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     apply_load_overrides(&mut load, args.rps, args.slo_ms);
     graph.validate_load(&load)?;
 
+    let next_request_id = Arc::new(AtomicU64::new(0));
+
+    let visit_tracker = Arc::new(Mutex::new(MicroserviceVisitTracker::new()));
+
     let busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    for service_id in &graph.service_order {
-        let n_replicas = graph.services[service_id].replicas as usize;
-        let mut by_replica = HashMap::new();
-        for i in 0..n_replicas {
-            by_replica.insert(i, Duration::ZERO);
+    for microservice_id in &graph.microservice_order {
+        let n_servers = graph.microservices[microservice_id].replicas as usize;
+        let mut by_server = HashMap::new();
+        for i in 0..n_servers {
+            by_server.insert(i, Duration::ZERO);
         }
         busy_time
             .lock()
             .unwrap()
-            .insert(service_id.clone(), by_replica);
+            .insert(microservice_id.clone(), by_server);
     }
 
     let tracer = if args.trace {
@@ -365,9 +397,9 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         None
     };
 
-    let entry_services = entry_services_by_api(graph.as_ref());
-    let service_replica_counts: HashMap<String, u32> = graph
-        .services
+    let entry_microservices = entry_microservices_by_api(graph.as_ref());
+    let microservice_server_counts: HashMap<String, u32> = graph
+        .microservices
         .iter()
         .map(|(id, spec)| (id.clone(), spec.replicas))
         .collect();
@@ -375,11 +407,11 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let mut bench = new_bench();
     let (sink, mut completed) = event_queue(SinkState::Enabled);
 
-    let mut replica_mailboxes: HashMap<(String, usize), Mailbox<Replica>> = HashMap::new();
-    for service_id in &graph.service_order {
-        let n_replicas = graph.services[service_id].replicas as usize;
-        for i in 0..n_replicas {
-            replica_mailboxes.insert((service_id.clone(), i), Mailbox::new());
+    let mut server_mailboxes: HashMap<(String, usize), Mailbox<Replica>> = HashMap::new();
+    for microservice_id in &graph.microservice_order {
+        let n_servers = graph.microservices[microservice_id].replicas as usize;
+        for i in 0..n_servers {
+            server_mailboxes.insert((microservice_id.clone(), i), Mailbox::new());
         }
     }
 
@@ -387,15 +419,15 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         balancer: EdgeBalancer,
         mailbox: Mailbox<EdgeBalancer>,
         api: String,
-        entry_service: String,
-        replica_indices: Vec<usize>,
+        entry_microservice: String,
+        server_indices: Vec<usize>,
     }
 
     struct PendingReplicaBalancer {
         balancer: ReplicaBalancer,
         mailbox: Mailbox<ReplicaBalancer>,
-        service_id: String,
-        replica_idx: usize,
+        microservice_id: String,
+        server_idx: usize,
         downstream_indices: HashMap<String, Vec<usize>>,
     }
 
@@ -408,24 +440,24 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     apis.sort();
     for (api_index, api) in apis.iter().enumerate() {
         let entry_endpoint = &graph.entrypoints[api];
-        let entry_service = service_for_endpoint(graph.as_ref(), entry_endpoint)?;
-        let n_replicas = graph.services[&entry_service].replicas as usize;
-        let replica_indices = subset::assign_subset(
+        let entry_microservice = microservice_for_endpoint(graph.as_ref(), entry_endpoint)?;
+        let n_servers = graph.microservices[&entry_microservice].replicas as usize;
+        let server_indices = subset::assign_subset(
             args.lb_subset_policy,
-            n_replicas,
+            n_servers,
             api_index,
             args.lb_subset_size,
         );
         if args.verbose >= 1 {
-            eprintln!("api {api} subset: {replica_indices:?}");
+            eprintln!("api {api} subset: {server_indices:?}");
         }
 
         let balancer = EdgeBalancer::new(
             args.lb_policy.build(),
             args.lb_policy,
             api.clone(),
-            n_replicas,
-            replica_indices.clone(),
+            n_servers,
+            server_indices.clone(),
             tracer.clone(),
         );
         let mailbox = Mailbox::new();
@@ -440,16 +472,16 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             balancer,
             mailbox,
             api: api.clone(),
-            entry_service,
-            replica_indices,
+            entry_microservice,
+            server_indices,
         });
     }
 
     for pending in &mut pending_edge_balancers {
-        for &replica_idx in &pending.replica_indices {
-            if let Some(mb) = replica_mailboxes.get(&(pending.entry_service.clone(), replica_idx)) {
-                pending.balancer.outputs[replica_idx]
-                    .connect(Replica::input, mb);
+        for &server_idx in &pending.server_indices {
+            if let Some(mb) = server_mailboxes.get(&(pending.entry_microservice.clone(), server_idx))
+            {
+                pending.balancer.outputs[server_idx].connect(Replica::input, mb);
             }
         }
     }
@@ -462,22 +494,22 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         nexosim::simulation::Address<ReplicaBalancer>,
     > = HashMap::new();
 
-    for service_id in &graph.service_order {
-        let n_replicas = graph.services[service_id].replicas as usize;
+    for microservice_id in &graph.microservice_order {
+        let n_servers = graph.microservices[microservice_id].replicas as usize;
 
-        for replica_idx in 0..n_replicas {
+        for server_idx in 0..n_servers {
             let mut downstream_indices = HashMap::new();
-            for target in downstream_targets(&graph, service_id) {
-                let target_replicas = graph.services[&target].replicas as usize;
+            for target in downstream_targets(&graph, microservice_id) {
+                let target_servers = graph.microservices[&target].replicas as usize;
                 let indices = subset::assign_subset(
                     args.lb_subset_policy,
-                    target_replicas,
-                    replica_idx,
+                    target_servers,
+                    server_idx,
                     args.lb_subset_size,
                 );
                 if args.verbose >= 1 {
                     eprintln!(
-                        "replica {service_id}/{replica_idx} -> {target} subset: {indices:?}"
+                        "server {microservice_id}/{server_idx} -> {target} subset: {indices:?}"
                     );
                 }
                 downstream_indices.insert(target.clone(), indices);
@@ -486,10 +518,10 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             let balancer = ReplicaBalancer::new(
                 args.lb_policy.build(),
                 args.lb_policy,
-                service_id.clone(),
-                replica_idx,
+                microservice_id.clone(),
+                server_idx,
                 downstream_indices.clone(),
-                &service_replica_counts,
+                &microservice_server_counts,
                 tracer.clone(),
             );
             let mailbox = Mailbox::new();
@@ -497,40 +529,42 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
             let mut outbound = Output::default();
             outbound.connect(ReplicaBalancer::outbound, &mailbox);
-            replica_balancer_outbound.insert((service_id.clone(), replica_idx), outbound);
-            replica_balancer_addresses.insert((service_id.clone(), replica_idx), address.clone());
+            replica_balancer_outbound.insert((microservice_id.clone(), server_idx), outbound);
+            replica_balancer_addresses.insert((microservice_id.clone(), server_idx), address.clone());
 
             pending_replica_balancers.push(PendingReplicaBalancer {
                 balancer,
                 mailbox,
-                service_id: service_id.clone(),
-                replica_idx,
+                microservice_id: microservice_id.clone(),
+                server_idx,
                 downstream_indices: downstream_indices.clone(),
             });
         }
     }
 
     for pending in &mut pending_replica_balancers {
-        for (target_service, indices) in &pending.downstream_indices {
-            let n_target = graph.services[target_service].replicas as usize;
+        for (target_microservice, indices) in &pending.downstream_indices {
+            let n_target = graph.microservices[target_microservice].replicas as usize;
             let outputs = pending
                 .balancer
                 .downstream_outputs
-                .get_mut(target_service)
-                .unwrap_or_else(|| panic!("missing downstream outputs for {target_service}"));
+                .get_mut(target_microservice)
+                .unwrap_or_else(|| panic!("missing downstream outputs for {target_microservice}"));
             if outputs.len() != n_target {
                 *outputs = (0..n_target).map(|_| Output::default()).collect();
             }
-            for &replica_idx in indices {
-                if let Some(mb) = replica_mailboxes.get(&(target_service.clone(), replica_idx)) {
-                    outputs[replica_idx].connect(Replica::input, mb);
+            for &server_idx in indices {
+                if let Some(mb) =
+                    server_mailboxes.get(&(target_microservice.clone(), server_idx))
+                {
+                    outputs[server_idx].connect(Replica::input, mb);
                 }
             }
         }
     }
 
     let mut return_outputs: HashMap<(String, usize), Output<ReplicaInput>> = HashMap::new();
-    for (key, mb) in &replica_mailboxes {
+    for (key, mb) in &server_mailboxes {
         let mut output = Output::default();
         output.connect(Replica::input, mb);
         return_outputs.insert(key.clone(), output);
@@ -539,10 +573,10 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let mut completed_output = Output::default();
     completed_output.connect_sink(sink);
 
-    let apis_by_entry_service: HashMap<String, Vec<String>> = {
+    let apis_by_entry_microservice: HashMap<String, Vec<String>> = {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for (api, service) in &entry_services {
-            map.entry(service.clone()).or_default().push(api.clone());
+        for (api, microservice) in &entry_microservices {
+            map.entry(microservice.clone()).or_default().push(api.clone());
         }
         for apis in map.values_mut() {
             apis.sort();
@@ -564,30 +598,30 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             pending.mailbox,
             &format!(
                 "replica-balancer-{}-{}",
-                pending.service_id, pending.replica_idx
+                pending.microservice_id, pending.server_idx
             ),
         );
     }
 
-    for service_id in &graph.service_order {
-        let spec = &graph.services[service_id];
-        let n_replicas = spec.replicas as usize;
+    for microservice_id in &graph.microservice_order {
+        let spec = &graph.microservices[microservice_id];
+        let n_servers = spec.replicas as usize;
         let concurrency = (spec.cpu / spec.replicas).max(1);
 
-        for i in 0..n_replicas {
-            let mb = replica_mailboxes
-                .remove(&(service_id.clone(), i))
-                .expect("replica mailbox");
+        for i in 0..n_servers {
+            let mb = server_mailboxes
+                .remove(&(microservice_id.clone(), i))
+                .expect("server mailbox");
             let outbound = replica_balancer_outbound
-                .get(&(service_id.clone(), i))
+                .get(&(microservice_id.clone(), i))
                 .cloned()
                 .expect("replica balancer outbound");
             let rb_address = replica_balancer_addresses
-                .get(&(service_id.clone(), i))
+                .get(&(microservice_id.clone(), i))
                 .expect("replica balancer address");
 
             let mut edge_releases = HashMap::new();
-            if let Some(apis) = apis_by_entry_service.get(service_id) {
+            if let Some(apis) = apis_by_entry_microservice.get(microservice_id) {
                 for api in apis {
                     let edge_address = edge_balancer_addresses
                         .get(api)
@@ -603,10 +637,11 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
             let replica = Replica::new(ReplicaConfig {
                 graph: graph.clone(),
-                service_id: service_id.clone(),
-                replica_idx: i,
+                microservice_id: microservice_id.clone(),
+                server_idx: i,
                 max_concurrency: concurrency,
                 busy_time: busy_time.clone(),
+                visit_tracker: visit_tracker.clone(),
                 balancer_outbound: outbound,
                 outbound_release,
                 edge_releases,
@@ -614,11 +649,16 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 completed: completed_output.clone(),
                 tracer: tracer.clone(),
             });
-            bench = bench.add_model(replica, mb, &format!("{service_id}-replica-{i}"));
+            bench = bench.add_model(replica, mb, &format!("{microservice_id}-server-{i}"));
         }
     }
 
-    let arrival = UserArrival::new(graph.clone(), edge_balancer_inputs, tracer);
+    let arrival = UserArrival::new(
+        graph.clone(),
+        edge_balancer_inputs,
+        tracer,
+        next_request_id,
+    );
     let arrival_mb = Mailbox::new();
     let arrival_input = EventSource::new()
         .connect(UserArrival::inject, &arrival_mb)
@@ -641,37 +681,43 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let observation = simu.time().duration_since(t0);
     let busy = busy_time.lock().unwrap().clone();
+    let tracker = visit_tracker.lock().unwrap();
     Ok(calculate_stats(
         &mut completed,
         &busy,
         graph.as_ref(),
         &load,
         observation,
+        &tracker,
     ))
 }
 
 pub fn print_human_stats(stats: &MsStats) {
-    println!("utilization (%):");
-    let mut service_ids: Vec<_> = stats.utilization_pct.keys().cloned().collect();
-    service_ids.sort();
-    for service_id in service_ids {
+    println!("microservice utilization (%):");
+    let mut microservice_ids: Vec<_> = stats.microservice_utilization_pct.keys().cloned().collect();
+    microservice_ids.sort();
+    for microservice_id in microservice_ids {
         println!(
             "  {}: {:.2}",
-            service_id,
-            stats.utilization_pct[&service_id]
+            microservice_id,
+            stats.microservice_utilization_pct[&microservice_id]
         );
-        if let Some(replicas) = stats.replica_utilization_pct.get(&service_id) {
-            let mut indices: Vec<_> = replicas.keys().copied().collect();
+        if let Some(servers) = stats.server_utilization_pct.get(&microservice_id) {
+            let mut indices: Vec<_> = servers.keys().copied().collect();
             indices.sort_unstable();
             for idx in indices {
                 println!(
-                    "    replica {}: {:.2}",
+                    "    server {}: {:.2}",
                     idx,
-                    replicas[&idx]
+                    servers[&idx]
                 );
             }
         }
     }
+    println!(
+        "total processing p99: {:.4} ms",
+        stats.total_processing_p99_ms
+    );
     for (api, api_stats) in &stats.by_api {
         println!("API {api}:");
         println!(
@@ -750,37 +796,37 @@ mod tests {
         assert!(!stats.by_api.is_empty());
 
         let graph = CallGraph::from_file(&root.join("tests/fanin/multi/callgraph.json")).unwrap();
-        for service_id in &graph.service_order {
-            let spec = &graph.services[service_id];
-            let replicas = stats
-                .replica_utilization_pct
-                .get(service_id)
-                .expect("replica utilization for service");
-            assert_eq!(replicas.len(), spec.replicas as usize);
+        for microservice_id in &graph.microservice_order {
+            let spec = &graph.microservices[microservice_id];
+            let servers = stats
+                .server_utilization_pct
+                .get(microservice_id)
+                .expect("server utilization for microservice");
+            assert_eq!(servers.len(), spec.replicas as usize);
             for i in 0..spec.replicas as usize {
-                let pct = replicas[&i];
+                let pct = servers[&i];
                 assert!(
                     (0.0..=100.0).contains(&pct),
-                    "replica {i} of {service_id}: {pct}% out of range"
+                    "server {i} of {microservice_id}: {pct}% out of range"
                 );
             }
         }
     }
 
     #[test]
-    fn single_replica_utilization_matches_overall() {
+    fn single_server_utilization_matches_overall() {
         let args = client_server_args(7);
         let stats = run(&args).unwrap().expect("stats");
-        let overall = stats.utilization_pct["server"];
-        let replica = stats.replica_utilization_pct["server"][&0];
+        let overall = stats.microservice_utilization_pct["server"];
+        let server = stats.server_utilization_pct["server"][&0];
         assert!(
-            (overall - replica).abs() < 1e-9,
-            "single replica: overall={overall}, replica={replica}"
+            (overall - server).abs() < 1e-9,
+            "single server: overall={overall}, server={server}"
         );
     }
 
     #[test]
-    fn replica_utilization_is_reproducible() {
+    fn server_utilization_is_reproducible() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let args = MsArgs {
             callgraph: root.join("tests/fanin/multi/callgraph.json"),
@@ -800,19 +846,19 @@ mod tests {
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
-        assert_eq!(first.utilization_pct, second.utilization_pct);
-        for service_id in first.replica_utilization_pct.keys() {
-            let mut first_vals: Vec<_> = first.replica_utilization_pct[service_id]
+        assert_eq!(first.microservice_utilization_pct, second.microservice_utilization_pct);
+        for microservice_id in first.server_utilization_pct.keys() {
+            let mut first_vals: Vec<_> = first.server_utilization_pct[microservice_id]
                 .values()
                 .copied()
                 .collect();
-            let mut second_vals: Vec<_> = second.replica_utilization_pct[service_id]
+            let mut second_vals: Vec<_> = second.server_utilization_pct[microservice_id]
                 .values()
                 .copied()
                 .collect();
             first_vals.sort_by(f64::total_cmp);
             second_vals.sort_by(f64::total_cmp);
-            assert_eq!(first_vals, second_vals, "service {service_id}");
+            assert_eq!(first_vals, second_vals, "microservice {microservice_id}");
         }
     }
 
@@ -902,7 +948,8 @@ mod tests {
         let high_stats = run(&high).unwrap().expect("high stats");
 
         assert!(
-            high_stats.utilization_pct["server"] > low_stats.utilization_pct["server"],
+            high_stats.microservice_utilization_pct["server"]
+                > low_stats.microservice_utilization_pct["server"],
             "expected higher rps override to increase utilization"
         );
     }
@@ -917,6 +964,43 @@ mod tests {
 
         assert_eq!(api.slo_latency_ms, 1.0);
         assert!(api.prob_latency_gt_slo > 0.0);
+    }
+
+    #[test]
+    fn chain3_by_microservice_visit_metrics() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stats = run(&MsArgs {
+            callgraph: root.join("tests/chain/3/callgraph.json"),
+            load_file: root.join("tests/chain/3/load.json"),
+            n: 500,
+            lb_policy: LoadBalancePolicyKind::LeastRequest,
+            lb_subset_size: 0,
+            lb_subset_policy: SubsetPolicyKind::Deterministic,
+            seed: Some(42),
+            rps: None,
+            slo_ms: None,
+            format: OutputFormat::Json,
+            trace: false,
+            trace_limit: 5,
+            scale: 0,
+            verbose: 0,
+        })
+        .unwrap()
+        .expect("stats");
+
+        for ms in ["frontend", "backend1", "backend2"] {
+            let ms_stats = &stats.by_microservice[ms];
+            assert_eq!(ms_stats.response_time_ms.len(), 500, "{ms}");
+            assert_eq!(ms_stats.inter_arrival_ms.len(), 499, "{ms}");
+            for i in 0..500 {
+                assert!(
+                    ms_stats.queueing_delay_ms[i] + ms_stats.processing_time_ms[i]
+                        <= ms_stats.response_time_ms[i] + 1e-6,
+                    "{ms} visit {i}"
+                );
+            }
+        }
+        assert!(stats.total_processing_p99_ms > 0.0);
     }
 
     #[test]

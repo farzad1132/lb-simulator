@@ -4,19 +4,19 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
-pub struct ServiceSpec {
+pub struct MicroserviceSpec {
     pub cpu: u32,
     pub replicas: u32,
 }
 
 #[derive(Debug, Default)]
 pub struct CallGraph {
-    pub services: HashMap<String, ServiceSpec>,
+    pub microservices: HashMap<String, MicroserviceSpec>,
     pub interface_means: HashMap<String, f32>, // endpoint -> mean seconds (from callgraph ms)
     pub children: HashMap<String, Vec<(String, Option<String>)>>,
     pub entrypoints: HashMap<String, String>,
-    pub endpoint_service: HashMap<String, String>,
-    pub service_order: Vec<String>,
+    pub endpoint_microservice: HashMap<String, String>,
+    pub microservice_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,10 +68,10 @@ impl CallGraph {
     }
 
     fn from_file_data(file: CallGraphFile) -> Result<Self, String> {
-        let mut services = HashMap::new();
+        let mut microservices = HashMap::new();
         let mut interface_means = HashMap::new();
-        let mut endpoint_service = HashMap::new();
-        let mut service_order = Vec::new();
+        let mut endpoint_microservice = HashMap::new();
+        let mut microservice_order = Vec::new();
 
         for node in &file.nodes {
             if node.id == "USER" {
@@ -84,20 +84,20 @@ impl CallGraph {
             if cpu == 0 || replicas == 0 {
                 return Err(format!("node {} must have cpu > 0 and replicas > 0", node.id));
             }
-            services.insert(
+            microservices.insert(
                 node.id.clone(),
-                ServiceSpec {
+                MicroserviceSpec {
                     cpu: cpu.max(1),
                     replicas: replicas.max(1),
                 },
             );
-            service_order.push(node.id.clone());
+            microservice_order.push(node.id.clone());
 
             for iface in &node.interfaces {
                 let endpoint = format!("{}:{}", node.id, iface.name);
                 let mean = interface_mean(iface)?;
                 interface_means.insert(endpoint.clone(), mean);
-                endpoint_service.insert(endpoint, node.id.clone());
+                endpoint_microservice.insert(endpoint, node.id.clone());
             }
         }
 
@@ -137,12 +137,12 @@ impl CallGraph {
         }
 
         Ok(Self {
-            services,
+            microservices,
             interface_means,
             children,
             entrypoints,
-            endpoint_service,
-            service_order,
+            endpoint_microservice,
+            microservice_order,
         })
     }
 
@@ -150,7 +150,7 @@ impl CallGraph {
         if delta == 0 {
             return Ok(());
         }
-        for (id, spec) in &mut self.services {
+        for (id, spec) in &mut self.microservices {
             spec.cpu = spec.cpu.checked_add(delta).ok_or_else(|| {
                 format!("node {id} cpu overflow after --scale {delta}")
             })?;
@@ -262,11 +262,11 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/multi/callgraph.json");
         let mut graph = CallGraph::from_file(&path).unwrap();
         graph.apply_scale(5).unwrap();
-        assert_eq!(graph.services["frontend"].cpu, 7);
-        assert_eq!(graph.services["frontend"].replicas, 7);
-        assert_eq!(graph.services["backend1"].cpu, 8);
-        assert_eq!(graph.services["backend1"].replicas, 8);
-        assert_eq!(graph.services["shared"].cpu, 9);
-        assert_eq!(graph.services["shared"].replicas, 9);
+        assert_eq!(graph.microservices["frontend"].cpu, 7);
+        assert_eq!(graph.microservices["frontend"].replicas, 7);
+        assert_eq!(graph.microservices["backend1"].cpu, 8);
+        assert_eq!(graph.microservices["backend1"].replicas, 8);
+        assert_eq!(graph.microservices["shared"].cpu, 9);
+        assert_eq!(graph.microservices["shared"].replicas, 9);
     }
 }

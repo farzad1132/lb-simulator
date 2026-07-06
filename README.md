@@ -105,7 +105,7 @@ cargo build --release
 | `--format` | `human` | `human` or `json` |
 | `--scale` | `0` | Add this many cores and replicas to every microservice |
 
-JSON output includes per-microservice `utilization_pct`, per-replica `replica_utilization_pct`, and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms` computed from samples, `slo_latency_ms` from `load.json`, `prob_latency_gt_slo` as the fraction of requests exceeding the SLO).
+JSON output includes per-microservice `microservice_utilization_pct`, per-server `server_utilization_pct`, per-microservice visit metrics in `by_microservice`, top-level `total_processing_p99_ms`, and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms` computed from samples, `slo_latency_ms` from `load.json`, `prob_latency_gt_slo` as the fraction of requests exceeding the SLO).
 
 ## Simulator CLI
 
@@ -187,6 +187,14 @@ Python plotting scripts live in the repo root. Each runs the simulator (or compa
 | [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
 
 Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script. Use [`plot_lb_load_compare.py`](plot_lb_load_compare.py) when comparing named configs (different policies, server counts, or subset sizes) at the same load levels.
+
+## Analysis scripts
+
+Scripts under [`analyze/`](analyze/) run deeper behavioral analysis that requires extended `ms` JSON output (e.g. per-microservice visit metrics). See [docs/analyze.md](docs/analyze.md) for vocabulary, metrics, normalization, and usage.
+
+| Script | Description |
+|--------|-------------|
+| [`analyze/ms_service_distributions.py`](analyze/ms_service_distributions.py) | Per-microservice inter-arrival, inter-departure, response time, and queueing delay CDFs (chain-3 default) |
 
 ## Plot e2e CDF
 

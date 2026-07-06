@@ -26,7 +26,7 @@ DEFAULT_MS_BINARY = REPO_ROOT / "target" / "release" / "ms"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "e2e_cdf.pdf"
 DEFAULT_MS_OUTPUT = REPO_ROOT / "output" / "e2e_cdf_ms.pdf"
 LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e")
-MS_REQUIRED_JSON_KEYS = ("utilization_pct", "by_api")
+MS_REQUIRED_JSON_KEYS = ("microservice_utilization_pct", "by_api")
 MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
 LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized")
@@ -419,10 +419,10 @@ def plot_e2e_cdf(
     )
 
 
-def format_ms_utilization(utilization_pct: dict) -> str:
+def format_ms_utilization(microservice_utilization_pct: dict) -> str:
     parts = [
-        f"{service}={pct:.1f}%"
-        for service, pct in sorted(utilization_pct.items())
+        f"{ms}={pct:.1f}%"
+        for ms, pct in sorted(microservice_utilization_pct.items())
     ]
     return " ".join(parts)
 
@@ -583,7 +583,7 @@ def main() -> None:
         marks=args.mark,
     )
     api_names = [panel.title.removeprefix("api = ") for panel in panels]
-    util = format_ms_utilization(data["utilization_pct"])
+    util = format_ms_utilization(data["microservice_utilization_pct"])
     print(
         f"wrote {output_path} (apis: {', '.join(api_names)}; utilization: {util})",
         file=sys.stderr,

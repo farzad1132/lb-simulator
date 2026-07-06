@@ -19,21 +19,21 @@ pub fn sample_exp(rng: &mut impl Rng, mean: f32) -> f32 {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CallerRef {
-    pub service: String,
-    pub replica: usize,
+    pub microservice: String,
+    pub server: usize,
     pub resume_endpoint: String,
     pub resume_sibling_index: usize,
     pub resume_caller: Option<Box<CallerRef>>,
     #[serde(default)]
-    pub outbound_target_service: String,
+    pub outbound_target_microservice: String,
     #[serde(default)]
-    pub outbound_target_replica: usize,
+    pub outbound_target_server: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OutboundRelease {
-    pub target_service: String,
-    pub target_replica: usize,
+    pub target_microservice: String,
+    pub target_server: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,7 +65,7 @@ pub struct CompletedRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OutboundCall {
-    pub target_service: String,
+    pub target_microservice: String,
     pub hop: Hop,
 }
 
@@ -99,9 +99,9 @@ pub fn sample_duration(graph: &CallGraph, endpoint: &str) -> Result<Duration, St
     ))))
 }
 
-pub fn service_for_endpoint(graph: &CallGraph, endpoint: &str) -> Result<String, String> {
+pub fn microservice_for_endpoint(graph: &CallGraph, endpoint: &str) -> Result<String, String> {
     graph
-        .endpoint_service
+        .endpoint_microservice
         .get(endpoint)
         .cloned()
         .ok_or_else(|| format!("unknown endpoint {}", endpoint))

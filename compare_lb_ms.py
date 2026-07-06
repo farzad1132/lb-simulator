@@ -157,7 +157,7 @@ def compare_scenario(
     failures: list[str] = []
 
     lb_util = float(lb_data["utilization_pct"])
-    ms_util = float(ms_data["utilization_pct"][SERVICE_NAME])
+    ms_util = float(ms_data["microservice_utilization_pct"][SERVICE_NAME])
     util_diff = abs(lb_util - ms_util)
     if util_diff > UTIL_TOLERANCE_PCT:
         failures.append(

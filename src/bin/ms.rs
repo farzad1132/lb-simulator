@@ -65,9 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         OutputFormat::Json => {
             let output = stats.unwrap_or(MsStats {
-                utilization_pct: Default::default(),
-                replica_utilization_pct: Default::default(),
+                microservice_utilization_pct: Default::default(),
+                server_utilization_pct: Default::default(),
                 by_api: Default::default(),
+                by_microservice: Default::default(),
+                total_processing_p99_ms: 0.0,
             });
             let mut stdout = io::stdout().lock();
             serde_json::to_writer(&mut stdout, &output)?;

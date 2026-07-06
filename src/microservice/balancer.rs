@@ -24,7 +24,7 @@ pub struct EdgeBalancer {
     #[serde(skip)]
     local_inflight: Vec<u32>,
     #[serde(skip)]
-    replica_indices: Vec<usize>,
+    server_indices: Vec<usize>,
     #[serde(skip)]
     load_scratch: Vec<u32>,
     pub outputs: Vec<Output<ReplicaInput>>,
@@ -35,23 +35,23 @@ impl EdgeBalancer {
         policy: Box<dyn LoadBalancePolicy>,
         lb_policy: LoadBalancePolicyKind,
         api: String,
-        n_replicas: usize,
-        replica_indices: Vec<usize>,
+        n_servers: usize,
+        server_indices: Vec<usize>,
         tracer: Option<Arc<MsTracer>>,
     ) -> Self {
         debug_assert!(
-            replica_indices.iter().all(|&i| i < n_replicas),
-            "replica_indices must be within n_replicas"
+            server_indices.iter().all(|&i| i < n_servers),
+            "server_indices must be within n_servers"
         );
         Self {
             policy,
             lb_policy,
             api,
             tracer,
-            local_inflight: vec![0; n_replicas],
-            load_scratch: vec![0; replica_indices.len()],
-            replica_indices,
-            outputs: (0..n_replicas).map(|_| Output::default()).collect(),
+            local_inflight: vec![0; n_servers],
+            load_scratch: vec![0; server_indices.len()],
+            server_indices,
+            outputs: (0..n_servers).map(|_| Output::default()).collect(),
         }
     }
 }
@@ -59,25 +59,25 @@ impl EdgeBalancer {
 #[Model]
 impl EdgeBalancer {
     pub async fn input(&mut self, hop: Hop, cx: &Context<Self>) {
-        for (scratch, &replica_idx) in self
+        for (scratch, &server_idx) in self
             .load_scratch
             .iter_mut()
-            .zip(self.replica_indices.iter())
+            .zip(self.server_indices.iter())
         {
-            *scratch = self.local_inflight[replica_idx];
+            *scratch = self.local_inflight[server_idx];
         }
         let local_idx = self
             .policy
             .select(&self.load_scratch)
             .min(self.load_scratch.len().saturating_sub(1));
-        let global_idx = self.replica_indices[local_idx];
+        let global_idx = self.server_indices[local_idx];
         self.local_inflight[global_idx] += 1;
         if let Some(tracer) = &self.tracer {
             tracer.log(
                 hop.trace,
                 cx.time(),
                 hop.request_id,
-                &format!("EdgeBalancer(api={}) -> replica={global_idx}", self.api),
+                &format!("EdgeBalancer(api={}) -> server={global_idx}", self.api),
             );
         }
         self.outputs[global_idx]
@@ -85,8 +85,8 @@ impl EdgeBalancer {
             .await;
     }
 
-    pub async fn release(&mut self, replica_idx: usize, _cx: &Context<Self>) {
-        self.local_inflight[replica_idx] = self.local_inflight[replica_idx].saturating_sub(1);
+    pub async fn release(&mut self, server_idx: usize, _cx: &Context<Self>) {
+        self.local_inflight[server_idx] = self.local_inflight[server_idx].saturating_sub(1);
     }
 }
 
@@ -96,9 +96,9 @@ pub struct ReplicaBalancer {
     policy: Box<dyn LoadBalancePolicy>,
     lb_policy: LoadBalancePolicyKind,
     #[serde(skip)]
-    service_id: String,
+    microservice_id: String,
     #[serde(skip)]
-    replica_idx: usize,
+    server_idx: usize,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
     #[serde(skip)]
@@ -114,34 +114,34 @@ impl ReplicaBalancer {
     pub fn new(
         policy: Box<dyn LoadBalancePolicy>,
         lb_policy: LoadBalancePolicyKind,
-        service_id: String,
-        replica_idx: usize,
+        microservice_id: String,
+        server_idx: usize,
         downstream_indices: HashMap<String, Vec<usize>>,
-        graph_replicas: &HashMap<String, u32>,
+        graph_server_counts: &HashMap<String, u32>,
         tracer: Option<Arc<MsTracer>>,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
         for (target, indices) in &downstream_indices {
-            let n = graph_replicas
+            let n = graph_server_counts
                 .get(target)
                 .copied()
                 .unwrap_or(0) as usize;
             debug_assert!(
                 indices.iter().all(|&i| i < n),
-                "downstream indices must be within target replicas"
+                "downstream indices must be within target servers"
             );
             local_outbound_inflight.insert(target.clone(), vec![0; n]);
         }
         let downstream_outputs = downstream_indices
             .keys()
             .cloned()
-            .map(|service| (service, Vec::new()))
+            .map(|ms| (ms, Vec::new()))
             .collect();
         Self {
             policy,
             lb_policy,
-            service_id,
-            replica_idx,
+            microservice_id,
+            server_idx,
             tracer,
             local_outbound_inflight,
             downstream_indices,
@@ -154,10 +154,10 @@ impl ReplicaBalancer {
 #[Model]
 impl ReplicaBalancer {
     pub async fn outbound(&mut self, call: OutboundCall, cx: &Context<Self>) {
-        let target = call.target_service.clone();
+        let target = call.target_microservice.clone();
         let Some(indices) = self.downstream_indices.get(&target) else {
             eprintln!(
-                "replica balancer outbound: unknown target service {}",
+                "replica balancer outbound: unknown target microservice {}",
                 target
             );
             return;
@@ -169,7 +169,7 @@ impl ReplicaBalancer {
             .unwrap_or(0);
         if indices.is_empty() || n_outputs == 0 {
             eprintln!(
-                "replica balancer outbound: no replicas for service {}",
+                "replica balancer outbound: no servers for microservice {}",
                 target
             );
             return;
@@ -197,16 +197,16 @@ impl ReplicaBalancer {
                 cx.time(),
                 call.hop.request_id,
                 &format!(
-                    "ReplicaBalancer({}/{}) outbound target={target} -> replica={global_idx} endpoint={}",
-                    self.service_id, self.replica_idx, call.hop.endpoint
+                    "ReplicaBalancer({}/{}) outbound target={target} -> server={global_idx} endpoint={}",
+                    self.microservice_id, self.server_idx, call.hop.endpoint
                 ),
             );
         }
 
         let mut call = call;
         if let Some(caller) = &mut call.hop.caller {
-            caller.outbound_target_service = target.clone();
-            caller.outbound_target_replica = global_idx;
+            caller.outbound_target_microservice = target.clone();
+            caller.outbound_target_server = global_idx;
         }
 
         if let Some(inflight) = self.local_outbound_inflight.get_mut(&target) {
@@ -222,10 +222,13 @@ impl ReplicaBalancer {
     }
 
     pub async fn release_outbound(&mut self, release: OutboundRelease, _cx: &Context<Self>) {
-        if let Some(inflight) = self.local_outbound_inflight.get_mut(&release.target_service) {
-            if release.target_replica < inflight.len() {
-                inflight[release.target_replica] =
-                    inflight[release.target_replica].saturating_sub(1);
+        if let Some(inflight) = self
+            .local_outbound_inflight
+            .get_mut(&release.target_microservice)
+        {
+            if release.target_server < inflight.len() {
+                inflight[release.target_server] =
+                    inflight[release.target_server].saturating_sub(1);
             }
         }
     }

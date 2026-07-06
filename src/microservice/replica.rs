@@ -1,8 +1,9 @@
 use super::callgraph::CallGraph;
 use super::hop::{
     CallerRef, CompletedRequest, Hop, OutboundCall, OutboundRelease, ReplicaInput,
-    filtered_children, sample_duration, service_for_endpoint,
+    filtered_children, microservice_for_endpoint, sample_duration,
 };
+use super::microservice_stats::MicroserviceVisitTracker;
 use super::trace::MsTracer;
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
@@ -22,10 +23,11 @@ enum ReplicaWork {
 
 pub struct ReplicaConfig {
     pub graph: Arc<CallGraph>,
-    pub service_id: String,
-    pub replica_idx: usize,
+    pub microservice_id: String,
+    pub server_idx: usize,
     pub max_concurrency: u32,
     pub busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
+    pub visit_tracker: Arc<Mutex<MicroserviceVisitTracker>>,
     pub balancer_outbound: Output<OutboundCall>,
     pub outbound_release: Output<OutboundRelease>,
     pub edge_releases: HashMap<String, Output<usize>>,
@@ -41,14 +43,16 @@ pub struct Replica {
     #[serde(skip)]
     graph: Arc<CallGraph>,
     #[serde(skip)]
-    service_id: String,
-    replica_idx: usize,
+    microservice_id: String,
+    server_idx: usize,
     max_concurrency: u32,
     in_flight: u32,
     #[serde(skip)]
     queue: VecDeque<ReplicaWork>,
     #[serde(skip)]
     busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
+    #[serde(skip)]
+    visit_tracker: Arc<Mutex<MicroserviceVisitTracker>>,
     #[serde(skip)]
     balancer_outbound: Output<OutboundCall>,
     #[serde(skip)]
@@ -65,12 +69,13 @@ impl Replica {
             outbound_release: config.outbound_release,
             edge_releases: config.edge_releases,
             graph: config.graph,
-            service_id: config.service_id,
-            replica_idx: config.replica_idx,
+            microservice_id: config.microservice_id,
+            server_idx: config.server_idx,
             max_concurrency: config.max_concurrency.max(1),
             in_flight: 0,
             queue: VecDeque::new(),
             busy_time: config.busy_time,
+            visit_tracker: config.visit_tracker,
             balancer_outbound: config.balancer_outbound,
             return_outputs: config.return_outputs,
             completed: config.completed,
@@ -84,17 +89,26 @@ impl Replica {
         }
     }
 
+    fn finalize_visit(&self, request_id: u64, departure: nexosim::time::MonotonicTime) {
+        if let Ok(mut tracker) = self.visit_tracker.lock() {
+            tracker.finalize_visit(request_id, &self.microservice_id, departure);
+        }
+    }
+
     async fn release_outbound(&mut self, release: OutboundRelease) {
         self.outbound_release.send(release).await;
     }
 
     async fn release_edge(&mut self, api: &str) {
         if let Some(output) = self.edge_releases.get_mut(api) {
-            output.send(self.replica_idx).await;
+            output.send(self.server_idx).await;
         }
     }
 
     fn begin_service(&mut self, mut hop: Hop, cx: &Context<Self>) {
+        if let Ok(mut tracker) = self.visit_tracker.lock() {
+            tracker.record_server_start(hop.request_id, &self.microservice_id, cx.time());
+        }
         match sample_duration(&self.graph, &hop.endpoint) {
             Ok(duration) => hop.duration = duration,
             Err(e) => {
@@ -107,8 +121,8 @@ impl Replica {
             &hop,
             cx,
             &format!(
-                "Replica({}/{}) serve start endpoint={}",
-                self.service_id, self.replica_idx, hop.endpoint
+                "Server({}/{}) serve start endpoint={}",
+                self.microservice_id, self.server_idx, hop.endpoint
             ),
         );
         if let Err(h) = cx.schedule_event(hop.duration, schedulable!(Self::complete), hop) {
@@ -147,13 +161,13 @@ impl Replica {
 
         if hop.sibling_index < children.len() {
             let child_endpoint = &children[hop.sibling_index];
-            let target_service = service_for_endpoint(&self.graph, child_endpoint)?;
+            let target_microservice = microservice_for_endpoint(&self.graph, child_endpoint)?;
             self.trace(
                 &hop,
                 cx,
                 &format!(
-                    "Replica({}/{}) dispatch child={child_endpoint} sibling={}",
-                    self.service_id, self.replica_idx, hop.sibling_index
+                    "Server({}/{}) dispatch child={child_endpoint} sibling={}",
+                    self.microservice_id, self.server_idx, hop.sibling_index
                 ),
             );
             let mut child_hop = hop.clone();
@@ -162,17 +176,17 @@ impl Replica {
             child_hop.duration = Duration::ZERO;
             child_hop.outbound_release = None;
             child_hop.caller = Some(CallerRef {
-                service: self.service_id.clone(),
-                replica: self.replica_idx,
+                microservice: self.microservice_id.clone(),
+                server: self.server_idx,
                 resume_endpoint: hop.endpoint.clone(),
                 resume_sibling_index: hop.sibling_index + 1,
                 resume_caller: hop.caller.clone().map(Box::new),
-                outbound_target_service: String::new(),
-                outbound_target_replica: 0,
+                outbound_target_microservice: String::new(),
+                outbound_target_server: 0,
             });
             self.balancer_outbound
                 .send(OutboundCall {
-                    target_service,
+                    target_microservice,
                     hop: child_hop,
                 })
                 .await;
@@ -181,32 +195,33 @@ impl Replica {
 
         if let Some(caller) = hop.caller.take() {
             let CallerRef {
-                service,
-                replica,
+                microservice,
+                server,
                 resume_endpoint,
                 resume_sibling_index,
                 resume_caller,
-                outbound_target_service,
-                outbound_target_replica,
+                outbound_target_microservice,
+                outbound_target_server,
             } = caller;
+            self.finalize_visit(hop.request_id, cx.time());
             self.trace(
                 &hop,
                 cx,
                 &format!(
-                    "Replica({}/{}) return -> {service}/{replica} resume={resume_endpoint} sibling={resume_sibling_index}",
-                    self.service_id, self.replica_idx
+                    "Server({}/{}) return -> {microservice}/{server} resume={resume_endpoint} sibling={resume_sibling_index}",
+                    self.microservice_id, self.server_idx
                 ),
             );
             hop.endpoint = resume_endpoint;
             hop.sibling_index = resume_sibling_index;
             hop.caller = resume_caller.map(|b| *b);
             hop.outbound_release = Some(OutboundRelease {
-                target_service: outbound_target_service,
-                target_replica: outbound_target_replica,
+                target_microservice: outbound_target_microservice,
+                target_server: outbound_target_server,
             });
-            let key = (service, replica);
+            let key = (microservice, server);
             let output = self.return_outputs.get_mut(&key).ok_or_else(|| {
-                format!("no return output for {:?} replica {}", key.0, key.1)
+                format!("no return output for {:?} server {}", key.0, key.1)
             })?;
             output.send(ReplicaInput::DownstreamReturn(hop)).await;
             return Ok(());
@@ -214,6 +229,7 @@ impl Replica {
 
         let e2e_ms = cx.time().duration_since(hop.start).as_secs_f64() * SECS_TO_MS;
         let proc_ms = hop.processing_time.as_secs_f64() * SECS_TO_MS;
+        self.finalize_visit(hop.request_id, cx.time());
         self.trace(
             &hop,
             cx,
@@ -242,13 +258,16 @@ impl Replica {
     pub async fn input(&mut self, msg: ReplicaInput, cx: &Context<Self>) {
         match &msg {
             ReplicaInput::Upstream(hop) => {
+                if let Ok(mut tracker) = self.visit_tracker.lock() {
+                    tracker.record_arrival(hop.request_id, &self.microservice_id, cx.time());
+                }
                 self.trace(
                     hop,
                     cx,
                     &format!(
-                        "Replica({}/{}) enqueue upstream endpoint={} queue={} inflight={}",
-                        self.service_id,
-                        self.replica_idx,
+                        "Server({}/{}) enqueue upstream endpoint={} queue={} inflight={}",
+                        self.microservice_id,
+                        self.server_idx,
                         hop.endpoint,
                         self.queue.len() + 1,
                         self.in_flight
@@ -261,9 +280,9 @@ impl Replica {
                     hop,
                     cx,
                     &format!(
-                        "Replica({}/{}) enqueue downstream_return endpoint={} queue={} inflight={}",
-                        self.service_id,
-                        self.replica_idx,
+                        "Server({}/{}) enqueue downstream_return endpoint={} queue={} inflight={}",
+                        self.microservice_id,
+                        self.server_idx,
                         hop.endpoint,
                         self.queue.len() + 1,
                         self.in_flight
@@ -280,19 +299,22 @@ impl Replica {
     async fn complete(&mut self, mut hop: Hop, cx: &Context<Self>) {
         if let Ok(mut busy) = self.busy_time.lock() {
             *busy
-                .entry(self.service_id.clone())
+                .entry(self.microservice_id.clone())
                 .or_default()
-                .entry(self.replica_idx)
+                .entry(self.server_idx)
                 .or_default() += hop.duration;
+        }
+        if let Ok(mut tracker) = self.visit_tracker.lock() {
+            tracker.add_local_processing(hop.request_id, &self.microservice_id, hop.duration);
         }
         hop.processing_time += hop.duration;
         self.trace(
             &hop,
             cx,
             &format!(
-                "Replica({}/{}) serve done endpoint={} duration_ms={:.3}",
-                self.service_id,
-                self.replica_idx,
+                "Server({}/{}) serve done endpoint={} duration_ms={:.3}",
+                self.microservice_id,
+                self.server_idx,
                 hop.endpoint,
                 hop.duration.as_secs_f64() * SECS_TO_MS
             ),
