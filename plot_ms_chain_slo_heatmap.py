@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot chain3/chain6 SLO violation probability across microservice load."""
+"""Plot chain3/chain6/chain10 SLO violation probability across microservice load."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ except ModuleNotFoundError:
         return iterable
 
 from plot_cdfs import (
-    LB_POLICIES,
+    MS_LB_POLICIES,
     REPO_ROOT,
     ensure_release_binary,
     output_path_with_comment,
@@ -40,6 +40,8 @@ DEFAULT_CHAIN3_CALLGRAPH = REPO_ROOT / "tests" / "chain" / "3" / "callgraph.json
 DEFAULT_CHAIN3_LOAD = REPO_ROOT / "tests" / "chain" / "3" / "load.json"
 DEFAULT_CHAIN6_CALLGRAPH = REPO_ROOT / "tests" / "chain" / "6" / "callgraph.json"
 DEFAULT_CHAIN6_LOAD = REPO_ROOT / "tests" / "chain" / "6" / "load.json"
+DEFAULT_CHAIN10_CALLGRAPH = REPO_ROOT / "tests" / "chain" / "10" / "callgraph.json"
+DEFAULT_CHAIN10_LOAD = REPO_ROOT / "tests" / "chain" / "10" / "load.json"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "ms_chain_slo_heatmap.pdf"
 DEFAULT_RPS_PER_LOAD_LEVEL = 10_000.0
 SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
@@ -78,6 +80,8 @@ def run_chain_sweep(
     chain3_load: Path,
     chain6_callgraph: Path,
     chain6_load: Path,
+    chain10_callgraph: Path,
+    chain10_load: Path,
     api: str,
     loads: list[float],
     rps_per_load_level: float,
@@ -86,8 +90,8 @@ def run_chain_sweep(
     lb_subset_size: int,
     seed: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    probs = np.zeros((2, len(loads)), dtype=float)
-    slos = np.zeros((2, len(loads)), dtype=float)
+    probs = np.zeros((3, len(loads)), dtype=float)
+    slos = np.zeros((3, len(loads)), dtype=float)
 
     for col, load in enumerate(tqdm(loads, desc="chain SLO sweep", unit="load")):
         rps = load * rps_per_load_level
@@ -96,6 +100,7 @@ def run_chain_sweep(
             [
                 (chain3_callgraph, chain3_load, "chain3"),
                 (chain6_callgraph, chain6_load, "chain6"),
+                (chain10_callgraph, chain10_load, "chain10"),
             ]
         ):
             data = run_ms_simulation(
@@ -126,7 +131,7 @@ def run_chain_sweep(
 
 
 def plot_chain_heatmap(loads: list[float], probs: np.ndarray, output_path: Path) -> None:
-    style = replace(ACM_COMPACT_HALF, aspect_ratio=0.62)
+    style = replace(ACM_COMPACT_HALF, aspect_ratio=0.75)
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
     vmax = max(float(np.nanmax(probs)), 1.0)
@@ -134,7 +139,7 @@ def plot_chain_heatmap(loads: list[float], probs: np.ndarray, output_path: Path)
         ax,
         probs,
         x_labels=[f"{load:g}" for load in loads],
-        y_labels=["chain3", "chain6"],
+        y_labels=["chain3", "chain6", "chain10"],
         style=style,
         vmin=0.0,
         vmax=vmax,
@@ -147,7 +152,7 @@ def plot_chain_heatmap(loads: list[float], probs: np.ndarray, output_path: Path)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot chain3/chain6 microservice SLO violation heatmap.",
+        description="Plot chain3/chain6/chain10 microservice SLO violation heatmap.",
     )
     parser.add_argument("--binary", type=Path, default=None,
                         help="Prebuilt ms release binary (skips cargo build --release)")
@@ -159,13 +164,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chain3-load", type=Path, default=DEFAULT_CHAIN3_LOAD)
     parser.add_argument("--chain6-callgraph", type=Path, default=DEFAULT_CHAIN6_CALLGRAPH)
     parser.add_argument("--chain6-load", type=Path, default=DEFAULT_CHAIN6_LOAD)
+    parser.add_argument("--chain10-callgraph", type=Path, default=DEFAULT_CHAIN10_CALLGRAPH)
+    parser.add_argument("--chain10-load", type=Path, default=DEFAULT_CHAIN10_LOAD)
     parser.add_argument("--api", type=str, default="handle")
     parser.add_argument("--load-min", type=float, default=0.1)
     parser.add_argument("--load-max", type=float, default=0.9)
     parser.add_argument("--load-step", type=float, default=0.1)
     parser.add_argument("--rps-per-load-level", type=float, default=DEFAULT_RPS_PER_LOAD_LEVEL)
     parser.add_argument("--n", type=int, default=100000)
-    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="power-of-two")
+    parser.add_argument("--lb-policy", choices=MS_LB_POLICIES, default="power-of-two")
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--seed", type=int, default=None)
     return parser.parse_args()
@@ -185,6 +192,8 @@ def main() -> None:
         chain3_load=args.chain3_load,
         chain6_callgraph=args.chain6_callgraph,
         chain6_load=args.chain6_load,
+        chain10_callgraph=args.chain10_callgraph,
+        chain10_load=args.chain10_load,
         api=args.api,
         loads=loads,
         rps_per_load_level=args.rps_per_load_level,
