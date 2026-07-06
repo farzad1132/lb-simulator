@@ -6,7 +6,6 @@ mod rng {
 mod server;
 
 use clap::{Parser, ValueEnum};
-use lb::load_registry::LoadRegistry;
 use load_balancer::LoadBalancer;
 use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
@@ -696,7 +695,6 @@ fn run_centralized_simulation(
     let mut bench = SimInit::with_num_threads(1);
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
-    let load_registry = LoadRegistry::new(n_servers);
     let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
 
     let task_counts = split_tasks(args.n, args.clients.max(1));
@@ -710,7 +708,6 @@ fn run_centralized_simulation(
         n_servers,
         server_indices,
         0,
-        load_registry.clone(),
         false,
     );
     for j in 0..n_servers {
@@ -735,7 +732,6 @@ fn run_centralized_simulation(
             concurrency,
             i,
             release_outputs,
-            load_registry.clone(),
             None,
             false,
             None,
@@ -805,7 +801,6 @@ fn run_push_simulation(
     let mut bench = SimInit::with_num_threads(1);
     let (sink, mut output) = event_queue(SinkState::Enabled);
 
-    let load_registry = LoadRegistry::new(n_servers);
     let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
 
     let task_counts = split_tasks(args.n, args.clients.max(1));
@@ -834,7 +829,6 @@ fn run_push_simulation(
             client_lb_pool,
             server_indices,
             i,
-            load_registry.clone(),
             false,
         );
         for j in 0..client_lb_pool {
@@ -859,7 +853,6 @@ fn run_push_simulation(
             n_servers,
             express_indices,
             express_lb_id,
-            load_registry.clone(),
             true,
         );
         for j in n_regular..n_servers {
@@ -917,7 +910,6 @@ fn run_push_simulation(
             concurrency,
             i,
             release_outputs,
-            load_registry.clone(),
             server_express_eviction,
             is_express,
             server_express_lb_id,

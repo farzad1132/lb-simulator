@@ -1,4 +1,3 @@
-use lb::load_registry::LoadRegistry;
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use nexosim::simulation::EventKey;
@@ -119,8 +118,6 @@ pub struct Server {
     is_express: bool,
     express_lb_id: Option<usize>,
     #[serde(skip)]
-    load_registry: LoadRegistry,
-    #[serde(skip)]
     pending_evictions: Vec<(MonotonicTime, PendingEviction)>,
 }
 
@@ -129,7 +126,6 @@ impl Server {
         max_concurrency: u32,
         server_idx: usize,
         release_outputs: Vec<Output<usize>>,
-        load_registry: LoadRegistry,
         express_eviction: Option<ExpressEvictionPolicy>,
         is_express: bool,
         express_lb_id: Option<usize>,
@@ -149,7 +145,6 @@ impl Server {
             express_eviction,
             is_express,
             express_lb_id,
-            load_registry,
             pending_evictions: Vec::new(),
         }
     }
@@ -225,11 +220,6 @@ impl Server {
         }
     }
 
-    fn publish_load(&self) {
-        self.load_registry
-            .set(self.server_idx, self.in_flight + self.queue.len() as u32);
-    }
-
     fn cancel_pending_eviction(&mut self, task_start: MonotonicTime) {
         if let Some(idx) = self
             .pending_evictions
@@ -269,12 +259,10 @@ impl Server {
             duration: task.duration,
         });
         self.in_flight += 1;
-        self.publish_load();
         if let Err(t) = cx.schedule_event(task.duration, schedulable!(Self::complete), task) {
             eprintln!("could not schedule complete. err: {}", t);
             self.in_flight_services.pop();
             self.in_flight -= 1;
-            self.publish_load();
         }
     }
 
@@ -310,7 +298,6 @@ impl Server {
             let task_start = task.start;
             self.queue.push(task);
             self.apply_enqueue_eviction(task_start, cx).await;
-            self.publish_load();
         }
     }
 
@@ -325,7 +312,6 @@ impl Server {
         self.pending_evictions.retain(|(start, _)| *start != task_start);
         if let Some(task) = remove_task_from_queue(&mut self.queue, task_start) {
             self.forward_evicted(task, cx).await;
-            self.publish_load();
         }
     }
 
@@ -355,7 +341,6 @@ impl Server {
                 .await;
         }
         self.in_flight -= 1;
-        self.publish_load();
         if self.centralized {
             self.pull_output.send(self.server_idx).await;
         } else {

@@ -111,10 +111,6 @@ impl LoadBalancePolicyKind {
         }
     }
 
-    pub fn uses_true_load(self) -> bool {
-        matches!(self, Self::PowerOfTwo)
-    }
-
     pub fn is_centralized(self) -> bool {
         matches!(self, Self::Centralized)
     }

@@ -115,7 +115,7 @@ A **Task** is the unit of work flowing through the simulation.
 ### End-to-end flow
 
 1. **Arrival.** `exp_source` schedules `Task { start, duration }` to the client's load balancer `input`.
-2. **Routing.** The load balancer fills a scratch buffer with load values for servers in its subset (true load for power-of-two; local inflight for other policies), calls the policy to pick a server, increments `local_inflight[server]`, sets `task.lb_id`, and sends the task on `outputs[server]`.
+2. **Routing.** The load balancer fills a scratch buffer with local inflight values for servers in its subset, calls the policy to pick a server, increments `local_inflight[server]`, sets `task.lb_id`, and sends the task on `outputs[server]`.
 3. **Queueing.** The server accepts the task into service immediately if `in_flight < max_concurrency`, otherwise pushes it onto a FIFO queue.
 4. **Service.** `begin_service` increments `in_flight` and schedules a completion event after `task.duration`.
 5. **Completion.** `Server::complete` sets `finish`, sends the task to the stats sink, sends `server_idx` on `release_outputs[task.lb_id]`, decrements `in_flight`, and drains the queue.
@@ -135,23 +135,12 @@ Each load balancer maintains `local_inflight: Vec<u32>` with one counter per ser
 
 This models partial observability: the balancer only sees its own outstanding requests.
 
-When routing with **least-request**, the load balancer copies subset loads into `load_scratch`:
+All push policies fill the load slice from local inflight before calling `select()`:
 
 ```
 for each server in server_indices:
     load_scratch[k] = local_inflight[server_indices[k]]
 ```
-
-### True load (power-of-two)
-
-Each server publishes its current load — `in_flight + queue.len()` — to a shared `LoadRegistry` on every state change. When routing with **power-of-two**, the load balancer reads these values at decision time:
-
-```
-for each server in server_indices:
-    load_scratch[k] = load_registry.get(server_indices[k])
-```
-
-This models load probes against downstream servers: all load balancers see the same queue depth and in-flight work, not just their own outstanding dispatches. The routed request is not counted until the server receives it.
 
 ### Server subset
 
@@ -173,7 +162,7 @@ The load-balancing policy only chooses among servers in this subset.
 
 | Policy | CLI flag | Behavior |
 |--------|----------|----------|
-| **power-of-two** | `--lb-policy power-of-two` (default) | Sample two random servers from the subset; route to the one with lower true load (`in_flight + queue depth`) |
+| **power-of-two** | `--lb-policy power-of-two` (default) | Sample two random servers from the subset; route to the one with lower local inflight |
 | **least-request** | `--lb-policy least-request` | Route to the server with lowest local inflight; random tie-break among minima |
 | **random** | `--lb-policy random` | Uniform random server from the subset (ignores load slice) |
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
@@ -222,7 +211,7 @@ flowchart LR
 | **Pull trigger** | Spare capacity | A server sends a pull whenever `in_flight < max_concurrency`. One pull requests one task; after each completion, one new pull is sent. At sim start, `concurrency` pulls per server are scheduled so the pool is warm. |
 | **Assignment order** | FCFS on both sides | Tasks dequeue from the front of the LB queue. Waiting pullers are tracked in FIFO order. First waiter gets the next task — no load comparison or random tie-break. |
 | **Server queueing** | Disabled | Regular servers never enqueue locally; all backlog lives at the central LB. Server `input` always starts service immediately. |
-| **Load visibility** | No load probes | Centralized does not use `LoadRegistry` or load values for routing (only `local_inflight` for release accounting). |
+| **Load visibility** | No load probes | Centralized does not use load values for routing (only `local_inflight` for release accounting). |
 | **Release lifecycle** | Same inflight accounting | `local_inflight` increments on dispatch (pull matched), decrements on `release` at completion. Single central LB (`lb_id = 0`) for all tasks. |
 | **Express lane** | Not supported for client `--lb-policy centralized` | `--expresslane` cannot be combined with client `--lb-policy centralized`. Express lane uses an internal centralized express LB. |
 | **Policy trait** | `select()` unused | `LoadBalancePolicyKind::Centralized` exists for CLI parity; dispatch logic lives in `LoadBalancer` pull/queue handlers. |
@@ -338,8 +327,8 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Network latency between client, load balancer, and server
 - Failures, retries, or timeouts
 - Request cancellation
-- Cross–load-balancer load visibility for least-request (each LB sees only its own inflight counts)
-- True load visibility for least-request, random, or round-robin (only power-of-two reads shared load)
+- Cross–load-balancer load visibility (each LB sees only its own inflight counts)
+- Downstream queue depth or in-flight work from other balancers
 - Connection limits or backpressure on load balancer outputs
 - Per-client partial observability under centralized (one global queue)
 - Subset routing under centralized
@@ -352,7 +341,6 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 | File | Responsibility |
 |------|----------------|
 | `src/main.rs` | CLI, simulation assembly, Poisson source, metrics |
-| `src/load_registry.rs` | Shared true-load store for power-of-two |
 | `src/load_balancer.rs` | Routing, local inflight tracking, release handler |
-| `src/server.rs` | Queueing, concurrency, completion, release notifications, load publishing |
+| `src/server.rs` | Queueing, concurrency, completion, release notifications |
 | `src/policy.rs` | Load-balancing algorithms |

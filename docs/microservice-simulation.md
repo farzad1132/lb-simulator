@@ -99,8 +99,8 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Picks an entry-service replica for user traffic (true load for power-of-two; local inflight otherwise) |
-| **ReplicaBalancer** | one per replica | Outbound only: picks downstream replicas (true load for power-of-two; local inflight otherwise) |
+| **EdgeBalancer** | one per API | Picks an entry-service replica for user traffic using local inflight |
+| **ReplicaBalancer** | one per replica | Outbound only: picks downstream replicas using local outbound inflight |
 | **Replica** | `replicas` per microservice | Strict FIFO queue, local processing, nested dispatch/return |
 
 ### What a microservice models
@@ -165,10 +165,10 @@ While waiting on a downstream RPC, a replica may process other queue items (new 
 | Direction | Path |
 |-----------|------|
 | **User ingress** | `UserArrival` → `EdgeBalancer(api)` → entry-service replica |
-| **Outbound** (child RPC) | Caller replica → **caller's `ReplicaBalancer`** → downstream replica (true load for power-of-two; local inflight otherwise) |
+| **Outbound** (child RPC) | Caller replica → **caller's `ReplicaBalancer`** → downstream replica (local outbound inflight) |
 | **Return** | Callee replica → **specific caller replica** via `CallerRef` (not load-balanced) |
 
-Each replica publishes true load (`in_flight + queue.len()`) to a shared `LoadRegistry` per service. **Power-of-two** balancers read this at routing time; **least-request** and other policies still use each balancer's local outbound inflight counters.
+All push policies use each balancer's local inflight counters at routing time. **Power-of-two** samples two random replicas from the subset and picks the lower local inflight; **least-request** scans the full subset for the minimum.
 
 Example: frontend/0 → backend1 uses **ReplicaBalancer(frontend/0)** to pick a backend1 replica. backend1/0 → shared uses **ReplicaBalancer(backend1/0)** to pick a shared replica.
 

@@ -4,7 +4,6 @@ use super::hop::{
     filtered_children, sample_duration, service_for_endpoint,
 };
 use super::trace::MsTracer;
-use crate::load_registry::LoadRegistry;
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,6 @@ pub struct ReplicaConfig {
     pub return_outputs: HashMap<(String, usize), Output<ReplicaInput>>,
     pub completed: Output<CompletedRequest>,
     pub tracer: Option<Arc<MsTracer>>,
-    pub load_registry: LoadRegistry,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -59,8 +57,6 @@ pub struct Replica {
     completed: Output<CompletedRequest>,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
-    #[serde(skip)]
-    load_registry: LoadRegistry,
 }
 
 impl Replica {
@@ -79,13 +75,7 @@ impl Replica {
             return_outputs: config.return_outputs,
             completed: config.completed,
             tracer: config.tracer,
-            load_registry: config.load_registry,
         }
-    }
-
-    fn publish_load(&self) {
-        self.load_registry
-            .set(self.replica_idx, self.in_flight + self.queue.len() as u32);
     }
 
     fn trace(&self, hop: &Hop, cx: &Context<Self>, msg: &str) {
@@ -110,7 +100,6 @@ impl Replica {
             Err(e) => {
                 eprintln!("sample_duration: {}", e);
                 self.in_flight = self.in_flight.saturating_sub(1);
-                self.publish_load();
                 return;
             }
         }
@@ -125,7 +114,6 @@ impl Replica {
         if let Err(h) = cx.schedule_event(hop.duration, schedulable!(Self::complete), hop) {
             eprintln!("could not schedule complete. err: {}", h);
             self.in_flight = self.in_flight.saturating_sub(1);
-            self.publish_load();
         }
     }
 
@@ -135,7 +123,6 @@ impl Replica {
             match work {
                 ReplicaWork::Upstream(hop) => {
                     self.in_flight += 1;
-                    self.publish_load();
                     self.begin_service(hop, cx);
                     break;
                 }
@@ -286,7 +273,6 @@ impl Replica {
                     .push_back(ReplicaWork::DownstreamReturn(hop.clone()));
             }
         }
-        self.publish_load();
         self.drain_queue(cx).await;
     }
 
@@ -312,7 +298,6 @@ impl Replica {
             ),
         );
         self.in_flight = self.in_flight.saturating_sub(1);
-        self.publish_load();
 
         hop.sibling_index = 0;
         if let Err(e) = self.advance(hop, cx).await {

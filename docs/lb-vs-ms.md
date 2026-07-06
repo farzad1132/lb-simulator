@@ -14,8 +14,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
 | Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`) is **lb-only**. |
-| Power-of-two true load | yes | yes | Reads shared `LoadRegistry`: `in_flight + queue.len()` at routing time |
-| Least-request / random / round-robin | yes | yes | Use each balancer's **local inflight** counters, not true load |
+| Local inflight load view | yes | yes | All push policies use each balancer's **local inflight** counters, not shared backend load |
 | Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`) |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
@@ -44,26 +43,7 @@ Default `--lb-policy` for **both** binaries is **`power-of-two`**.
 
 ## Load balancing (shared behavior)
 
-Policies implement `LoadBalancePolicy::select(&mut self, loads: &[u32]) -> usize` in [`src/policy.rs`](../src/policy.rs). What differs is **which values fill the `loads` slice** before `select` runs.
-
-### Power-of-two: true load in both simulators
-
-Each server/replica publishes load to a shared [`LoadRegistry`](../src/load_registry.rs) on every queue or concurrency change:
-
-```
-true_load = in_flight + queue.len()
-```
-
-When `--lb-policy power-of-two` is active, balancers read these published values at routing time:
-
-- **lb:** [`LoadBalancer::input`](../src/load_balancer.rs) reads `load_registry.get(server_idx)` for each server in the subset.
-- **ms:** [`EdgeBalancer::input`](../src/microservice/balancer.rs) and [`ReplicaBalancer::outbound`](../src/microservice/balancer.rs) read the target service's registry for each replica in the subset.
-
-The routed request is **not** counted in true load until the server/replica receives it. Local inflight is incremented separately on dispatch and decremented on release.
-
-### Other policies: local inflight only
-
-For `least-request`, `random`, and `round-robin`, balancers fill the load slice from **local counters** that track requests this balancer has dispatched but not yet received a release for:
+Policies implement `LoadBalancePolicy::select(&mut self, loads: &[u32]) -> usize` in [`src/policy.rs`](../src/policy.rs). Before `select` runs, all push policies fill the `loads` slice from **local counters** that track requests this balancer has dispatched but not yet received a release for.
 
 | Simulator | Balancer | Local inflight scope |
 |-----------|----------|----------------------|
@@ -72,6 +52,8 @@ For `least-request`, `random`, and `round-robin`, balancers fill the load slice 
 | ms | `ReplicaBalancer` | Per downstream-service replica (one table per downstream target) |
 
 These counters do **not** reflect other balancers' traffic, tasks waiting in downstream queues, or in-flight work dispatched by someone else.
+
+**Power-of-two** differs from **least-request** only in selection scope: P2C samples two random backends from the subset and picks the lower local inflight; least-request scans the full subset for the minimum (random tie-break among minima).
 
 ### Push policies vs centralized pull (lb only)
 
