@@ -84,11 +84,7 @@ impl LoadBalancer {
             return;
         }
 
-        for (scratch, &server_idx) in self
-            .load_scratch
-            .iter_mut()
-            .zip(self.server_indices.iter())
-        {
+        for (scratch, &server_idx) in self.load_scratch.iter_mut().zip(self.server_indices.iter()) {
             *scratch = self.local_inflight[server_idx];
         }
         let local_idx = self.policy.select(&self.load_scratch);

@@ -25,11 +25,7 @@ impl LoadBalancePolicy for PowerOfTwoPolicy {
         }
         let i = rng::random_usize_range(0..n);
         let j = rng::random_usize_range(0..n);
-        if loads[i] <= loads[j] {
-            i
-        } else {
-            j
-        }
+        if loads[i] <= loads[j] { i } else { j }
     }
 }
 
