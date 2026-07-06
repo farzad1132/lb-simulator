@@ -1032,6 +1032,9 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args.lb_policy.is_cl() {
+        return Err("--lb-policy cl is not supported by the lb simulator".into());
+    }
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;
     let service_time = resolve_service_time(&args)?;

@@ -233,3 +233,151 @@ impl ReplicaBalancer {
         }
     }
 }
+
+#[derive(Deserialize, Serialize)]
+pub struct DownstreamBalancer {
+    #[serde(skip, default = "default_policy")]
+    policy: Box<dyn LoadBalancePolicy>,
+    target_microservice: String,
+    #[serde(skip)]
+    tracer: Option<Arc<MsTracer>>,
+    #[serde(skip)]
+    local_inflight: Vec<u32>,
+    #[serde(skip)]
+    server_indices: Vec<usize>,
+    #[serde(skip)]
+    load_scratch: Vec<u32>,
+    pub outputs: Vec<Output<ReplicaInput>>,
+}
+
+impl DownstreamBalancer {
+    pub fn new(
+        target_microservice: String,
+        n_servers: usize,
+        server_indices: Vec<usize>,
+        tracer: Option<Arc<MsTracer>>,
+    ) -> Self {
+        debug_assert!(
+            server_indices.iter().all(|&i| i < n_servers),
+            "server_indices must be within n_servers"
+        );
+        Self {
+            policy: Box::new(PowerOfTwoPolicy),
+            target_microservice,
+            tracer,
+            local_inflight: vec![0; n_servers],
+            load_scratch: vec![0; server_indices.len()],
+            server_indices,
+            outputs: (0..n_servers).map(|_| Output::default()).collect(),
+        }
+    }
+}
+
+#[Model]
+impl DownstreamBalancer {
+    pub async fn outbound(&mut self, call: OutboundCall, cx: &Context<Self>) {
+        if call.target_microservice != self.target_microservice {
+            eprintln!(
+                "downstream balancer outbound: unexpected target {} (expected {})",
+                call.target_microservice, self.target_microservice
+            );
+            return;
+        }
+        if self.server_indices.is_empty() || self.outputs.is_empty() {
+            eprintln!(
+                "downstream balancer outbound: no servers for microservice {}",
+                self.target_microservice
+            );
+            return;
+        }
+
+        for (scratch, &server_idx) in self
+            .load_scratch
+            .iter_mut()
+            .zip(self.server_indices.iter())
+        {
+            *scratch = self.local_inflight[server_idx];
+        }
+        let local_idx = self
+            .policy
+            .select(&self.load_scratch)
+            .min(self.load_scratch.len().saturating_sub(1));
+        let global_idx = self.server_indices[local_idx];
+        self.local_inflight[global_idx] += 1;
+
+        if let Some(tracer) = &self.tracer {
+            tracer.log(
+                call.hop.trace,
+                cx.time(),
+                call.hop.request_id,
+                &format!(
+                    "DownstreamBalancer(target={}) -> server={global_idx} endpoint={}",
+                    self.target_microservice, call.hop.endpoint
+                ),
+            );
+        }
+
+        let mut call = call;
+        if let Some(caller) = &mut call.hop.caller {
+            caller.outbound_target_microservice = self.target_microservice.clone();
+            caller.outbound_target_server = global_idx;
+        }
+
+        self.outputs[global_idx]
+            .send(ReplicaInput::Upstream(call.hop))
+            .await;
+    }
+
+    pub async fn release(&mut self, release: OutboundRelease, _cx: &Context<Self>) {
+        if release.target_microservice != self.target_microservice {
+            return;
+        }
+        if release.target_server < self.local_inflight.len() {
+            self.local_inflight[release.target_server] =
+                self.local_inflight[release.target_server].saturating_sub(1);
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct OutboundGateway {
+    #[serde(skip)]
+    downstream_outputs: HashMap<String, Output<OutboundCall>>,
+    #[serde(skip)]
+    downstream_releases: HashMap<String, Output<OutboundRelease>>,
+}
+
+impl OutboundGateway {
+    pub fn new(
+        downstream_outputs: HashMap<String, Output<OutboundCall>>,
+        downstream_releases: HashMap<String, Output<OutboundRelease>>,
+    ) -> Self {
+        Self {
+            downstream_outputs,
+            downstream_releases,
+        }
+    }
+}
+
+#[Model]
+impl OutboundGateway {
+    pub async fn input(&mut self, call: OutboundCall, _cx: &Context<Self>) {
+        let target = call.target_microservice.clone();
+        let Some(output) = self.downstream_outputs.get_mut(&target) else {
+            eprintln!(
+                "outbound gateway: unknown target microservice {}",
+                target
+            );
+            return;
+        };
+        output.send(call).await;
+    }
+
+    pub async fn release(&mut self, release: OutboundRelease, _cx: &Context<Self>) {
+        let target = release.target_microservice.clone();
+        let Some(output) = self.downstream_releases.get_mut(&target) else {
+            return;
+        };
+        output.send(release).await;
+    }
+}

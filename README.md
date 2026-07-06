@@ -28,6 +28,7 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 - **centralized** — pull-based: one global queue at a single dispatcher; servers request work when they have spare capacity (`lb` only; ignores `--lb-subset-size`; incompatible with `--expresslane`)
+- **cl** — centralized-layer outbound: one shared push power-of-two balancer per downstream microservice target (`ms` only; ingress stays per-API `EdgeBalancer`)
 
 Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
 
@@ -98,7 +99,7 @@ cargo build --release
 | `--callgraph` | (required) | Path to callgraph JSON |
 | `--load-file` | (required) | Path to per-API load JSON (`rps` + `slo_ms`) |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`; `centralized` is lb-only) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
@@ -146,7 +147,7 @@ Options:
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server (CPU cores) |
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`; `centralized` is lb-only) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
@@ -214,7 +215,7 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`; `centralized` is lb-only) |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible simulation |
@@ -504,7 +505,7 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range |
 | `--n` | `100000` | Requests per run |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`; `centralized` is lb-only) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`; `centralized` is lb-only) |
 | `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas) |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |
 
@@ -521,7 +522,7 @@ python compare_lb_ms.py --scenario all --plot
 | `--scenario` | `all` | `single`, `multi`, or `all` fixture topologies |
 | `--n` | `200000` | Total requests per run |
 | `--load` | `0.8` | Target utilization for lb (ms `load.json` rps must match) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (push policies only; `centralized` not supported by `ms`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (push policies only; `centralized` is lb-only, `cl` is ms-only) |
 | `--plot` | (off) | Write lb vs ms overlay CDF plots to `--output-dir` |
 | `--output-dir` | `output/` | Directory for optional CDF plots |
 | `--no-build` | (off) | Do not run `cargo build --release` |

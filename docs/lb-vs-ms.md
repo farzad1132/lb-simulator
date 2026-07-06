@@ -13,7 +13,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
-| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`) is **lb-only**. |
+| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`) is **lb-only**. **CL** (`cl`) is **ms-only**. |
 | Local inflight load view | yes | yes | All push policies use each balancer's **local inflight** counters, not shared backend load |
 | Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`) |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
@@ -23,9 +23,11 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Unloaded latency p99 | yes | yes | lb: p99 of service durations; ms: p99 of `processing_time_ms` |
 | **Express lane** | yes | — | lb-only; see [expresslane.md](expresslane.md) |
 | **Centralized pull dispatch** | yes | — | One global queue; servers pull on spare capacity. See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based). |
+| **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
 | Multiple ingress client LBs | yes | — | `--clients`: independent Poisson sources; push policies use one LB per client; centralized uses one shared dispatcher |
 | Per-API ingress LB | — | yes | `EdgeBalancer`: one per API, routes user traffic to entry replicas |
-| Per-replica outbound LB | — | yes | `ReplicaBalancer`: one per replica, routes downstream RPCs |
+| Per-replica outbound LB | — | yes | `ReplicaBalancer`: one per replica (default push policies) |
+| Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl`) |
 | Flat topology CLI | yes | — | `--servers`, `--concurrency`, `--load` |
 | Callgraph topology | — | yes | `--callgraph`, `--load-file` |
 | Service distributions | yes | — | `exponential`, `constant`, `bimodal` via `--service-dist` |
@@ -51,6 +53,7 @@ Policies implement `LoadBalancePolicy::select(&mut self, loads: &[u32]) -> usize
 | lb | `LoadBalancer` | Per server in the shared pool |
 | ms | `EdgeBalancer` | Per entry-service replica |
 | ms | `ReplicaBalancer` | Per downstream-service replica (one table per downstream target) |
+| ms | `DownstreamBalancer` | Per downstream microservice target (shared across all callers; `cl` only) |
 
 These counters do **not** reflect other balancers' traffic, tasks waiting in downstream queues, or in-flight work dispatched by someone else.
 
@@ -59,6 +62,8 @@ These counters do **not** reflect other balancers' traffic, tasks waiting in dow
 ### Push policies vs centralized pull (lb only)
 
 Push policies (`random`, `power-of-two`, `least-request`, `round-robin`) dispatch on arrival via `LoadBalancePolicy::select()`. **Centralized** is a different architecture: tasks queue at a single load balancer and servers pull work when they have spare capacity. It does not map to the microservice simulator's per-replica outbound balancers and direct return routing, so `ms --lb-policy centralized` is rejected at startup.
+
+**CL** (`cl`, ms-only) is also an architecture change, not a sixth `select()` algorithm: outbound RPCs to each downstream microservice share one `DownstreamBalancer` with push-based power-of-two on aggregate inflight. Ingress stays per-API `EdgeBalancer`. See [microservice-simulation.md — CL policy](microservice-simulation.md#cl-policy-centralized-layer).
 
 ### Multiple LBs: ingress vs egress
 
@@ -87,6 +92,22 @@ User → EdgeBalancer(api) → entry replica
 
 A single user request enters through one `EdgeBalancer`. Outbound LBs are tied to replicas making nested calls, not to independent traffic sources.
 
+**ms — CL centralized-layer outbound (`--lb-policy cl`):**
+
+```
+User → EdgeBalancer(api) → entry replica
+                              │
+  Replica(A/0) ──┐
+  Replica(A/1) ──┼→ DownstreamBalancer(target=B) → B replicas
+  Replica(C/2) ──┘         (shared inflight + P2C push)
+```
+
+- **EdgeBalancer** (one per API): unchanged; uses P2C via `LoadBalancePolicy::build()`.
+- **DownstreamBalancer** (one per downstream microservice that receives RPCs): all caller replicas share one inflight table and one P2C routing decision per dispatch.
+- **OutboundGateway** (one per replica): thin forwarder from a replica's single outbound port to the correct `DownstreamBalancer` (no load state).
+
+Example (chain-3): one `EdgeBalancer` for API `handle`, plus `DownstreamBalancer` for `backend1` and `backend2`.
+
 ### Subset assignment
 
 Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` but use different `client_id` values:
@@ -96,6 +117,7 @@ Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` 
 | lb `LoadBalancer` | Load balancer index (`0 .. clients-1`) |
 | ms `EdgeBalancer` | Sorted API index (APIs ordered lexicographically) |
 | ms `ReplicaBalancer` | `replica_idx` within the calling service |
+| ms `DownstreamBalancer` | `0` (single logical client for the shared balancer) |
 
 See [lb-simulation.md — Server subset](lb-simulation.md#server-subset) for the deterministic algorithm.
 
@@ -131,7 +153,11 @@ Topology comes from `callgraph.json` (services, endpoints, edges) and `load.json
 
 ### Per-replica outbound balancers
 
-Each replica that makes downstream calls owns a `ReplicaBalancer` with independent local outbound inflight counters and (when subsetting) its own downstream replica subsets.
+Each replica that makes downstream calls owns a `ReplicaBalancer` with independent local outbound inflight counters and (when subsetting) its own downstream replica subsets. This is the default for push policies (`random`, `power-of-two`, `least-request`, `round-robin`).
+
+### CL centralized-layer outbound
+
+With `--lb-policy cl`, outbound routing uses one shared `DownstreamBalancer` per downstream microservice target (push-based power-of-two on aggregate inflight). Thin `OutboundGateway` models per replica forward calls and releases to the shared balancers. `lb --lb-policy cl` is rejected at startup.
 
 ### Direct returns
 

@@ -91,6 +91,8 @@ pub enum LoadBalancePolicyKind {
     RoundRobin,
     LeastRequest,
     Centralized,
+    #[value(name = "cl")]
+    Cl,
 }
 
 impl LoadBalancePolicyKind {
@@ -104,11 +106,16 @@ impl LoadBalancePolicyKind {
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized => Box::new(CentralizedPolicy),
+            Self::Cl => Box::new(PowerOfTwoPolicy),
         }
     }
 
     pub fn is_centralized(self) -> bool {
         matches!(self, Self::Centralized)
+    }
+
+    pub fn is_cl(self) -> bool {
+        matches!(self, Self::Cl)
     }
 }
 
@@ -120,5 +127,11 @@ mod tests {
     fn centralized_policy_kind_is_centralized() {
         assert!(LoadBalancePolicyKind::Centralized.is_centralized());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_centralized());
+    }
+
+    #[test]
+    fn cl_policy_kind_is_cl() {
+        assert!(LoadBalancePolicyKind::Cl.is_cl());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_cl());
     }
 }

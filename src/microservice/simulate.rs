@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::policy::LoadBalancePolicyKind;
 use crate::rng;
 use crate::subset::{self, SubsetPolicyKind};
-use super::balancer::{EdgeBalancer, ReplicaBalancer};
+use super::balancer::{DownstreamBalancer, EdgeBalancer, OutboundGateway, ReplicaBalancer};
 use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
 #[cfg(test)]
 use super::callgraph::ApiLoad;
@@ -211,6 +211,14 @@ fn downstream_targets(graph: &CallGraph, microservice_id: &str) -> HashSet<Strin
                 }
             }
         }
+    }
+    targets
+}
+
+fn all_downstream_targets(graph: &CallGraph) -> HashSet<String> {
+    let mut targets = HashSet::new();
+    for microservice_id in &graph.microservice_order {
+        targets.extend(downstream_targets(graph, microservice_id));
     }
     targets
 }
@@ -431,6 +439,22 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         downstream_indices: HashMap<String, Vec<usize>>,
     }
 
+    struct PendingDownstreamBalancer {
+        balancer: DownstreamBalancer,
+        mailbox: Mailbox<DownstreamBalancer>,
+        target_microservice: String,
+        server_indices: Vec<usize>,
+    }
+
+    struct PendingOutboundGateway {
+        gateway: OutboundGateway,
+        mailbox: Mailbox<OutboundGateway>,
+        microservice_id: String,
+        server_idx: usize,
+    }
+
+    let use_cl = args.lb_policy.is_cl();
+
     let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
     let mut edge_balancer_inputs: HashMap<String, Output<Hop>> = HashMap::new();
     let mut edge_balancer_addresses: HashMap<String, nexosim::simulation::Address<EdgeBalancer>> =
@@ -494,70 +518,169 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         nexosim::simulation::Address<ReplicaBalancer>,
     > = HashMap::new();
 
-    for microservice_id in &graph.microservice_order {
-        let n_servers = graph.microservices[microservice_id].replicas as usize;
+    let mut pending_downstream_balancers: Vec<PendingDownstreamBalancer> = Vec::new();
+    let mut pending_outbound_gateways: Vec<PendingOutboundGateway> = Vec::new();
+    let mut outbound_gateway_outbound: HashMap<(String, usize), Output<OutboundCall>> =
+        HashMap::new();
+    let mut outbound_gateway_addresses: HashMap<
+        (String, usize),
+        nexosim::simulation::Address<OutboundGateway>,
+    > = HashMap::new();
+    let mut downstream_balancer_addresses: HashMap<
+        String,
+        nexosim::simulation::Address<DownstreamBalancer>,
+    > = HashMap::new();
 
-        for server_idx in 0..n_servers {
-            let mut downstream_indices = HashMap::new();
-            for target in downstream_targets(&graph, microservice_id) {
-                let target_servers = graph.microservices[&target].replicas as usize;
-                let indices = subset::assign_subset(
-                    args.lb_subset_policy,
-                    target_servers,
-                    server_idx,
-                    args.lb_subset_size,
-                );
-                if args.verbose >= 1 {
-                    eprintln!(
-                        "server {microservice_id}/{server_idx} -> {target} subset: {indices:?}"
-                    );
-                }
-                downstream_indices.insert(target.clone(), indices);
+    if use_cl {
+        let mut sorted_targets: Vec<_> = all_downstream_targets(&graph).into_iter().collect();
+        sorted_targets.sort();
+
+        for target in &sorted_targets {
+            let n_servers = graph.microservices[target].replicas as usize;
+            let server_indices = subset::assign_subset(
+                args.lb_subset_policy,
+                n_servers,
+                0,
+                args.lb_subset_size,
+            );
+            if args.verbose >= 1 {
+                eprintln!("downstream balancer {target} subset: {server_indices:?}");
             }
 
-            let balancer = ReplicaBalancer::new(
-                args.lb_policy.build(),
-                args.lb_policy,
-                microservice_id.clone(),
-                server_idx,
-                downstream_indices.clone(),
-                &microservice_server_counts,
+            let balancer = DownstreamBalancer::new(
+                target.clone(),
+                n_servers,
+                server_indices.clone(),
                 tracer.clone(),
             );
             let mailbox = Mailbox::new();
             let address = mailbox.address();
+            downstream_balancer_addresses.insert(target.clone(), address);
 
-            let mut outbound = Output::default();
-            outbound.connect(ReplicaBalancer::outbound, &mailbox);
-            replica_balancer_outbound.insert((microservice_id.clone(), server_idx), outbound);
-            replica_balancer_addresses.insert((microservice_id.clone(), server_idx), address.clone());
-
-            pending_replica_balancers.push(PendingReplicaBalancer {
+            pending_downstream_balancers.push(PendingDownstreamBalancer {
                 balancer,
                 mailbox,
-                microservice_id: microservice_id.clone(),
-                server_idx,
-                downstream_indices: downstream_indices.clone(),
+                target_microservice: target.clone(),
+                server_indices,
             });
         }
-    }
 
-    for pending in &mut pending_replica_balancers {
-        for (target_microservice, indices) in &pending.downstream_indices {
-            let n_target = graph.microservices[target_microservice].replicas as usize;
-            let outputs = pending
-                .balancer
-                .downstream_outputs
-                .get_mut(target_microservice)
-                .unwrap_or_else(|| panic!("missing downstream outputs for {target_microservice}"));
-            if outputs.len() != n_target {
-                *outputs = (0..n_target).map(|_| Output::default()).collect();
-            }
-            for &server_idx in indices {
+        for pending in &mut pending_downstream_balancers {
+            for &server_idx in &pending.server_indices {
                 if let Some(mb) =
-                    server_mailboxes.get(&(target_microservice.clone(), server_idx))
+                    server_mailboxes.get(&(pending.target_microservice.clone(), server_idx))
                 {
-                    outputs[server_idx].connect(Replica::input, mb);
+                    pending.balancer.outputs[server_idx].connect(Replica::input, mb);
+                }
+            }
+        }
+
+        for microservice_id in &graph.microservice_order {
+            let n_servers = graph.microservices[microservice_id].replicas as usize;
+
+            for server_idx in 0..n_servers {
+                let targets = downstream_targets(&graph, microservice_id);
+                let mut downstream_outputs = HashMap::new();
+                let mut downstream_releases = HashMap::new();
+                for target in &targets {
+                    let db_address = downstream_balancer_addresses
+                        .get(target)
+                        .expect("downstream balancer address");
+                    let mut out = Output::default();
+                    out.connect(DownstreamBalancer::outbound, db_address);
+                    downstream_outputs.insert(target.clone(), out);
+                    let mut release = Output::default();
+                    release.connect(DownstreamBalancer::release, db_address);
+                    downstream_releases.insert(target.clone(), release);
+                }
+
+                let gateway = OutboundGateway::new(downstream_outputs, downstream_releases);
+                let mailbox = Mailbox::new();
+                let address = mailbox.address();
+
+                let mut outbound = Output::default();
+                outbound.connect(OutboundGateway::input, &mailbox);
+                outbound_gateway_outbound.insert((microservice_id.clone(), server_idx), outbound);
+                outbound_gateway_addresses
+                    .insert((microservice_id.clone(), server_idx), address);
+
+                pending_outbound_gateways.push(PendingOutboundGateway {
+                    gateway,
+                    mailbox,
+                    microservice_id: microservice_id.clone(),
+                    server_idx,
+                });
+            }
+        }
+    } else {
+        for microservice_id in &graph.microservice_order {
+            let n_servers = graph.microservices[microservice_id].replicas as usize;
+
+            for server_idx in 0..n_servers {
+                let mut downstream_indices = HashMap::new();
+                for target in downstream_targets(&graph, microservice_id) {
+                    let target_servers = graph.microservices[&target].replicas as usize;
+                    let indices = subset::assign_subset(
+                        args.lb_subset_policy,
+                        target_servers,
+                        server_idx,
+                        args.lb_subset_size,
+                    );
+                    if args.verbose >= 1 {
+                        eprintln!(
+                            "server {microservice_id}/{server_idx} -> {target} subset: {indices:?}"
+                        );
+                    }
+                    downstream_indices.insert(target.clone(), indices);
+                }
+
+                let balancer = ReplicaBalancer::new(
+                    args.lb_policy.build(),
+                    args.lb_policy,
+                    microservice_id.clone(),
+                    server_idx,
+                    downstream_indices.clone(),
+                    &microservice_server_counts,
+                    tracer.clone(),
+                );
+                let mailbox = Mailbox::new();
+                let address = mailbox.address();
+
+                let mut outbound = Output::default();
+                outbound.connect(ReplicaBalancer::outbound, &mailbox);
+                replica_balancer_outbound.insert((microservice_id.clone(), server_idx), outbound);
+                replica_balancer_addresses
+                    .insert((microservice_id.clone(), server_idx), address.clone());
+
+                pending_replica_balancers.push(PendingReplicaBalancer {
+                    balancer,
+                    mailbox,
+                    microservice_id: microservice_id.clone(),
+                    server_idx,
+                    downstream_indices: downstream_indices.clone(),
+                });
+            }
+        }
+
+        for pending in &mut pending_replica_balancers {
+            for (target_microservice, indices) in &pending.downstream_indices {
+                let n_target = graph.microservices[target_microservice].replicas as usize;
+                let outputs = pending
+                    .balancer
+                    .downstream_outputs
+                    .get_mut(target_microservice)
+                    .unwrap_or_else(|| {
+                        panic!("missing downstream outputs for {target_microservice}")
+                    });
+                if outputs.len() != n_target {
+                    *outputs = (0..n_target).map(|_| Output::default()).collect();
+                }
+                for &server_idx in indices {
+                    if let Some(mb) =
+                        server_mailboxes.get(&(target_microservice.clone(), server_idx))
+                    {
+                        outputs[server_idx].connect(Replica::input, mb);
+                    }
                 }
             }
         }
@@ -603,6 +726,25 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         );
     }
 
+    for pending in pending_downstream_balancers {
+        bench = bench.add_model(
+            pending.balancer,
+            pending.mailbox,
+            &format!("downstream-balancer-{}", pending.target_microservice),
+        );
+    }
+
+    for pending in pending_outbound_gateways {
+        bench = bench.add_model(
+            pending.gateway,
+            pending.mailbox,
+            &format!(
+                "outbound-gateway-{}-{}",
+                pending.microservice_id, pending.server_idx
+            ),
+        );
+    }
+
     for microservice_id in &graph.microservice_order {
         let spec = &graph.microservices[microservice_id];
         let n_servers = spec.replicas as usize;
@@ -612,13 +754,17 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             let mb = server_mailboxes
                 .remove(&(microservice_id.clone(), i))
                 .expect("server mailbox");
-            let outbound = replica_balancer_outbound
-                .get(&(microservice_id.clone(), i))
-                .cloned()
-                .expect("replica balancer outbound");
-            let rb_address = replica_balancer_addresses
-                .get(&(microservice_id.clone(), i))
-                .expect("replica balancer address");
+            let outbound = if use_cl {
+                outbound_gateway_outbound
+                    .get(&(microservice_id.clone(), i))
+                    .cloned()
+                    .expect("outbound gateway outbound")
+            } else {
+                replica_balancer_outbound
+                    .get(&(microservice_id.clone(), i))
+                    .cloned()
+                    .expect("replica balancer outbound")
+            };
 
             let mut edge_releases = HashMap::new();
             if let Some(apis) = apis_by_entry_microservice.get(microservice_id) {
@@ -633,7 +779,17 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             }
 
             let mut outbound_release = Output::default();
-            outbound_release.connect(ReplicaBalancer::release_outbound, rb_address);
+            if use_cl {
+                let gw_address = outbound_gateway_addresses
+                    .get(&(microservice_id.clone(), i))
+                    .expect("outbound gateway address");
+                outbound_release.connect(OutboundGateway::release, gw_address);
+            } else {
+                let rb_address = replica_balancer_addresses
+                    .get(&(microservice_id.clone(), i))
+                    .expect("replica balancer address");
+                outbound_release.connect(ReplicaBalancer::release_outbound, rb_address);
+            }
 
             let replica = Replica::new(ReplicaConfig {
                 graph: graph.clone(),
