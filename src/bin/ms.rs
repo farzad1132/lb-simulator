@@ -1,6 +1,7 @@
 use clap::Parser;
 use lb::microservice::{MsArgs, MsStats, OutputFormat, print_human_stats, run};
 use lb::policy::LoadBalancePolicyKind;
+use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -33,6 +34,8 @@ struct Args {
     trace_limit: u32,
     #[arg(long, default_value_t = 0)]
     scale: u32,
+    #[arg(long, value_enum, default_value_t = SchedulingPolicyKind::Fifo)]
+    scheduling: SchedulingPolicyKind,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
     verbose: u8,
 }
@@ -53,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trace: cli.trace,
         trace_limit: cli.trace_limit,
         scale: cli.scale,
+        scheduling: cli.scheduling,
         verbose: cli.verbose,
     };
 
@@ -96,6 +100,7 @@ mod tests {
         ]);
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::PowerOfTwo);
         assert_eq!(cli.lb_subset_policy, SubsetPolicyKind::Deterministic);
+        assert_eq!(cli.scheduling, SchedulingPolicyKind::Fifo);
         assert_eq!(cli.scale, 0);
         assert_eq!(cli.rps, None);
         assert_eq!(cli.slo_ms, None);
@@ -142,6 +147,20 @@ mod tests {
             "cl",
         ]);
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Cl);
+    }
+
+    #[test]
+    fn parses_scheduling_edf() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--scheduling",
+            "edf",
+        ]);
+        assert_eq!(cli.scheduling, SchedulingPolicyKind::Edf);
     }
 
     #[test]

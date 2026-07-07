@@ -2,13 +2,13 @@
 
 This document describes how the microservice simulator works: inputs, internal model, request flow, and metrics. The simulator is implemented as a separate binary (`ms`) and module (`src/microservice/`) that does not modify the flat load-balancer simulator (`lb`).
 
-See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the flat load-balancer simulator (including which features are shared, lb-only, or ms-only). Per-microservice visit distributions are documented in [analyze.md](analyze.md).
+See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the flat load-balancer simulator (including which features are shared, lb-only, or ms-only). Per-microservice visit distributions are documented in [analyze.md](analyze.md). Server queue scheduling (`fifo` / `edf`) is documented in [scheduling.md](scheduling.md).
 
 ## Vocabulary
 
 | Term | Meaning | Code / JSON |
 |------|---------|-------------|
-| **Server** | A single server with its own FIFO queue and concurrency slots | Rust type `Replica`; `server_idx`; JSON `server_utilization_pct` |
+| **Server** | A single server with its own queue and concurrency slots (FIFO by default; see [scheduling.md](scheduling.md)) | Rust type `Replica`; `server_idx`; JSON `server_utilization_pct` |
 | **Microservice** | A deployable callgraph component backed by one or more servers | `microservice_id`; callgraph node; JSON `by_microservice`, `microservice_utilization_pct` |
 | **Service** | The API-level offering; one service per entry API | Conceptual; 1:1 with an entry API in `load.json` |
 | **API** | Named user-facing entry point with independent Poisson traffic | Key in `load.json`; JSON `by_api` |
@@ -114,7 +114,7 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 | **ReplicaBalancer** | one per server (default policies) | Outbound only: picks downstream servers using local outbound inflight |
 | **DownstreamBalancer** | one per downstream target (`cl`, `centralized`) | Shared outbound LB: push P2C (`cl`) or pull FCFS (`centralized`) across all replicas |
 | **OutboundGateway** | one per server (`cl`, `centralized`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
-| **Replica** (server) | `replicas` per microservice | Strict FIFO queue, local processing, nested dispatch/return |
+| **Replica** (server) | `replicas` per microservice | Configurable queue (`fifo` default, `edf` optional; see [scheduling.md](scheduling.md)), local processing, nested dispatch/return |
 
 ### What a microservice models
 
@@ -243,9 +243,9 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 
 `--lb-subset-size > 0` is not supported with `cl` or `centralized`.
 
-### Replica FIFO queue
+### Replica queue
 
-Each replica has one strict FIFO queue holding:
+Each replica has one queue holding upstream arrivals and downstream returns. Default discipline is FIFO; EDF (`--scheduling edf`) reorders upstream items by deadline on enqueue. See [scheduling.md](scheduling.md) for upstream vs return behavior under each policy.
 
 | Kind | Handler |
 |------|---------|

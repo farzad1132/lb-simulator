@@ -18,6 +18,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `cl` or `centralized` in ms. |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
+| Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
 | Poisson arrivals | yes | yes | lb: from `--load`; ms: per-API `rps` in `load.json` |
 | SLO violation rate | yes | yes | lb: optional `--slo` (seconds); ms: `slo_ms` per API in `load.json` |
 | Unloaded latency p99 | yes | yes | lb: p99 of service durations; ms: p99 of `processing_time_ms` |

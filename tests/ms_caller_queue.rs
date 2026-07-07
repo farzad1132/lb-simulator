@@ -1,5 +1,6 @@
 use lb::microservice::{MsArgs, OutputFormat, run};
 use lb::policy::LoadBalancePolicyKind;
+use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
 
@@ -20,6 +21,7 @@ fn caller_queue_args(seed: u64, n: u32) -> MsArgs {
         trace_limit: 5,
         scale: 0,
         verbose: 0,
+        scheduling: SchedulingPolicyKind::Fifo,
     }
 }
 
@@ -62,6 +64,7 @@ fn f1_nested_callgraph_completes() {
         trace_limit: 5,
         scale: 0,
         verbose: 0,
+        scheduling: SchedulingPolicyKind::Fifo,
     })
     .unwrap()
     .expect("stats");

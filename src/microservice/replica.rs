@@ -5,6 +5,7 @@ use super::hop::{
 };
 use super::microservice_stats::MicroserviceVisitTracker;
 use super::trace::MsTracer;
+use crate::scheduling::{SchedulingPolicyKind, edf_insert_index_in_mixed_queue};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ pub struct ReplicaConfig {
     pub completed: Output<CompletedRequest>,
     pub tracer: Option<Arc<MsTracer>>,
     pub pull_output: Option<Output<usize>>,
+    pub scheduling: SchedulingPolicyKind,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -64,6 +66,8 @@ pub struct Replica {
     tracer: Option<Arc<MsTracer>>,
     #[serde(skip)]
     pull_output: Option<Output<usize>>,
+    #[serde(skip)]
+    scheduling: SchedulingPolicyKind,
 }
 
 impl Replica {
@@ -84,6 +88,31 @@ impl Replica {
             completed: config.completed,
             tracer: config.tracer,
             pull_output: config.pull_output,
+            scheduling: config.scheduling,
+        }
+    }
+
+    fn enqueue_work(&mut self, work: ReplicaWork) {
+        match self.scheduling {
+            SchedulingPolicyKind::Fifo => {
+                self.queue.push_back(work);
+            }
+            SchedulingPolicyKind::Edf => match work {
+                ReplicaWork::DownstreamReturn(_) => {
+                    self.queue.push_back(work);
+                }
+                ReplicaWork::Upstream(hop) => {
+                    let deadline = hop.deadline;
+                    let insert_at = edf_insert_index_in_mixed_queue(
+                        self.queue.iter().map(|w| match w {
+                            ReplicaWork::Upstream(h) => (true, h.deadline),
+                            ReplicaWork::DownstreamReturn(_) => (false, deadline),
+                        }),
+                        deadline,
+                    );
+                    self.queue.insert(insert_at, ReplicaWork::Upstream(hop));
+                }
+            },
         }
     }
 
@@ -296,7 +325,7 @@ impl Replica {
                         self.in_flight
                     ),
                 );
-                self.queue.push_back(ReplicaWork::Upstream(hop));
+                self.enqueue_work(ReplicaWork::Upstream(hop));
             }
             ReplicaInput::DownstreamReturn(hop) => {
                 self.trace(
@@ -311,7 +340,7 @@ impl Replica {
                         self.in_flight
                     ),
                 );
-                self.queue.push_back(ReplicaWork::DownstreamReturn(hop));
+                self.enqueue_work(ReplicaWork::DownstreamReturn(hop));
             }
         }
         self.drain_queue(cx).await;

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::policy::LoadBalancePolicyKind;
 use crate::rng;
+use crate::scheduling::SchedulingPolicyKind;
 use crate::sim_util;
 use crate::subset::{self, SubsetPolicyKind};
 use super::balancer::{DownstreamBalancer, EdgeBalancer, OutboundGateway, ReplicaBalancer};
@@ -53,6 +54,7 @@ pub struct MsArgs {
     pub trace_limit: u32,
     pub scale: u32,
     pub verbose: u8,
+    pub scheduling: SchedulingPolicyKind,
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,8 @@ struct UserArrival {
     #[serde(skip)]
     graph: Arc<CallGraph>,
     #[serde(skip)]
+    load: Arc<LoadSpec>,
+    #[serde(skip)]
     edge_balancers: HashMap<String, Output<Hop>>,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
@@ -88,12 +92,14 @@ struct UserArrival {
 impl UserArrival {
     fn new(
         graph: Arc<CallGraph>,
+        load: Arc<LoadSpec>,
         edge_balancers: HashMap<String, Output<Hop>>,
         tracer: Option<Arc<MsTracer>>,
         next_request_id: Arc<AtomicU64>,
     ) -> Self {
         Self {
             graph,
+            load,
             edge_balancers,
             tracer,
             next_request_id,
@@ -130,13 +136,22 @@ impl UserArrival {
                 .unwrap_or(false);
             (id, trace)
         };
+        let slo_ms = match self.load.get(&api) {
+            Some(spec) => spec.slo_ms,
+            None => {
+                eprintln!("arrival: no load spec for api {}", api);
+                return;
+            }
+        };
+        let now = cx.time();
         let hop = Hop {
             request_id,
             trace,
             api,
             endpoint: endpoint.clone(),
             sibling_index: 0,
-            start: cx.time(),
+            start: now,
+            deadline: now + Duration::from_secs_f64(slo_ms / SECS_TO_MS),
             duration: Duration::ZERO,
             processing_time: Duration::ZERO,
             caller: None,
@@ -382,6 +397,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let mut load = load_spec_from_file(&args.load_file)?;
     apply_load_overrides(&mut load, args.rps, args.slo_ms);
     graph.validate_load(&load)?;
+    let load = Arc::new(load);
 
     let next_request_id = Arc::new(AtomicU64::new(0));
 
@@ -836,6 +852,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 completed: completed_output.clone(),
                 tracer: tracer.clone(),
                 pull_output,
+                scheduling: args.scheduling,
             });
             bench = bench.add_model(replica, mb, &format!("{microservice_id}-server-{i}"));
             if let Some(pull_input) = pull_input {
@@ -846,6 +863,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let arrival = UserArrival::new(
         graph.clone(),
+        load.clone(),
         edge_balancer_inputs,
         tracer,
         next_request_id,
@@ -964,6 +982,7 @@ mod tests {
             trace_limit: 5,
             scale: 0,
             verbose: 0,
+            scheduling: SchedulingPolicyKind::Fifo,
         }
     }
 
@@ -985,6 +1004,7 @@ mod tests {
             trace_limit: 5,
             scale: 0,
             verbose: 0,
+            scheduling: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");
@@ -1038,6 +1058,7 @@ mod tests {
             trace_limit: 5,
             scale: 0,
             verbose: 0,
+            scheduling: SchedulingPolicyKind::Fifo,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1075,6 +1096,7 @@ mod tests {
             trace_limit: 5,
             scale: 0,
             verbose: 0,
+            scheduling: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");
@@ -1179,6 +1201,7 @@ mod tests {
             trace_limit: 5,
             scale: 0,
             verbose: 0,
+            scheduling: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");

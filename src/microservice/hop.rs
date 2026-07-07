@@ -45,6 +45,7 @@ pub struct Hop {
     pub endpoint: String,
     pub sibling_index: usize,
     pub start: MonotonicTime,
+    pub deadline: MonotonicTime,
     pub duration: Duration,
     pub processing_time: Duration,
     pub caller: Option<CallerRef>,

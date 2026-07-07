@@ -29,6 +29,7 @@ except ModuleNotFoundError:
 
 from plot_cdfs import (
     MS_LB_POLICIES,
+    MS_SCHEDULING_POLICIES,
     REPO_ROOT,
     ensure_release_binary,
     output_path_with_comment,
@@ -88,6 +89,7 @@ def run_chain_sweep(
     n: int,
     lb_policy: str,
     lb_subset_size: int,
+    scheduling: str,
     seed: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     probs = np.zeros((3, len(loads)), dtype=float)
@@ -110,6 +112,7 @@ def run_chain_sweep(
                 n=n,
                 lb_policy=lb_policy,
                 lb_subset_size=lb_subset_size,
+                scheduling=scheduling,
                 seed=seed,
                 rps=rps,
             )
@@ -174,6 +177,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, default=100000)
     parser.add_argument("--lb-policy", choices=MS_LB_POLICIES, default="power-of-two")
     parser.add_argument("--lb-subset-size", type=int, default=0)
+    parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument("--seed", type=int, default=None)
     return parser.parse_args()
 
@@ -200,6 +204,7 @@ def main() -> None:
         n=args.n,
         lb_policy=args.lb_policy,
         lb_subset_size=args.lb_subset_size,
+        scheduling=args.scheduling,
         seed=args.seed,
     )
     output_path = output_path_with_comment(args.output, args.comment)

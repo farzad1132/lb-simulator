@@ -31,6 +31,7 @@ MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
 LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized")
 MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "cl")
+MS_SCHEDULING_POLICIES = ("fifo", "edf")
 SIMULATORS = ("lb", "ms")
 
 
@@ -289,6 +290,7 @@ def run_ms_simulation(
     seed: int | None = None,
     rps: float | None = None,
     slo_ms: float | None = None,
+    scheduling: str = "fifo",
 ) -> dict:
     cmd = [
         str(binary),
@@ -304,6 +306,8 @@ def run_ms_simulation(
         lb_policy,
         "--lb-subset-size",
         str(lb_subset_size),
+        "--scheduling",
+        scheduling,
     ]
     if seed is not None:
         cmd.extend(["--seed", str(seed)])
