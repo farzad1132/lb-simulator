@@ -34,6 +34,7 @@ pub struct ReplicaConfig {
     pub return_outputs: HashMap<(String, usize), Output<ReplicaInput>>,
     pub completed: Output<CompletedRequest>,
     pub tracer: Option<Arc<MsTracer>>,
+    pub pull_output: Option<Output<usize>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -61,6 +62,8 @@ pub struct Replica {
     completed: Output<CompletedRequest>,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
+    #[serde(skip)]
+    pull_output: Option<Output<usize>>,
 }
 
 impl Replica {
@@ -80,6 +83,7 @@ impl Replica {
             return_outputs: config.return_outputs,
             completed: config.completed,
             tracer: config.tracer,
+            pull_output: config.pull_output,
         }
     }
 
@@ -175,6 +179,7 @@ impl Replica {
             child_hop.sibling_index = 0;
             child_hop.duration = Duration::ZERO;
             child_hop.outbound_release = None;
+            child_hop.slot_release = None;
             child_hop.caller = Some(CallerRef {
                 microservice: self.microservice_id.clone(),
                 server: self.server_idx,
@@ -215,10 +220,12 @@ impl Replica {
             hop.endpoint = resume_endpoint;
             hop.sibling_index = resume_sibling_index;
             hop.caller = resume_caller.map(|b| *b);
-            hop.outbound_release = Some(OutboundRelease {
-                target_microservice: outbound_target_microservice,
-                target_server: outbound_target_server,
-            });
+            if !outbound_target_microservice.is_empty() {
+                hop.outbound_release = Some(OutboundRelease {
+                    target_microservice: outbound_target_microservice,
+                    target_server: outbound_target_server,
+                });
+            }
             let key = (microservice, server);
             let output = self.return_outputs.get_mut(&key).ok_or_else(|| {
                 format!("no return output for {:?} server {}", key.0, key.1)
@@ -256,13 +263,29 @@ impl Replica {
 #[Model]
 impl Replica {
     pub async fn input(&mut self, msg: ReplicaInput, cx: &Context<Self>) {
-        match &msg {
+        match msg {
             ReplicaInput::Upstream(hop) => {
                 if let Ok(mut tracker) = self.visit_tracker.lock() {
                     tracker.record_arrival(hop.request_id, &self.microservice_id, cx.time());
                 }
+                if hop.slot_release.is_some() {
+                    self.trace(
+                        &hop,
+                        cx,
+                        &format!(
+                            "Server({}/{}) centralized upstream endpoint={} inflight={}",
+                            self.microservice_id,
+                            self.server_idx,
+                            hop.endpoint,
+                            self.in_flight
+                        ),
+                    );
+                    self.in_flight += 1;
+                    self.begin_service(hop, cx);
+                    return;
+                }
                 self.trace(
-                    hop,
+                    &hop,
                     cx,
                     &format!(
                         "Server({}/{}) enqueue upstream endpoint={} queue={} inflight={}",
@@ -273,11 +296,11 @@ impl Replica {
                         self.in_flight
                     ),
                 );
-                self.queue.push_back(ReplicaWork::Upstream(hop.clone()));
+                self.queue.push_back(ReplicaWork::Upstream(hop));
             }
             ReplicaInput::DownstreamReturn(hop) => {
                 self.trace(
-                    hop,
+                    &hop,
                     cx,
                     &format!(
                         "Server({}/{}) enqueue downstream_return endpoint={} queue={} inflight={}",
@@ -288,11 +311,18 @@ impl Replica {
                         self.in_flight
                     ),
                 );
-                self.queue
-                    .push_back(ReplicaWork::DownstreamReturn(hop.clone()));
+                self.queue.push_back(ReplicaWork::DownstreamReturn(hop));
             }
         }
         self.drain_queue(cx).await;
+    }
+
+    pub async fn request_pull(&mut self, _: (), _cx: &Context<Self>) {
+        if self.pull_output.is_some() && self.in_flight < self.max_concurrency {
+            if let Some(output) = &mut self.pull_output {
+                output.send(self.server_idx).await;
+            }
+        }
     }
 
     #[nexosim(schedulable)]
@@ -320,6 +350,15 @@ impl Replica {
             ),
         );
         self.in_flight = self.in_flight.saturating_sub(1);
+
+        if let Some(release) = hop.slot_release.take() {
+            self.release_outbound(release).await;
+            if self.pull_output.is_some() {
+                if let Some(output) = &mut self.pull_output {
+                    output.send(self.server_idx).await;
+                }
+            }
+        }
 
         hop.sibling_index = 0;
         if let Err(e) = self.advance(hop, cx).await {

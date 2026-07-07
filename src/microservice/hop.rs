@@ -50,6 +50,8 @@ pub struct Hop {
     pub caller: Option<CallerRef>,
     #[serde(default)]
     pub outbound_release: Option<OutboundRelease>,
+    #[serde(default)]
+    pub slot_release: Option<OutboundRelease>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

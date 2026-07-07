@@ -117,6 +117,17 @@ impl LoadBalancePolicyKind {
     pub fn is_cl(self) -> bool {
         matches!(self, Self::Cl)
     }
+
+    pub fn uses_shared_downstream(self) -> bool {
+        matches!(self, Self::Cl | Self::Centralized)
+    }
+
+    pub fn ingress_policy(self) -> Box<dyn LoadBalancePolicy> {
+        match self {
+            Self::Cl | Self::Centralized => Box::new(PowerOfTwoPolicy),
+            other => other.build(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +144,12 @@ mod tests {
     fn cl_policy_kind_is_cl() {
         assert!(LoadBalancePolicyKind::Cl.is_cl());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_cl());
+    }
+
+    #[test]
+    fn uses_shared_downstream_for_cl_and_centralized() {
+        assert!(LoadBalancePolicyKind::Cl.uses_shared_downstream());
+        assert!(LoadBalancePolicyKind::Centralized.uses_shared_downstream());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.uses_shared_downstream());
     }
 }

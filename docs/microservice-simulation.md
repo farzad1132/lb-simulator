@@ -110,10 +110,10 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Picks an entry-microservice server for user traffic using local inflight |
+| **EdgeBalancer** | one per API | Push routing to entry replicas; honors `--lb-policy` for push policies; always power-of-two for `cl` / `centralized` |
 | **ReplicaBalancer** | one per server (default policies) | Outbound only: picks downstream servers using local outbound inflight |
-| **DownstreamBalancer** | one per downstream target (`cl` only) | Shared outbound LB: push P2C on aggregate inflight across all callers |
-| **OutboundGateway** | one per server (`cl` only) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
+| **DownstreamBalancer** | one per downstream target (`cl`, `centralized`) | Shared outbound LB: push P2C (`cl`) or pull FCFS (`centralized`) across all replicas |
+| **OutboundGateway** | one per server (`cl`, `centralized`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
 | **Replica** (server) | `replicas` per microservice | Strict FIFO queue, local processing, nested dispatch/return |
 
 ### What a microservice models
@@ -122,7 +122,7 @@ A callgraph microservice node becomes:
 
 - `replicas` × `Replica` (server) models, each with `max_concurrency = cpu / replicas`
 - Default push policies: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
-- `--lb-policy cl`: one `DownstreamBalancer` per downstream microservice target, plus `replicas` × `OutboundGateway` forwarders
+- `--lb-policy cl` or `centralized`: one `DownstreamBalancer` per downstream microservice target, plus `replicas` × `OutboundGateway` forwarders
 
 All interfaces of a microservice share the same server pool. The queue is per-server, not per-interface.
 
@@ -134,7 +134,8 @@ When `--lb-subset-size k > 0`, each balancer only routes among `min(k, replicas)
 
 - **EdgeBalancer:** client id is the API index (APIs sorted lexicographically).
 - **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
-- **DownstreamBalancer** (`cl`): client id is `0` — one subset for the shared balancer per downstream target.
+
+**Not supported with `cl` or `centralized`:** `--lb-subset-size > 0` is rejected at startup. Both shared-layer policies require all replicas (ingress and outbound).
 
 See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm.
 
@@ -187,6 +188,17 @@ All push policies use each balancer's local inflight counters at routing time. *
 
 Example: frontend/0 → backend1 uses **ReplicaBalancer(frontend/0)** to pick a backend1 replica. backend1/0 → shared uses **ReplicaBalancer(backend1/0)** to pick a shared replica.
 
+### EdgeBalancer (ingress) policy
+
+The **EdgeBalancer** handles **user ingress only**. It always uses **push** routing via `LoadBalancePolicy::select()` on local ingress inflight — never pull-based dispatch.
+
+| `--lb-policy` | EdgeBalancer algorithm |
+|---------------|------------------------|
+| `random`, `power-of-two`, `least-request`, `round-robin` | Honors `--lb-policy` |
+| `cl`, `centralized` | Always **power-of-two** (the flag changes outbound architecture only) |
+
+Outbound RPC routing and returns are handled separately (see below).
+
 ### CL policy (centralized layer)
 
 `--lb-policy cl` changes **outbound** routing only. Ingress stays one `EdgeBalancer` per API with push-based power-of-two.
@@ -205,10 +217,31 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 | vs | Difference |
 |----|------------|
 | Default push policies | Each `ReplicaBalancer` sees only its own replica's outbound inflight |
-| `cl` | All callers to the same downstream target share one inflight view |
-| lb `centralized` | Pull-based FCFS at one global dispatcher (`lb` only; `ms` rejects it) |
+| `cl` | All callers to the same downstream target share one inflight view (push P2C) |
+| `centralized` | All callers share one pull queue per downstream target (pull FCFS); see below |
 
 `lb --lb-policy cl` is rejected at startup.
+
+### Centralized policy (pull-based layer)
+
+`--lb-policy centralized` uses the same shared outbound topology as `cl` (`DownstreamBalancer` + `OutboundGateway` per downstream target), but dispatch is **pull-based** like lb `centralized`: outbound calls queue at the shared balancer; downstream replicas pull when they have spare capacity; FCFS matching (no `select()`).
+
+Ingress stays push-based power-of-two on `EdgeBalancer` (same as `cl`).
+
+```
+User → EdgeBalancer(handle) → frontend/0
+                                │
+frontend/0 ──▶ OutboundGateway(frontend/0) ──▶ DownstreamBalancer(backend1) ──pull──▶ backend1/*
+backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(backend2) ──pull──▶ backend2/*
+```
+
+| vs | Difference |
+|----|------------|
+| `cl` | Push-on-arrival P2C; inflight released on return to caller |
+| `centralized` | Pull FCFS queue; inflight released after local service complete at assigned replica (before nested child dispatch) |
+| lb `centralized` | One global flat pool; ms uses one pull queue **per downstream target** |
+
+`--lb-subset-size > 0` is not supported with `cl` or `centralized`.
 
 ### Replica FIFO queue
 
@@ -245,13 +278,16 @@ Default push policies — for each (service, replica_idx):
     Replica(service, replica_idx) ──▶ own ReplicaBalancer.outbound
     Replica(service, replica_idx).outbound_release ──▶ own ReplicaBalancer.release_outbound
 
-CL policy — for each downstream target T:
-    DownstreamBalancer(T).outbound ──▶ Replica[j].input   (j ∈ subset for T)
+CL / centralized policy — for each downstream target T:
+    DownstreamBalancer(T).outbound ──▶ Replica[j].input   (all replicas j)
 
-CL policy — for each (service, replica_idx):
+CL / centralized policy — for each (service, replica_idx):
     OutboundGateway(service, replica_idx) ──▶ DownstreamBalancer(T) per reachable T
     Replica(service, replica_idx) ──▶ own OutboundGateway.input
     Replica(service, replica_idx).outbound_release ──▶ own OutboundGateway.release
+
+Centralized only — for each downstream target replica j:
+    Replica(T, j).pull ──▶ DownstreamBalancer(T).pull
 
 Common:
     Replica(entry, i).edge_release[api] ──▶ EdgeBalancer(api).release
@@ -357,8 +393,8 @@ cargo build --release
 | `--callgraph` | Path to callgraph JSON (required) |
 | `--load-file` | Path to per-API load JSON (`rps` + `slo_ms`) (required) |
 | `--n` | Total requests, split across APIs proportional to RPS |
-| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, or `cl` (centralized-layer outbound; push P2C). `centralized` is rejected (`lb` only). |
-| `--lb-subset-size` | Replica subset per balancer (`0` = all) |
+| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `cl` (shared push P2C outbound), or `centralized` (shared pull FCFS outbound). For `cl` / `centralized`, ingress stays push P2C on `EdgeBalancer`. |
+| `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `cl` or `centralized`. |
 | `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
 | `--seed` | Optional RNG seed for reproducible runs |
 | `--format` | `human` or `json` |

@@ -7,6 +7,7 @@ use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
@@ -238,6 +239,7 @@ impl ReplicaBalancer {
 pub struct DownstreamBalancer {
     #[serde(skip, default = "default_policy")]
     policy: Box<dyn LoadBalancePolicy>,
+    centralized: bool,
     target_microservice: String,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
@@ -247,6 +249,10 @@ pub struct DownstreamBalancer {
     server_indices: Vec<usize>,
     #[serde(skip)]
     load_scratch: Vec<u32>,
+    #[serde(skip)]
+    queue: VecDeque<OutboundCall>,
+    #[serde(skip)]
+    waiting_servers: VecDeque<usize>,
     pub outputs: Vec<Output<ReplicaInput>>,
 }
 
@@ -255,6 +261,7 @@ impl DownstreamBalancer {
         target_microservice: String,
         n_servers: usize,
         server_indices: Vec<usize>,
+        centralized: bool,
         tracer: Option<Arc<MsTracer>>,
     ) -> Self {
         debug_assert!(
@@ -263,12 +270,44 @@ impl DownstreamBalancer {
         );
         Self {
             policy: Box::new(PowerOfTwoPolicy),
+            centralized,
             target_microservice,
             tracer,
             local_inflight: vec![0; n_servers],
             load_scratch: vec![0; server_indices.len()],
             server_indices,
+            queue: VecDeque::new(),
+            waiting_servers: VecDeque::new(),
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
+        }
+    }
+
+    async fn dispatch_to_server(&mut self, server_idx: usize, mut call: OutboundCall) {
+        self.local_inflight[server_idx] += 1;
+
+        if self.centralized {
+            call.hop.slot_release = Some(OutboundRelease {
+                target_microservice: self.target_microservice.clone(),
+                target_server: server_idx,
+            });
+        } else if let Some(caller) = &mut call.hop.caller {
+            caller.outbound_target_microservice = self.target_microservice.clone();
+            caller.outbound_target_server = server_idx;
+        }
+
+        self.outputs[server_idx]
+            .send(ReplicaInput::Upstream(call.hop))
+            .await;
+    }
+
+    async fn dispatch_waiting(&mut self) {
+        while let Some(server_idx) = self.waiting_servers.pop_front() {
+            if self.queue.is_empty() {
+                self.waiting_servers.push_front(server_idx);
+                break;
+            }
+            let call = self.queue.pop_front().unwrap();
+            self.dispatch_to_server(server_idx, call).await;
         }
     }
 }
@@ -291,6 +330,25 @@ impl DownstreamBalancer {
             return;
         }
 
+        if self.centralized {
+            if let Some(tracer) = &self.tracer {
+                tracer.log(
+                    call.hop.trace,
+                    cx.time(),
+                    call.hop.request_id,
+                    &format!(
+                        "DownstreamBalancer(target={}, centralized) enqueue endpoint={} queue={}",
+                        self.target_microservice,
+                        call.hop.endpoint,
+                        self.queue.len() + 1
+                    ),
+                );
+            }
+            self.queue.push_back(call);
+            self.dispatch_waiting().await;
+            return;
+        }
+
         for (scratch, &server_idx) in self
             .load_scratch
             .iter_mut()
@@ -303,7 +361,6 @@ impl DownstreamBalancer {
             .select(&self.load_scratch)
             .min(self.load_scratch.len().saturating_sub(1));
         let global_idx = self.server_indices[local_idx];
-        self.local_inflight[global_idx] += 1;
 
         if let Some(tracer) = &self.tracer {
             tracer.log(
@@ -317,15 +374,42 @@ impl DownstreamBalancer {
             );
         }
 
-        let mut call = call;
-        if let Some(caller) = &mut call.hop.caller {
-            caller.outbound_target_microservice = self.target_microservice.clone();
-            caller.outbound_target_server = global_idx;
-        }
+        self.dispatch_to_server(global_idx, call).await;
+    }
 
-        self.outputs[global_idx]
-            .send(ReplicaInput::Upstream(call.hop))
-            .await;
+    pub async fn pull(&mut self, server_idx: usize, cx: &Context<Self>) {
+        if !self.centralized {
+            return;
+        }
+        if let Some(tracer) = &self.tracer {
+            tracer.log(
+                false,
+                cx.time(),
+                0,
+                &format!(
+                    "DownstreamBalancer(target={}, centralized) pull server={server_idx} queue={}",
+                    self.target_microservice,
+                    self.queue.len()
+                ),
+            );
+        }
+        if self.queue.is_empty() {
+            self.waiting_servers.push_back(server_idx);
+        } else {
+            let call = self.queue.pop_front().unwrap();
+            if let Some(tracer) = &self.tracer {
+                tracer.log(
+                    call.hop.trace,
+                    cx.time(),
+                    call.hop.request_id,
+                    &format!(
+                        "DownstreamBalancer(target={}, centralized) dispatch -> server={server_idx} endpoint={}",
+                        self.target_microservice, call.hop.endpoint
+                    ),
+                );
+            }
+            self.dispatch_to_server(server_idx, call).await;
+        }
     }
 
     pub async fn release(&mut self, release: OutboundRelease, _cx: &Context<Self>) {

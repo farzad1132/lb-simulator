@@ -203,7 +203,7 @@ flowchart LR
 
 | Choice | Decision | Rationale / implications |
 |--------|----------|--------------------------|
-| **Simulator scope** | `lb` only | Pull semantics require a global dispatcher and different port wiring. The `ms` simulator rejects `--lb-policy centralized` at startup. |
+| **Simulator scope** | `lb`: global flat pool | `ms`: one pull queue per downstream target (outbound only; ingress stays push P2C). See [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Push vs pull** | Pull-based | Push policies call `select()` on arrival. Centralized queues tasks at the LB; servers initiate assignment. |
 | **Queue location** | Single global queue at one central `LoadBalancer` | Even with `--clients > 1`, all Poisson sources feed the same dispatcher; per-client LBs are **not** created. |
 | **Multi-client semantics** | Arrivals split, routing unified | `--clients C` still creates C Poisson sources and splits `--n` across them (aggregate rate unchanged). Routing is through one queue — this does **not** model multiple independent frontends with partial observability. |
@@ -333,7 +333,7 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Per-client partial observability under centralized (one global queue)
 - Subset routing under centralized
 - Load-probe-based server selection under centralized (assignment is pull-order FCFS)
-- Centralized policy in the `ms` simulator
+- Centralized policy in the `ms` simulator (per-downstream-target outbound pull layer)
 - Express lane with client `--lb-policy centralized`
 
 ## Source file map

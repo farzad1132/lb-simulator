@@ -1,6 +1,6 @@
-use crate::policy::LoadBalancePolicy;
-use crate::policy::LoadBalancePolicyKind;
-use crate::policy::PowerOfTwoPolicy;
+use lb::policy::LoadBalancePolicy;
+use lb::policy::LoadBalancePolicyKind;
+use lb::policy::PowerOfTwoPolicy;
 use crate::server::Task;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;

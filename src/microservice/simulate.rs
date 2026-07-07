@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::policy::LoadBalancePolicyKind;
 use crate::rng;
+use crate::sim_util;
 use crate::subset::{self, SubsetPolicyKind};
 use super::balancer::{DownstreamBalancer, EdgeBalancer, OutboundGateway, ReplicaBalancer};
 use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
@@ -140,6 +141,7 @@ impl UserArrival {
             processing_time: Duration::ZERO,
             caller: None,
             outbound_release: None,
+            slot_release: None,
         };
         if let Some(tracer) = &self.tracer {
             tracer.log(
@@ -364,8 +366,8 @@ fn calculate_stats(
 }
 
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
-    if args.lb_policy.is_centralized() {
-        return Err("--lb-policy centralized is not supported by the ms simulator".into());
+    if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
+        return Err("--lb-subset-size is not supported with --lb-policy cl or centralized".into());
     }
     rng::enter_run(args.seed);
     let result = run_inner(args);
@@ -453,7 +455,8 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         server_idx: usize,
     }
 
-    let use_cl = args.lb_policy.is_cl();
+    let use_shared_downstream = args.lb_policy.uses_shared_downstream();
+    let use_centralized = args.lb_policy.is_centralized();
 
     let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
     let mut edge_balancer_inputs: HashMap<String, Output<Hop>> = HashMap::new();
@@ -466,18 +469,22 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         let entry_endpoint = &graph.entrypoints[api];
         let entry_microservice = microservice_for_endpoint(graph.as_ref(), entry_endpoint)?;
         let n_servers = graph.microservices[&entry_microservice].replicas as usize;
-        let server_indices = subset::assign_subset(
-            args.lb_subset_policy,
-            n_servers,
-            api_index,
-            args.lb_subset_size,
-        );
+        let server_indices = if use_shared_downstream {
+            (0..n_servers).collect()
+        } else {
+            subset::assign_subset(
+                args.lb_subset_policy,
+                n_servers,
+                api_index,
+                args.lb_subset_size,
+            )
+        };
         if args.verbose >= 1 {
             eprintln!("api {api} subset: {server_indices:?}");
         }
 
         let balancer = EdgeBalancer::new(
-            args.lb_policy.build(),
+            args.lb_policy.ingress_policy(),
             args.lb_policy,
             api.clone(),
             n_servers,
@@ -531,18 +538,13 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         nexosim::simulation::Address<DownstreamBalancer>,
     > = HashMap::new();
 
-    if use_cl {
+    if use_shared_downstream {
         let mut sorted_targets: Vec<_> = all_downstream_targets(&graph).into_iter().collect();
         sorted_targets.sort();
 
         for target in &sorted_targets {
             let n_servers = graph.microservices[target].replicas as usize;
-            let server_indices = subset::assign_subset(
-                args.lb_subset_policy,
-                n_servers,
-                0,
-                args.lb_subset_size,
-            );
+            let server_indices: Vec<usize> = (0..n_servers).collect();
             if args.verbose >= 1 {
                 eprintln!("downstream balancer {target} subset: {server_indices:?}");
             }
@@ -551,6 +553,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 target.clone(),
                 n_servers,
                 server_indices.clone(),
+                use_centralized,
                 tracer.clone(),
             );
             let mailbox = Mailbox::new();
@@ -745,6 +748,14 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         );
     }
 
+    let downstream_target_set: HashSet<String> = if use_shared_downstream {
+        all_downstream_targets(&graph)
+    } else {
+        HashSet::new()
+    };
+
+    let mut pull_registrations: Vec<(EventId<()>, u32)> = Vec::new();
+
     for microservice_id in &graph.microservice_order {
         let spec = &graph.microservices[microservice_id];
         let n_servers = spec.replicas as usize;
@@ -754,7 +765,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             let mb = server_mailboxes
                 .remove(&(microservice_id.clone(), i))
                 .expect("server mailbox");
-            let outbound = if use_cl {
+            let outbound = if use_shared_downstream {
                 outbound_gateway_outbound
                     .get(&(microservice_id.clone(), i))
                     .cloned()
@@ -779,7 +790,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             }
 
             let mut outbound_release = Output::default();
-            if use_cl {
+            if use_shared_downstream {
                 let gw_address = outbound_gateway_addresses
                     .get(&(microservice_id.clone(), i))
                     .expect("outbound gateway address");
@@ -790,6 +801,26 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     .expect("replica balancer address");
                 outbound_release.connect(ReplicaBalancer::release_outbound, rb_address);
             }
+
+            let mut pull_output = None;
+            if use_centralized && downstream_target_set.contains(microservice_id) {
+                let db_address = downstream_balancer_addresses
+                    .get(microservice_id)
+                    .expect("downstream balancer address");
+                let mut output = Output::default();
+                output.connect(DownstreamBalancer::pull, db_address);
+                pull_output = Some(output);
+            }
+
+            let pull_input = if pull_output.is_some() {
+                Some(
+                    EventSource::new()
+                        .connect(Replica::request_pull, &mb)
+                        .register(&mut bench),
+                )
+            } else {
+                None
+            };
 
             let replica = Replica::new(ReplicaConfig {
                 graph: graph.clone(),
@@ -804,8 +835,12 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 return_outputs: return_outputs.clone(),
                 completed: completed_output.clone(),
                 tracer: tracer.clone(),
+                pull_output,
             });
             bench = bench.add_model(replica, mb, &format!("{microservice_id}-server-{i}"));
+            if let Some(pull_input) = pull_input {
+                pull_registrations.push((pull_input, concurrency));
+            }
         }
     }
 
@@ -823,6 +858,10 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let t0 = MonotonicTime::EPOCH;
     let mut simu = bench.init(t0)?;
+
+    for (pull_input, concurrency) in pull_registrations {
+        sim_util::schedule_initial_pulls(&simu, &[pull_input], concurrency)?;
+    }
 
     let counts = split_by_rps(args.n, &load);
     let mut apis: Vec<_> = counts.keys().cloned().collect();

@@ -1,5 +1,4 @@
 mod load_balancer;
-mod policy;
 mod rng {
     pub use lb::rng::*;
 }
@@ -10,7 +9,8 @@ use load_balancer::LoadBalancer;
 use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
-use policy::LoadBalancePolicyKind;
+use lb::policy::LoadBalancePolicyKind;
+use lb::sim_util;
 use lb::subset::{self, SubsetPolicyKind};
 use rand::Rng;
 use serde::Serialize;
@@ -668,21 +668,6 @@ fn run_simulation(
     run_push_simulation(args, service_time, express_lane)
 }
 
-fn schedule_initial_pulls(
-    sim: &Simulation,
-    pull_inputs: &[EventId<()>],
-    concurrency: u32,
-) -> Result<(), SchedulingError> {
-    let scheduler = sim.scheduler();
-    let delay = Duration::from_secs_f32(MIN_DURATION_SECS);
-    for pull_input in pull_inputs {
-        for _ in 0..concurrency {
-            scheduler.schedule_event(delay, pull_input, ())?;
-        }
-    }
-    Ok(())
-}
-
 fn run_centralized_simulation(
     args: &Args,
     service_time: &ServiceTimeConfig,
@@ -751,7 +736,7 @@ fn run_centralized_simulation(
     let t0 = MonotonicTime::EPOCH;
     let mut simu = bench.init(t0)?;
 
-    schedule_initial_pulls(&simu, &pull_inputs, concurrency)?;
+    sim_util::schedule_initial_pulls(&simu, &pull_inputs, concurrency)?;
 
     let capacity = total_capacity as f32;
     let arrival_mean = service_time.mean / (args.load * capacity);
@@ -941,7 +926,7 @@ fn run_push_simulation(
     let mut simu = bench.init(t0)?;
 
     if !express_pull_inputs.is_empty() {
-        schedule_initial_pulls(&simu, &express_pull_inputs, concurrency)?;
+        sim_util::schedule_initial_pulls(&simu, &express_pull_inputs, concurrency)?;
     }
 
     let capacity = total_capacity as f32;
