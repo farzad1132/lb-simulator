@@ -1,6 +1,6 @@
 # lb
 
-Multi-server FCFS queue simulator with pluggable load-balancing policies. Tasks arrive according to independent Poisson processes from one or more clients, receive exponential, constant, or bimodal (mixture-of-exponentials) service times, and are routed by each client's load balancer to a shared pool of servers. Each server has its own FIFO queue and can process multiple tasks concurrently (simulating CPU cores).
+Multi-server FCFS queue simulator with pluggable load-balancing policies. Tasks arrive from one or more clients with exponential (Poisson, default) or constant inter-arrival times (`--arrival`), receive exponential, constant, or bimodal (mixture-of-exponentials) service times, and are routed by each client's load balancer to a shared pool of servers. Each server has its own FIFO queue and can process multiple tasks concurrently (simulating CPU cores).
 
 ## Architecture
 
@@ -53,7 +53,7 @@ arrival_mean = service_mean / (load × servers × concurrency)
 
 With the default exponential/constant `service_mean = 1`: `arrival_mean = 1 / (load × servers × concurrency)`.
 
-With multiple clients, each client runs an independent Poisson source at a slower rate so the aggregate load is unchanged:
+With multiple clients, each client runs an independent arrival source at a slower rate so the aggregate load is unchanged:
 
 ```
 per_client_arrival_mean = service_mean / (load × servers × concurrency × clients)
@@ -61,6 +61,31 @@ per_client_arrival_mean = service_mean / (load × servers × concurrency × clie
 ```
 
 `--n` is the total number of tasks across all clients (split evenly, with remainder distributed to the first clients).
+
+### Constant arrivals and multiple clients
+
+With `--arrival constant`, each client schedules tasks at a fixed gap of `per_client_arrival_mean`. Without phase offsetting, all clients would schedule their first task at `t=0` and repeat every `per_client_arrival_mean`, producing bursts of `C` tasks instead of a steady `1/arrival_mean` task/s stream.
+
+Client `i` (0-based) with `--clients C` uses:
+
+```
+first arrival offset for client i:  i × arrival_mean
+subsequent gaps for client i:       per_client_arrival_mean  (constant)
+```
+
+Equivalently, client `i` arrival times are `i·arrival_mean + k·(C·arrival_mean)` for `k = 0, 1, 2, …`.
+
+**Worked example** (`C=3`, `arrival_mean = 1 s`):
+
+| Client | Arrival times (s) |
+|--------|-------------------|
+| 0 | 0, 3, 6, 9, … |
+| 1 | 1, 4, 7, 10, … |
+| 2 | 2, 5, 8, 11, … |
+
+Merged global stream: 0, 1, 2, 3, 4, 5, … — uniform spacing of `arrival_mean`.
+
+With `--arrival exponential` (default), each client starts at `t=0` and samples `Exp(per_client_arrival_mean)` gaps; randomness desynchronizes clients and no phase offset is applied. Aggregate arrival-rate formulas are unchanged; only the gap distribution differs.
 
 ## Requirements
 
@@ -142,6 +167,7 @@ Options:
 |------|---------|-------------|
 | `--load` | `0.8` | Target utilization (0–1); sets inter-arrival time from service mean |
 | `--n` | `1000000` | Number of tasks |
+| `--arrival` | `exponential` | `exponential` or `constant` (inter-arrival distribution) |
 | `--service-dist` | `exponential` | `exponential`, `constant`, or `bimodal` |
 | `--service-modes` | (none) | Two exponential means for bimodal (required with `bimodal`) |
 | `--service-mode-probs` | (none) | Two mode probabilities summing to 1 (required with `bimodal`) |

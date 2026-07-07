@@ -39,6 +39,12 @@ enum ServiceDistribution {
     Bimodal,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ArrivalDistribution {
+    Exponential,
+    Constant,
+}
+
 struct BimodalConfig {
     modes: [f32; 2],
     probs: [f32; 2],
@@ -142,23 +148,49 @@ fn resolve_service_time(args: &Args) -> Result<ServiceTimeConfig, String> {
     }
 }
 
-fn exp_source(
+fn sample_inter_arrival(
+    rng: &mut impl Rng,
+    arrival_dist: ArrivalDistribution,
+    per_client_arrival_mean: f32,
+) -> f32 {
+    match arrival_dist {
+        ArrivalDistribution::Exponential => sample_exp(rng, per_client_arrival_mean),
+        ArrivalDistribution::Constant => per_client_arrival_mean.max(MIN_DURATION_SECS),
+    }
+}
+
+fn task_source(
     sim: &Simulation,
     input: &EventId<Task>,
     arrival_mean: f32,
+    per_client_arrival_mean: f32,
+    arrival_dist: ArrivalDistribution,
+    client_index: usize,
     service_time: &ServiceTimeConfig,
     n: u32,
 ) -> Result<(), SchedulingError> {
     let scheduler = sim.scheduler();
     let t0 = sim.time();
-    let mut offset = Duration::ZERO;
+    let mut offset = match arrival_dist {
+        ArrivalDistribution::Exponential => Duration::ZERO,
+        ArrivalDistribution::Constant => {
+            Duration::from_secs_f32((client_index as f32 * arrival_mean).max(MIN_DURATION_SECS))
+        }
+    };
 
     rng::with_rng(|rng| {
         for _ in 0..n {
-            offset += Duration::from_secs_f32(sample_exp(rng, arrival_mean));
+            if matches!(arrival_dist, ArrivalDistribution::Exponential) {
+                let gap = sample_inter_arrival(rng, arrival_dist, per_client_arrival_mean);
+                offset += Duration::from_secs_f32(gap);
+            }
             let duration = Duration::from_secs_f32(sample_service(rng, service_time));
             let task = Task::new(t0 + offset, duration);
             scheduler.schedule_event(offset, input, task)?;
+            if matches!(arrival_dist, ArrivalDistribution::Constant) {
+                let gap = sample_inter_arrival(rng, arrival_dist, per_client_arrival_mean);
+                offset += Duration::from_secs_f32(gap);
+            }
         }
         Ok::<(), SchedulingError>(())
     })?;
@@ -192,6 +224,8 @@ struct ServiceStats {
     regular_utilization_pct: Option<f64>,
     express_utilization_pct: Option<f64>,
     unloaded_latency_p99: f64,
+    inter_arrival: Vec<f64>,
+    inter_departure: Vec<f64>,
     e2e: Vec<f64>,
     processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
@@ -225,6 +259,8 @@ struct RunOutput {
     slo_latency: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prob_latency_gt_slo: Option<f64>,
+    inter_arrival: Vec<f64>,
+    inter_departure: Vec<f64>,
     e2e: Vec<f64>,
     processing_times: Vec<f64>,
     queueing_delays: Vec<f64>,
@@ -271,6 +307,19 @@ fn duration_secs(d: Duration) -> f64 {
     d.as_secs_f64()
 }
 
+fn time_secs(time: MonotonicTime) -> f64 {
+    duration_secs(time.duration_since(MonotonicTime::EPOCH))
+}
+
+fn consecutive_diffs(times: &[f64]) -> Vec<f64> {
+    if times.len() < 2 {
+        return Vec::new();
+    }
+    let mut sorted = times.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
 fn calculate_stats(
     output: &mut EventQueueReader<Task>,
     observation: Duration,
@@ -278,11 +327,15 @@ fn calculate_stats(
     express_lane: Option<&ExpressLaneStatsConfig>,
 ) -> Option<ServiceStats> {
     let mut task_samples: Vec<(f64, f64, bool, Option<f64>, Option<f64>)> = Vec::new();
+    let mut arrival_times: Vec<f64> = Vec::new();
+    let mut departure_times: Vec<f64> = Vec::new();
     let mut busy = Duration::ZERO;
     let mut regular_busy = Duration::ZERO;
     let mut express_busy = Duration::ZERO;
 
     while let Some(task) = output.try_read() {
+        arrival_times.push(time_secs(task.start));
+        departure_times.push(time_secs(task.finish));
         busy += task.duration;
         if task.served_by_express {
             express_busy += task.duration;
@@ -340,6 +393,8 @@ fn calculate_stats(
         .iter()
         .map(|(e2e, duration, _, _, _)| e2e - duration)
         .collect();
+    let inter_arrival = consecutive_diffs(&arrival_times);
+    let inter_departure = consecutive_diffs(&departure_times);
 
     let utilization_pct = pool_utilization_pct(busy, observation, total_capacity);
 
@@ -411,6 +466,8 @@ fn calculate_stats(
         regular_utilization_pct,
         express_utilization_pct,
         unloaded_latency_p99,
+        inter_arrival,
+        inter_departure,
         e2e,
         processing_times,
         queueing_delays,
@@ -517,6 +574,8 @@ struct Args {
     n: u32,
     #[arg(long, value_enum, default_value_t = ServiceDistribution::Exponential)]
     service_dist: ServiceDistribution,
+    #[arg(long, value_enum, default_value_t = ArrivalDistribution::Exponential)]
+    arrival: ArrivalDistribution,
     #[arg(long, value_delimiter = ',')]
     service_modes: Option<Vec<f32>>,
     #[arg(long, value_delimiter = ',')]
@@ -742,12 +801,15 @@ fn run_centralized_simulation(
     let arrival_mean = service_time.mean / (args.load * capacity);
     let per_client_arrival_mean = arrival_mean * n_clients as f32;
 
-    for (input, &client_n) in inputs.iter().zip(task_counts.iter()) {
+    for (client_index, (input, &client_n)) in inputs.iter().zip(task_counts.iter()).enumerate() {
         if client_n > 0 {
-            exp_source(
+            task_source(
                 &simu,
                 input,
+                arrival_mean,
                 per_client_arrival_mean,
+                args.arrival,
+                client_index,
                 service_time,
                 client_n,
             )?;
@@ -933,12 +995,15 @@ fn run_push_simulation(
     let arrival_mean = service_time.mean / (args.load * capacity);
     let per_client_arrival_mean = arrival_mean * n_clients as f32;
 
-    for (input, &client_n) in inputs.iter().zip(task_counts.iter()) {
+    for (client_index, (input, &client_n)) in inputs.iter().zip(task_counts.iter()).enumerate() {
         if client_n > 0 {
-            exp_source(
+            task_source(
                 &simu,
                 input,
+                arrival_mean,
                 per_client_arrival_mean,
+                args.arrival,
+                client_index,
                 service_time,
                 client_n,
             )?;
@@ -981,6 +1046,8 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             unloaded_latency_p99: stats.unloaded_latency_p99,
             slo_latency,
             prob_latency_gt_slo,
+            inter_arrival: stats.inter_arrival,
+            inter_departure: stats.inter_departure,
             e2e: stats.e2e,
             processing_times: stats.processing_times,
             queueing_delays: stats.queueing_delays,
@@ -1002,6 +1069,8 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             unloaded_latency_p99: 0.0,
             slo_latency,
             prob_latency_gt_slo,
+            inter_arrival: Vec::new(),
+            inter_departure: Vec::new(),
             e2e: Vec::new(),
             processing_times: Vec::new(),
             queueing_delays: Vec::new(),
@@ -1516,6 +1585,82 @@ mod tests {
                 "pre({pre}) + post({post}) should equal express queueing ({total})"
             );
         }
+    }
+
+    #[test]
+    fn constant_arrival_single_client_has_uniform_inter_arrival() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--arrival",
+            "constant",
+            "--clients",
+            "1",
+            "--n",
+            "50",
+            "--seed",
+            "42",
+        ])
+        .unwrap();
+        let express_lane = validate_expresslane(&args).unwrap();
+        let service_time = resolve_service_time(&args).unwrap();
+        let capacity = args.servers.max(1) * args.concurrency.max(1);
+        let arrival_mean = service_time.mean / (args.load * capacity as f32);
+        rng::enter_run(args.seed);
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        rng::exit_run();
+        let stats = stats.expect("expected completed tasks");
+        assert_eq!(stats.inter_arrival.len(), 49);
+        for gap in &stats.inter_arrival {
+            assert!(
+                (gap - f64::from(arrival_mean)).abs() < 1e-6,
+                "expected inter-arrival {arrival_mean}, got {gap}"
+            );
+        }
+    }
+
+    #[test]
+    fn constant_arrival_multi_client_offsets_produce_uniform_global_spacing() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--arrival",
+            "constant",
+            "--clients",
+            "3",
+            "--n",
+            "30",
+            "--seed",
+            "42",
+        ])
+        .unwrap();
+        let express_lane = validate_expresslane(&args).unwrap();
+        let service_time = resolve_service_time(&args).unwrap();
+        let capacity = args.servers.max(1) * args.concurrency.max(1);
+        let arrival_mean = service_time.mean / (args.load * capacity as f32);
+        rng::enter_run(args.seed);
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        rng::exit_run();
+        let stats = stats.expect("expected completed tasks");
+        assert_eq!(stats.inter_arrival.len(), 29);
+        for gap in &stats.inter_arrival {
+            assert!(
+                (gap - f64::from(arrival_mean)).abs() < 1e-6,
+                "expected global inter-arrival {arrival_mean}, got {gap}"
+            );
+        }
+    }
+
+    #[test]
+    fn inter_arrival_and_departure_lengths_match_task_count() {
+        let args = Args::try_parse_from(["lb", "--n", "500", "--seed", "42"]).unwrap();
+        let express_lane = validate_expresslane(&args).unwrap();
+        let service_time = resolve_service_time(&args).unwrap();
+        rng::enter_run(args.seed);
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        rng::exit_run();
+        let stats = stats.expect("expected completed tasks");
+        assert_eq!(stats.inter_arrival.len(), 499);
+        assert_eq!(stats.inter_departure.len(), 499);
+        assert_eq!(stats.e2e.len(), 500);
     }
 
     #[test]

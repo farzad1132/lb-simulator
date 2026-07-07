@@ -4,7 +4,7 @@ This repo ships two simulators built on the same load-balancing primitives:
 
 | Binary | Purpose | Deep dive |
 |--------|---------|-----------|
-| **`lb`** | Flat pool of FCFS servers; Poisson task arrivals from one or more clients | [lb-simulation.md](lb-simulation.md) |
+| **`lb`** | Flat pool of FCFS servers; configurable task arrivals from one or more clients | [lb-simulation.md](lb-simulation.md) |
 | **`ms`** | Callgraph of microservices; nested synchronous RPCs with queueing at each replica | [microservice-simulation.md](microservice-simulation.md) |
 
 Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/subset.rs`](../src/subset.rs) for server/replica subset assignment.
@@ -19,13 +19,14 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
-| Poisson arrivals | yes | yes | lb: from `--load`; ms: per-API `rps` in `load.json` |
+| Poisson arrivals | yes | yes | lb: from `--load` (exponential default); ms: per-API `rps` in `load.json` |
+| Arrival distribution | yes | — | lb: `--arrival exponential|constant`; ms: exponential only |
 | SLO violation rate | yes | yes | lb: optional `--slo` (seconds); ms: `slo_ms` per API in `load.json` |
 | Unloaded latency p99 | yes | yes | lb: p99 of service durations; ms: p99 of `processing_time_ms` |
 | **Express lane** | yes | — | lb-only; see [expresslane.md](expresslane.md) |
 | **Centralized pull dispatch** | yes | yes | lb: one global queue; servers pull on spare capacity. ms: one pull queue per downstream target (outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
-| Multiple ingress client LBs | yes | — | `--clients`: independent Poisson sources; push policies use one LB per client; centralized uses one shared dispatcher |
+| Multiple ingress client LBs | yes | — | `--clients`: independent arrival sources; push policies use one LB per client; centralized uses one shared dispatcher |
 | Per-API ingress LB | — | yes | `EdgeBalancer`: one per API, routes user traffic to entry replicas |
 | Per-replica outbound LB | — | yes | `ReplicaBalancer`: one per replica (default push policies) |
 | Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl` or `centralized`) |
@@ -139,13 +140,19 @@ Full design: [expresslane.md](expresslane.md).
 
 ### Multiple ingress clients
 
-`--clients C` creates C independent Poisson sources and C load balancers. Aggregate arrival rate is unchanged (`per_client_arrival_mean = arrival_mean × C`); `--n` is split evenly across clients.
+`--clients C` creates C independent arrival sources and C load balancers. Aggregate arrival rate is unchanged (`per_client_arrival_mean = arrival_mean × C`); `--n` is split evenly across clients.
+
+With `--arrival constant`, client `i` (0-based) schedules its first task at `i × arrival_mean`, then every `per_client_arrival_mean` thereafter. Without this phase offsetting, all clients would fire in lockstep every `per_client_arrival_mean`, producing bursts of `C` tasks instead of uniform global spacing of `arrival_mean`. Example with `C=3`, `arrival_mean = 1 s`: client 0 at 0, 3, 6, …; client 1 at 1, 4, 7, …; client 2 at 2, 5, 8, ….
+
+With `--arrival exponential` (default), each client starts at `t=0` and samples `Exp(per_client_arrival_mean)` gaps; randomness desynchronizes clients and no offset is applied.
 
 ### Flat topology and service distributions
 
 Configure pool size and load directly: `--servers`, `--concurrency`, `--load`.
 
 Service time sampling: `--service-dist exponential|constant|bimodal` with optional `--service-modes` / `--service-mode-probs`. Default exponential/constant mean is 1 second.
+
+Inter-arrival sampling: `--arrival exponential|constant` (default `exponential`). See [lb-simulation.md](lb-simulation.md#inter-arrival-distribution) for constant-mode multi-client phase offsetting.
 
 ### Optional SLO
 

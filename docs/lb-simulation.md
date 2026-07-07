@@ -6,12 +6,12 @@ See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the microserv
 
 ## Overview
 
-The simulator models a pool of FCFS servers with configurable concurrency (CPU cores). Tasks arrive as independent Poisson processes from one or more clients, are routed to a shared server pool, and complete with sampled service times. Completed tasks are collected in a shared sink for post-run metrics.
+The simulator models a pool of FCFS servers with configurable concurrency (CPU cores). Tasks arrive from one or more clients with exponential (Poisson, default) or constant inter-arrival times (`--arrival`), are routed to a shared server pool, and complete with sampled service times. Completed tasks are collected in a shared sink for post-run metrics.
 
 **Push policies** (default): each client has its own load balancer that pushes tasks to servers on arrival.
 
 ```
-Poisson source(s) ──▶ LoadBalancer(s) ──▶ Server(s) ──▶ shared stats sink
+arrival source(s) ──▶ LoadBalancer(s) ──▶ Server(s) ──▶ shared stats sink
                             ▲                  │
                             └── release ───────┘
 ```
@@ -24,7 +24,7 @@ With `--clients 1` and a push policy, this reduces to a single source → load b
 
 | Entity | Count (push policies) | Count (`centralized`) | Role |
 |--------|----------------------|------------------------|------|
-| **Poisson source** (`exp_source` in `src/main.rs`) | one per client | one per client | Schedules `Task` arrivals at derived inter-arrival times |
+| **Arrival source** (`task_source` in `src/main.rs`) | one per client | one per client | Schedules `Task` arrivals with exponential or constant inter-arrival gaps |
 | **LoadBalancer** (`src/load_balancer.rs`) | `--clients` | **1** | Routes tasks to servers (push on arrival, or pull-based queue) |
 | **Server** (`src/server.rs`) | `--servers` | `--servers` | FCFS queue + `--concurrency` concurrent workers (no local queue under centralized) |
 | **Stats sink** (`event_queue`) | 1 shared | 1 shared | Collects completed tasks for post-run metrics |
@@ -63,7 +63,7 @@ flowchart TB
 Each load balancer has:
 
 - **One mailbox** shared by two input handlers on the same address:
-  - `LoadBalancer::input` — receives `Task` from the client's Poisson source
+  - `LoadBalancer::input` — receives `Task` from the client's arrival source
   - `LoadBalancer::release` — receives `usize` (server index) when a task completes
 - **`outputs: Vec<Output<Task>>`** — length equals total server count; `outputs[j]` connects to `Server::input` on server `j`'s mailbox
 
@@ -89,7 +89,7 @@ Simulations always run on a **single-threaded** nexosim executor (`SimInit::with
 
 ```
 For each client i:
-    Poisson source ──▶ LoadBalancer_i.input
+    arrival source ──▶ LoadBalancer_i.input
 
 For each load balancer i and server j:
     LoadBalancer_i.outputs[j] ──▶ Server_j.input
@@ -107,14 +107,14 @@ A **Task** is the unit of work flowing through the simulation.
 
 | Field | Set when | Purpose |
 |-------|----------|---------|
-| `start` | Poisson source | E2e latency start time |
-| `duration` | Poisson source | Sampled service time (exponential or constant) |
+| `start` | Arrival source | E2e latency start time |
+| `duration` | Arrival source | Sampled service time (exponential, constant, or bimodal) |
 | `finish` | `Server::complete` | E2e latency end time |
 | `lb_id` | LoadBalancer before dispatch | Routes release notification back to the correct LB |
 
 ### End-to-end flow
 
-1. **Arrival.** `exp_source` schedules `Task { start, duration }` to the client's load balancer `input`.
+1. **Arrival.** `task_source` schedules `Task { start, duration }` to the client's load balancer `input`.
 2. **Routing.** The load balancer fills a scratch buffer with local inflight values for servers in its subset, calls the policy to pick a server, increments `local_inflight[server]`, sets `task.lb_id`, and sends the task on `outputs[server]`.
 3. **Queueing.** The server accepts the task into service immediately if `in_flight < max_concurrency`, otherwise pushes it onto a FIFO queue.
 4. **Service.** `begin_service` increments `in_flight` and schedules a completion event after `task.duration`.
@@ -177,8 +177,8 @@ With `--lb-policy centralized`, routing is **pull-based** instead of push-on-arr
 ```mermaid
 flowchart LR
   subgraph clients [Clients]
-    ES0["Poisson source 0"]
-    ES1["Poisson source 1"]
+    ES0["arrival source 0"]
+    ES1["arrival source 1"]
   end
   subgraph central [CentralDispatcher]
     Q["FIFO queue"]
@@ -205,8 +205,8 @@ flowchart LR
 |--------|----------|--------------------------|
 | **Simulator scope** | `lb`: global flat pool | `ms`: one pull queue per downstream target (outbound only; ingress stays push P2C). See [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Push vs pull** | Pull-based | Push policies call `select()` on arrival. Centralized queues tasks at the LB; servers initiate assignment. |
-| **Queue location** | Single global queue at one central `LoadBalancer` | Even with `--clients > 1`, all Poisson sources feed the same dispatcher; per-client LBs are **not** created. |
-| **Multi-client semantics** | Arrivals split, routing unified | `--clients C` still creates C Poisson sources and splits `--n` across them (aggregate rate unchanged). Routing is through one queue — this does **not** model multiple independent frontends with partial observability. |
+| **Queue location** | Single global queue at one central `LoadBalancer` | Even with `--clients > 1`, all arrival sources feed the same dispatcher; per-client LBs are **not** created. |
+| **Multi-client semantics** | Arrivals split, routing unified | `--clients C` still creates C arrival sources and splits `--n` across them (aggregate rate unchanged). Routing is through one queue — this does **not** model multiple independent frontends with partial observability. |
 | **Subset routing** | Ignored when centralized | `--lb-subset-size` and `--lb-subset-policy` have no effect; all servers pull from the global queue. |
 | **Pull trigger** | Spare capacity | A server sends a pull whenever `in_flight < max_concurrency`. One pull requests one task; after each completion, one new pull is sent. At sim start, `concurrency` pulls per server are scheduled so the pool is warm. |
 | **Assignment order** | FCFS on both sides | Tasks dequeue from the front of the LB queue. Waiting pullers are tracked in FIFO order. First waiter gets the next task — no load comparison or random tie-break. |
@@ -218,7 +218,7 @@ flowchart LR
 
 ### Port wiring (centralized)
 
-- **`LoadBalancer::input`** — receives `Task` from all Poisson sources; enqueues and tries to match waiting pullers
+- **`LoadBalancer::input`** — receives `Task` from all arrival sources; enqueues and tries to match waiting pullers
 - **`LoadBalancer::pull`** — receives `usize` (server index); dispatches a queued task or records the server as waiting
 - **`LoadBalancer::release`** — receives `usize` (server index) on task completion
 - **`LoadBalancer::outputs[j]`** → `Server::input`
@@ -227,7 +227,7 @@ flowchart LR
 
 ### Task lifecycle (centralized)
 
-1. **Arrival.** `exp_source` schedules a task to the central load balancer `input`.
+1. **Arrival.** `task_source` schedules a task to the central load balancer `input`.
 2. **Enqueue.** The load balancer pushes the task onto its FIFO queue and assigns it to the first waiting puller if any.
 3. **Pull.** When a server has spare capacity, it sends a pull. If the queue is non-empty, the LB dispatches the front task; otherwise the server is recorded as waiting.
 4. **Service.** The server starts service immediately (no local queue). `begin_service` schedules completion after `task.duration`.
@@ -259,13 +259,55 @@ arrival_mean = service_mean / (load × total_capacity)
 
 With the default exponential/constant service mean of 1 s: `arrival_mean = 1 / (load × servers × concurrency)`.
 
-With multiple clients (`--clients C`), each client runs an independent Poisson source at a slower rate so aggregate load is unchanged:
+With multiple clients (`--clients C`), each client runs an independent arrival source at a slower rate so aggregate load is unchanged:
 
 ```
 per_client_arrival_mean = arrival_mean × clients
 ```
 
 Total task count `--n` is split evenly across clients via `split_tasks()` (remainder goes to the first clients).
+
+### Inter-arrival distribution
+
+Controlled by `--arrival` (default `exponential`):
+
+- **exponential** (default): each client starts at `t=0` and samples `Exp(mean = per_client_arrival_mean)` gaps. Randomness desynchronizes clients; no phase offset is applied.
+- **constant**: each client uses a fixed gap of `per_client_arrival_mean`. Client `i` (0-based) schedules its first task at `i × arrival_mean`, then every `per_client_arrival_mean` thereafter.
+
+Without phase offsetting in constant mode, all clients would schedule their first task at `t=0` and repeat every `per_client_arrival_mean`, producing bursts of `C` tasks instead of a steady `1/arrival_mean` task/s stream.
+
+Scheduling rule for client `i` with `--clients C`:
+
+```
+first arrival offset for client i:  i × arrival_mean
+subsequent gaps for client i:       per_client_arrival_mean  (constant)
+```
+
+Equivalently, client `i` arrival times are `i·arrival_mean + k·(C·arrival_mean)` for `k = 0, 1, 2, …`.
+
+**Worked example** (`C=3`, `arrival_mean = 1 s`):
+
+| Client | Arrival times (s) |
+|--------|-------------------|
+| 0 | 0, 3, 6, 9, … |
+| 1 | 1, 4, 7, 10, … |
+| 2 | 2, 5, 8, 11, … |
+
+Merged global stream: 0, 1, 2, 3, 4, 5, … — uniform spacing of `arrival_mean`.
+
+```mermaid
+sequenceDiagram
+  participant C0 as Client0
+  participant C1 as Client1
+  participant C2 as Client2
+  Note over C0,C2: arrival_mean=1s, C=3
+  C0->>C0: t=0
+  C1->>C1: t=1
+  C2->>C2: t=2
+  C0->>C0: t=3
+  C1->>C1: t=4
+  C2->>C2: t=5
+```
 
 Service duration is sampled per task as:
 
@@ -305,7 +347,7 @@ Example: reference centralized with 10 servers at `load = 0.1` → 1 task/s. Pow
 
 [`plot_lb_centralized_compare.py`](../plot_lb_centralized_compare.py) automates this sweep. Default configs compare centralized (10 srv) against power-of-two at 10, 11, 12, and 13 servers, all with 10 clients. Edit `DEFAULT_CONFIGS` at the top of that script to change topologies.
 
-Note: `--clients` does not change aggregate arrival rate (each client's Poisson rate is scaled down). Client count still affects push policies through per-client partial observability; centralized uses one global queue regardless of client count.
+Note: `--clients` does not change aggregate arrival rate (each client's rate is scaled down). With `--arrival constant`, phase offsetting (above) preserves uniform global spacing; with `--arrival exponential`, randomness desynchronizes clients. Client count still affects push policies through per-client partial observability; centralized uses one global queue regardless of client count.
 
 ## Metrics
 
@@ -340,7 +382,7 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 
 | File | Responsibility |
 |------|----------------|
-| `src/main.rs` | CLI, simulation assembly, Poisson source, metrics |
+| `src/main.rs` | CLI, simulation assembly, arrival source, metrics |
 | `src/load_balancer.rs` | Routing, local inflight tracking, release handler |
 | `src/server.rs` | Queueing, concurrency, completion, release notifications |
 | `src/policy.rs` | Load-balancing algorithms |
