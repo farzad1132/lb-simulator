@@ -5,7 +5,7 @@ use super::hop::{
 };
 use super::microservice_stats::MicroserviceVisitTracker;
 use super::trace::MsTracer;
-use crate::scheduling::{SchedulingPolicyKind, edf_insert_index_in_mixed_queue};
+use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
@@ -97,22 +97,18 @@ impl Replica {
             SchedulingPolicyKind::Fifo => {
                 self.queue.push_back(work);
             }
-            SchedulingPolicyKind::Edf => match work {
-                ReplicaWork::DownstreamReturn(_) => {
-                    self.queue.push_back(work);
-                }
-                ReplicaWork::Upstream(hop) => {
-                    let deadline = hop.deadline;
-                    let insert_at = edf_insert_index_in_mixed_queue(
-                        self.queue.iter().map(|w| match w {
-                            ReplicaWork::Upstream(h) => (true, h.deadline),
-                            ReplicaWork::DownstreamReturn(_) => (false, deadline),
-                        }),
-                        deadline,
-                    );
-                    self.queue.insert(insert_at, ReplicaWork::Upstream(hop));
-                }
-            },
+            SchedulingPolicyKind::Edf => {
+                let deadline = match &work {
+                    ReplicaWork::Upstream(h) | ReplicaWork::DownstreamReturn(h) => h.deadline,
+                };
+                let insert_at = edf_insert_index(
+                    self.queue.iter().map(|w| match w {
+                        ReplicaWork::Upstream(h) | ReplicaWork::DownstreamReturn(h) => h.deadline,
+                    }),
+                    deadline,
+                );
+                self.queue.insert(insert_at, work);
+            }
         }
     }
 
@@ -295,7 +291,12 @@ impl Replica {
         match msg {
             ReplicaInput::Upstream(hop) => {
                 if let Ok(mut tracker) = self.visit_tracker.lock() {
-                    tracker.record_arrival(hop.request_id, &self.microservice_id, cx.time());
+                    tracker.record_arrival(
+                        hop.request_id,
+                        &self.microservice_id,
+                        cx.time(),
+                        hop.deadline,
+                    );
                 }
                 if hop.slot_release.is_some() {
                     self.trace(

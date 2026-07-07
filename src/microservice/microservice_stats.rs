@@ -8,6 +8,7 @@ const SECS_TO_MS: f64 = 1000.0;
 #[derive(Default)]
 struct ActiveVisit {
     arrival: MonotonicTime,
+    slack_d_ms: f64,
     queueing_delay: Option<Duration>,
     local_processing: Duration,
 }
@@ -19,6 +20,7 @@ struct MicroserviceSamples {
     response_time_ms: Vec<f64>,
     queueing_delay_ms: Vec<f64>,
     processing_time_ms: Vec<f64>,
+    slack_d_ms: Vec<f64>,
 }
 
 #[derive(Serialize)]
@@ -28,6 +30,7 @@ pub struct MicroserviceStats {
     pub response_time_ms: Vec<f64>,
     pub queueing_delay_ms: Vec<f64>,
     pub processing_time_ms: Vec<f64>,
+    pub slack_d_ms: Vec<f64>,
 }
 
 #[derive(Default)]
@@ -41,11 +44,20 @@ impl MicroserviceVisitTracker {
         Self::default()
     }
 
-    pub fn record_arrival(&mut self, request_id: u64, microservice_id: &str, arrival: MonotonicTime) {
+    pub fn record_arrival(
+        &mut self,
+        request_id: u64,
+        microservice_id: &str,
+        arrival: MonotonicTime,
+        deadline: MonotonicTime,
+    ) {
+        let arrival_ms = time_to_ms(arrival);
+        let deadline_ms = time_to_ms(deadline);
         self.active.insert(
             (request_id, microservice_id.to_string()),
             ActiveVisit {
                 arrival,
+                slack_d_ms: deadline_ms - arrival_ms,
                 ..Default::default()
             },
         );
@@ -112,6 +124,7 @@ impl MicroserviceVisitTracker {
         samples
             .processing_time_ms
             .push(visit.local_processing.as_secs_f64() * SECS_TO_MS);
+        samples.slack_d_ms.push(visit.slack_d_ms);
     }
 
     pub fn into_stats(&self, microservice_order: &[String]) -> HashMap<String, MicroserviceStats> {
@@ -128,11 +141,18 @@ impl MicroserviceVisitTracker {
                     response_time_ms: samples.response_time_ms.clone(),
                     queueing_delay_ms: samples.queueing_delay_ms.clone(),
                     processing_time_ms: samples.processing_time_ms.clone(),
+                    slack_d_ms: samples.slack_d_ms.clone(),
                 },
             );
         }
         out
     }
+}
+
+fn time_to_ms(time: MonotonicTime) -> f64 {
+    time.duration_since(MonotonicTime::EPOCH)
+        .as_secs_f64()
+        * SECS_TO_MS
 }
 
 fn consecutive_diffs(times_ms: &[f64]) -> Vec<f64> {

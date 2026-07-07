@@ -9,16 +9,16 @@ pub enum SchedulingPolicyKind {
     Edf,
 }
 
-/// Returns the index at which a new upstream hop should be inserted in a mixed queue.
-/// `is_upstream[i]` is true when queue position `i` holds an upstream item; paired
-/// deadlines are only read for upstream positions.
-pub fn edf_insert_index_in_mixed_queue(
-    items: impl Iterator<Item = (bool, MonotonicTime)>,
+/// Returns the index at which a new queue item should be inserted by deadline.
+/// Scans front to back; inserts before the first item with a strictly later deadline.
+/// Equal deadlines insert after existing ties (FIFO among ties).
+pub fn edf_insert_index(
+    deadlines: impl Iterator<Item = MonotonicTime>,
     new_deadline: MonotonicTime,
 ) -> usize {
     let mut index = 0usize;
-    for (is_upstream, deadline) in items {
-        if is_upstream && deadline > new_deadline {
+    for deadline in deadlines {
+        if deadline > new_deadline {
             return index;
         }
         index += 1;
@@ -36,38 +36,37 @@ mod tests {
     }
 
     #[test]
-    fn edf_inserts_before_first_strictly_later_upstream() {
-        let items = [
-            (true, t(120)),
-            (true, t(200)),
-            (false, t(0)),
-        ];
-        let idx = edf_insert_index_in_mixed_queue(items.into_iter(), t(150));
+    fn edf_inserts_before_first_strictly_later_deadline() {
+        let items = [t(120), t(200), t(0)];
+        let idx = edf_insert_index(items.into_iter(), t(150));
         assert_eq!(idx, 1);
     }
 
     #[test]
-    fn edf_appends_when_no_later_upstream() {
-        let items = [(true, t(100)), (true, t(120))];
-        let idx = edf_insert_index_in_mixed_queue(items.into_iter(), t(200));
+    fn edf_appends_when_no_later_deadline() {
+        let items = [t(100), t(120)];
+        let idx = edf_insert_index(items.into_iter(), t(200));
         assert_eq!(idx, 2);
     }
 
     #[test]
-    fn edf_skips_returns_when_scanning() {
-        let items = [
-            (true, t(100)),
-            (false, t(0)),
-            (true, t(180)),
-        ];
-        let idx = edf_insert_index_in_mixed_queue(items.into_iter(), t(150));
-        assert_eq!(idx, 2);
+    fn edf_return_inserts_before_later_deadline() {
+        let items = [t(120), t(180)];
+        let idx = edf_insert_index(items.into_iter(), t(150));
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn edf_mixed_queue_orders_by_deadline() {
+        let items = [t(100), t(160), t(180)];
+        let idx = edf_insert_index(items.into_iter(), t(150));
+        assert_eq!(idx, 1);
     }
 
     #[test]
     fn edf_equal_deadline_inserts_after_existing() {
-        let items = [(true, t(120)), (true, t(200))];
-        let idx = edf_insert_index_in_mixed_queue(items.into_iter(), t(120));
+        let items = [t(120), t(200)];
+        let idx = edf_insert_index(items.into_iter(), t(120));
         assert_eq!(idx, 1);
     }
 }

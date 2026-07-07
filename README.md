@@ -103,7 +103,7 @@ cargo build --release
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `cl` or `centralized`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
-| `--scheduling` | `fifo` | Server queue discipline (`fifo` or `edf`); see [docs/scheduling.md](docs/scheduling.md) |
+| `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`); see [docs/scheduling.md](docs/scheduling.md) |
 | `--format` | `human` | `human` or `json` |
 | `--scale` | `0` | Add this many cores and replicas to every microservice |
 
@@ -508,7 +508,7 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--n` | `100000` | Requests per run |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `centralized`) |
 | `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas) |
-| `--scheduling` | `fifo` | Server queue discipline (`fifo` or `edf`) |
+| `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`) |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |
 
 ## Compare lb and ms simulators

@@ -6,7 +6,7 @@ See also: [microservice-simulation.md](microservice-simulation.md) for overall r
 
 ## Overview
 
-Each replica (server) has a local queue. By default, the queue is **FIFO** (`--scheduling fifo`). With **EDF** (Earliest Deadline First, `--scheduling edf`), newly arriving upstream work is inserted by deadline so the server tends to serve requests closest to their SLO deadline first.
+Each replica (server) has a local queue. By default, the queue is **FIFO** (`--scheduling fifo`). With **EDF** (Earliest Deadline First, `--scheduling edf`), newly arriving work — both upstream arrivals and downstream returns — is inserted by deadline so the server tends to serve requests closest to their SLO deadline first.
 
 Scheduling applies only to **replica queues**. It does not reorder work at shared `DownstreamBalancer` pull queues used by `--lb-policy centralized`.
 
@@ -35,7 +35,7 @@ deadline = arrival_time + slo_ms
 ```
 
 - `slo_ms` comes from `load.json` for that API (or `--slo-ms` override).
-- The deadline is stored on the `Hop` and propagated to all downstream hops of the same request via `clone`.
+- The deadline is stored on the `Hop` and propagated to all downstream hops and returns of the same request via `clone`.
 - Deadlines are used only for EDF enqueue ordering; SLO violation reporting still uses `slo_ms` from the load file.
 
 ## Queue item types
@@ -54,11 +54,13 @@ Both kinds share one queue and both require a free concurrency slot to be dequeu
 | | **Upstream** (new arrivals) | **DownstreamReturn** (continuations) |
 |---|---------------------------|--------------------------------------|
 | **`fifo` (default)** | Appended to the back (`push_back`). Served in strict arrival order. | Appended to the back (`push_back`). Same FIFO discipline. |
-| **`edf`** | Inserted among waiting **Upstream** items by deadline (earliest first). Uses the request deadline set at user arrival. | Always appended to the back (`push_back`). **Not reordered.** |
+| **`edf`** | Inserted by deadline (earliest first). Uses the request deadline set at user arrival. | Inserted by deadline (earliest first). Uses the same propagated request deadline. |
 
 **Dequeue (both policies):** `drain_queue` always `pop_front`. The scheduling policy only affects **enqueue placement**.
 
-**Why returns are not reordered under EDF:** a return is not a new request — it is the caller resuming work already in flight. Reordering returns would change continuation ordering relative to when downstream completed. Under EDF, only newly arriving upstream work is repositioned.
+**Insertion rule:** scan from the front; insert before the first queue item whose deadline is strictly greater than the new hop's deadline. Existing items are not moved.
+
+**Tie-breaking:** equal deadlines insert after existing items with the same deadline (FIFO among ties).
 
 ## EDF insertion example
 
@@ -67,7 +69,7 @@ Suppose a replica is at capacity and its queue holds:
 ```
 front ──▶  [Upstream  req=1  deadline=120ms]
            [Upstream  req=2  deadline=200ms]
-           [Return    req=3]
+           [Return    req=3  deadline=180ms]
 back  ──▶
 ```
 
@@ -80,22 +82,18 @@ back  ──▶
 | `fifo` | `[req=1] [req=2] [req=3] [req=4]` |
 | `edf` | `[req=1] [req=4] [req=2] [req=3]` |
 
-Under EDF, req=4 inserts before req=2 (first upstream with a strictly later deadline). req=3 stays in place.
-
-**Insertion rule:** scan from the front; insert before the first `Upstream` whose deadline is strictly greater than the new hop's deadline. `DownstreamReturn` items are skipped by the scan but not moved.
-
-**Tie-breaking:** equal deadlines insert after existing upstream items with the same deadline (FIFO among ties).
+Under EDF, req=4 inserts before req=2 (first item with a strictly later deadline). req=3 stays in place — insertion does not reorder existing items.
 
 ### New downstream return
 
-**req=5** returns to the same starting queue:
+**req=5** returns to the same starting queue with `deadline=150ms`:
 
 | Policy | Resulting queue (front → back) |
 |--------|-------------------------------|
 | `fifo` | `[req=1] [req=2] [req=3] [req=5]` |
-| `edf` | `[req=1] [req=2] [req=3] [req=5]` |
+| `edf` | `[req=1] [req=5] [req=2] [req=3]` |
 
-Returns always append to the back under both policies.
+Under EDF, returns use the same insertion rule as upstream arrivals. req=5 inserts before req=2 (deadline 200ms) and req=3 (deadline 180ms).
 
 ## Independence from load balancing
 
@@ -104,7 +102,7 @@ Scheduling does not change:
 - Which server a load balancer selects (`EdgeBalancer`, `ReplicaBalancer`, `DownstreamBalancer`)
 - Shared `DownstreamBalancer` pull queue ordering (always FIFO under `centralized`)
 
-Scheduling only changes the order in which a replica dequeues waiting **Upstream** items.
+Scheduling only changes the order in which a replica dequeues waiting queue items.
 
 ## Interaction with LB policies
 

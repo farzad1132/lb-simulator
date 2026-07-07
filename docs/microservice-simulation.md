@@ -245,7 +245,7 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 
 ### Replica queue
 
-Each replica has one queue holding upstream arrivals and downstream returns. Default discipline is FIFO; EDF (`--scheduling edf`) reorders upstream items by deadline on enqueue. See [scheduling.md](scheduling.md) for upstream vs return behavior under each policy.
+Each replica has one queue holding upstream arrivals and downstream returns. Default discipline is FIFO; EDF (`--scheduling edf`) reorders all queue items by deadline on enqueue. See [scheduling.md](scheduling.md) for queue behavior under each policy.
 
 | Kind | Handler |
 |------|---------|

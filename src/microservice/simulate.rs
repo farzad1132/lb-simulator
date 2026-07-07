@@ -1183,10 +1183,37 @@ mod tests {
         assert!(api.prob_latency_gt_slo > 0.0);
     }
 
-    #[test]
-    fn chain3_by_microservice_visit_metrics() {
+    fn assert_chain3_visit_metrics(stats: &MsStats, slo_ms: f64) {
+        let chain = ["frontend", "backend1", "backend2"];
+        let mut mean_slack = [0.0; 3];
+        for (idx, ms) in chain.iter().enumerate() {
+            let ms_stats = &stats.by_microservice[*ms];
+            assert_eq!(ms_stats.response_time_ms.len(), 500, "{ms}");
+            assert_eq!(ms_stats.inter_arrival_ms.len(), 499, "{ms}");
+            assert_eq!(ms_stats.slack_d_ms.len(), 500, "{ms}");
+            mean_slack[idx] = ms_stats.slack_d_ms.iter().sum::<f64>() / 500.0;
+            for i in 0..500 {
+                assert!(
+                    ms_stats.queueing_delay_ms[i] + ms_stats.processing_time_ms[i]
+                        <= ms_stats.response_time_ms[i] + 1e-6,
+                    "{ms} visit {i}"
+                );
+            }
+        }
+        assert!(
+            mean_slack[0] > slo_ms - 1.0 && mean_slack[0] <= slo_ms,
+            "frontend mean slack {mean_slack:?} vs slo_ms={slo_ms}"
+        );
+        assert!(
+            mean_slack[0] > mean_slack[1] && mean_slack[1] > mean_slack[2],
+            "mean slack should decrease down chain: {mean_slack:?}"
+        );
+        assert!(stats.total_processing_p99_ms > 0.0);
+    }
+
+    fn chain3_visit_stats(scheduling: SchedulingPolicyKind) -> MsStats {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let stats = run(&MsArgs {
+        run(&MsArgs {
             callgraph: root.join("tests/chain/3/callgraph.json"),
             load_file: root.join("tests/chain/3/load.json"),
             n: 500,
@@ -1201,24 +1228,16 @@ mod tests {
             trace_limit: 5,
             scale: 0,
             verbose: 0,
-            scheduling: SchedulingPolicyKind::Fifo,
+            scheduling,
         })
         .unwrap()
-        .expect("stats");
+        .expect("stats")
+    }
 
-        for ms in ["frontend", "backend1", "backend2"] {
-            let ms_stats = &stats.by_microservice[ms];
-            assert_eq!(ms_stats.response_time_ms.len(), 500, "{ms}");
-            assert_eq!(ms_stats.inter_arrival_ms.len(), 499, "{ms}");
-            for i in 0..500 {
-                assert!(
-                    ms_stats.queueing_delay_ms[i] + ms_stats.processing_time_ms[i]
-                        <= ms_stats.response_time_ms[i] + 1e-6,
-                    "{ms} visit {i}"
-                );
-            }
-        }
-        assert!(stats.total_processing_p99_ms > 0.0);
+    #[test]
+    fn chain3_by_microservice_visit_metrics() {
+        assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Fifo), 12.0);
+        assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Edf), 12.0);
     }
 
     #[test]
