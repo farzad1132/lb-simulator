@@ -72,6 +72,7 @@ pub struct MsStats {
     pub server_utilization_pct: HashMap<String, HashMap<usize, f64>>,
     pub by_api: HashMap<String, ApiStats>,
     pub by_microservice: HashMap<String, MicroserviceStats>,
+    pub microservice_order: Vec<String>,
     pub total_processing_p99_ms: f64,
 }
 
@@ -376,6 +377,7 @@ fn calculate_stats(
         server_utilization_pct,
         by_api,
         by_microservice,
+        microservice_order: graph.microservice_order.clone(),
         total_processing_p99_ms,
     })
 }
@@ -1185,18 +1187,31 @@ mod tests {
 
     fn assert_chain3_visit_metrics(stats: &MsStats, slo_ms: f64) {
         let chain = ["frontend", "backend1", "backend2"];
+        assert_eq!(
+            stats.microservice_order,
+            vec!["frontend", "backend1", "backend2"]
+        );
         let mut mean_slack = [0.0; 3];
+        let mut mean_cumulative = [0.0; 3];
         for (idx, ms) in chain.iter().enumerate() {
             let ms_stats = &stats.by_microservice[*ms];
             assert_eq!(ms_stats.response_time_ms.len(), 500, "{ms}");
             assert_eq!(ms_stats.inter_arrival_ms.len(), 499, "{ms}");
             assert_eq!(ms_stats.slack_d_ms.len(), 500, "{ms}");
+            assert_eq!(ms_stats.cumulative_queueing_delay_ms.len(), 500, "{ms}");
             mean_slack[idx] = ms_stats.slack_d_ms.iter().sum::<f64>() / 500.0;
+            mean_cumulative[idx] =
+                ms_stats.cumulative_queueing_delay_ms.iter().sum::<f64>() / 500.0;
             for i in 0..500 {
                 assert!(
                     ms_stats.queueing_delay_ms[i] + ms_stats.processing_time_ms[i]
                         <= ms_stats.response_time_ms[i] + 1e-6,
                     "{ms} visit {i}"
+                );
+                assert!(
+                    ms_stats.cumulative_queueing_delay_ms[i]
+                        >= ms_stats.queueing_delay_ms[i] - 1e-6,
+                    "{ms} visit {i}: cumulative should be >= local queueing"
                 );
             }
         }
@@ -1207,6 +1222,10 @@ mod tests {
         assert!(
             mean_slack[0] > mean_slack[1] && mean_slack[1] > mean_slack[2],
             "mean slack should decrease down chain: {mean_slack:?}"
+        );
+        assert!(
+            mean_cumulative[0] < mean_cumulative[1] && mean_cumulative[1] < mean_cumulative[2],
+            "mean cumulative queueing should increase down chain: {mean_cumulative:?}"
         );
         assert!(stats.total_processing_p99_ms > 0.0);
     }

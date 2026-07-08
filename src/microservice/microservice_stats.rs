@@ -10,6 +10,7 @@ struct ActiveVisit {
     arrival: MonotonicTime,
     slack_d_ms: f64,
     queueing_delay: Option<Duration>,
+    cumulative_queueing: Option<Duration>,
     local_processing: Duration,
 }
 
@@ -19,6 +20,7 @@ struct MicroserviceSamples {
     departure_times_ms: Vec<f64>,
     response_time_ms: Vec<f64>,
     queueing_delay_ms: Vec<f64>,
+    cumulative_queueing_delay_ms: Vec<f64>,
     processing_time_ms: Vec<f64>,
     slack_d_ms: Vec<f64>,
 }
@@ -29,6 +31,7 @@ pub struct MicroserviceStats {
     pub inter_departure_ms: Vec<f64>,
     pub response_time_ms: Vec<f64>,
     pub queueing_delay_ms: Vec<f64>,
+    pub cumulative_queueing_delay_ms: Vec<f64>,
     pub processing_time_ms: Vec<f64>,
     pub slack_d_ms: Vec<f64>,
 }
@@ -36,6 +39,7 @@ pub struct MicroserviceStats {
 #[derive(Default)]
 pub struct MicroserviceVisitTracker {
     active: HashMap<(u64, String), ActiveVisit>,
+    request_cumulative_queueing: HashMap<u64, Duration>,
     samples: HashMap<String, MicroserviceSamples>,
 }
 
@@ -71,7 +75,17 @@ impl MicroserviceVisitTracker {
     ) {
         if let Some(visit) = self.active.get_mut(&(request_id, microservice_id.to_string())) {
             if visit.queueing_delay.is_none() {
-                visit.queueing_delay = Some(start.duration_since(visit.arrival));
+                let queueing = start.duration_since(visit.arrival);
+                visit.queueing_delay = Some(queueing);
+                let cumulative = {
+                    let total = self
+                        .request_cumulative_queueing
+                        .entry(request_id)
+                        .or_insert(Duration::ZERO);
+                    *total += queueing;
+                    *total
+                };
+                visit.cumulative_queueing = Some(cumulative);
             }
         }
     }
@@ -100,6 +114,7 @@ impl MicroserviceVisitTracker {
 
         let response = departure.duration_since(visit.arrival);
         let queueing = visit.queueing_delay.unwrap_or(Duration::ZERO);
+        let cumulative = visit.cumulative_queueing.unwrap_or(queueing);
 
         let samples = self.samples.entry(microservice_id.to_string()).or_default();
         samples.arrival_times_ms.push(
@@ -122,6 +137,9 @@ impl MicroserviceVisitTracker {
             .queueing_delay_ms
             .push(queueing.as_secs_f64() * SECS_TO_MS);
         samples
+            .cumulative_queueing_delay_ms
+            .push(cumulative.as_secs_f64() * SECS_TO_MS);
+        samples
             .processing_time_ms
             .push(visit.local_processing.as_secs_f64() * SECS_TO_MS);
         samples.slack_d_ms.push(visit.slack_d_ms);
@@ -140,6 +158,7 @@ impl MicroserviceVisitTracker {
                     inter_departure_ms: consecutive_diffs(&samples.departure_times_ms),
                     response_time_ms: samples.response_time_ms.clone(),
                     queueing_delay_ms: samples.queueing_delay_ms.clone(),
+                    cumulative_queueing_delay_ms: samples.cumulative_queueing_delay_ms.clone(),
                     processing_time_ms: samples.processing_time_ms.clone(),
                     slack_d_ms: samples.slack_d_ms.clone(),
                 },

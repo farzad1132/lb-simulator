@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 server_utilization_pct: Default::default(),
                 by_api: Default::default(),
                 by_microservice: Default::default(),
+                microservice_order: Default::default(),
                 total_processing_p99_ms: 0.0,
             });
             let mut stdout = io::stdout().lock();
