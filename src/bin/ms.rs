@@ -36,6 +36,8 @@ struct Args {
     scale: u32,
     #[arg(long, value_enum, default_value_t = SchedulingPolicyKind::Fifo)]
     scheduling: SchedulingPolicyKind,
+    #[arg(long)]
+    force_fixed_svc: bool,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
     verbose: u8,
 }
@@ -57,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trace_limit: cli.trace_limit,
         scale: cli.scale,
         scheduling: cli.scheduling,
+        force_fixed_svc: cli.force_fixed_svc,
         verbose: cli.verbose,
     };
 
@@ -162,6 +165,19 @@ mod tests {
             "edf",
         ]);
         assert_eq!(cli.scheduling, SchedulingPolicyKind::Edf);
+    }
+
+    #[test]
+    fn parses_force_fixed_svc() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--force-fixed-svc",
+        ]);
+        assert!(cli.force_fixed_svc);
     }
 
     #[test]

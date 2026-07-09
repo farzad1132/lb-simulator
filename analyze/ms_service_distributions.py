@@ -39,15 +39,47 @@ from plotting_primitive import (  # noqa: E402
     plot_grouped_bars,
 )
 
-DEFAULT_CHAIN3_CALLGRAPH = REPO_ROOT / "tests" / "chain" / "6" / "callgraph.json"
-DEFAULT_CHAIN3_LOAD = REPO_ROOT / "tests" / "chain" / "6" / "load.json"
-DEFAULT_OUTPUT = REPO_ROOT / "output" / "ms_service_distributions_chain6.pdf"
+DEFAULT_CHAIN = 6
+DEFAULT_CALLGRAPH = REPO_ROOT / "tests" / "chain" / str(DEFAULT_CHAIN) / "callgraph.json"
+OUTPUT_DIR = REPO_ROOT / "output"
+OUTPUT_BASENAME = "ms_service_distributions"
 
 ROW_SPECS = (
     ("processing_time_ms", "Norm. Processing Time", True),
     ("queueing_delay_ms", "Norm. Queueing", True),
     ("slack_d_ms", "Slack-d (ms)", False),
 )
+
+
+def resolve_callgraph_path(*, chain: int | None, callgraph: Path | None) -> Path:
+    if callgraph is not None:
+        path = callgraph if callgraph.is_absolute() else REPO_ROOT / callgraph
+        return path.resolve()
+    chain_id = DEFAULT_CHAIN if chain is None else chain
+    return (REPO_ROOT / "tests" / "chain" / str(chain_id) / "callgraph.json").resolve()
+
+
+def resolve_load_file_path(callgraph: Path, load_file: Path | None) -> Path:
+    if load_file is not None:
+        path = load_file if load_file.is_absolute() else REPO_ROOT / load_file
+        return path.resolve()
+    return (callgraph.parent / "load.json").resolve()
+
+
+def callgraph_output_slug(callgraph: Path) -> str:
+    try:
+        rel = callgraph.resolve().relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        rel = callgraph.resolve()
+    parts = list(rel.parts)
+    if parts and parts[-1] == "callgraph.json":
+        parts = parts[:-1]
+    return "_".join(parts)
+
+
+def default_output_path(callgraph: Path) -> Path:
+    slug = callgraph_output_slug(callgraph)
+    return OUTPUT_DIR / f"{OUTPUT_BASENAME}_{slug}.pdf"
 
 
 def microservice_order(data: dict) -> list[str]:
@@ -190,7 +222,7 @@ def plot_cumulative_queueing_stddev_bars(
         ax,
         positions,
         [
-            ("Theoretical", theoretical_std, None),
+            ("Independent", theoretical_std, None),
             ("Actual", actual_std, None),
         ],
         style=style,
@@ -199,7 +231,7 @@ def plot_cumulative_queueing_stddev_bars(
     ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
     combined = np.asarray(theoretical_std + actual_std, dtype=float)
     finalize_violin_y_axis(ax, combined, style=style)
-    ax.legend(fontsize=style.legend_size, loc="upper left")
+    ax.legend(fontsize=style.legend_size, loc="upper left", frameon=False)
 
 
 def plot_per_hop_queueing_stddev_bars(
@@ -359,25 +391,67 @@ def plot_distributions(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run ms chain-3 and plot per-microservice visit distribution CDFs.",
+        description="Run ms simulation and plot per-microservice visit distribution CDFs.",
     )
-    parser.add_argument("--callgraph", type=Path, default=DEFAULT_CHAIN3_CALLGRAPH)
-    parser.add_argument("--load-file", type=Path, default=DEFAULT_CHAIN3_LOAD)
+    parser.add_argument(
+        "--chain",
+        type=int,
+        default=None,
+        help=(
+            "Chain length under tests/chain/<N>/ "
+            f"(default: {DEFAULT_CHAIN} when --callgraph is not set)"
+        ),
+    )
+    parser.add_argument(
+        "--callgraph",
+        type=Path,
+        default=None,
+        help=(
+            "Path to callgraph.json (relative to repo root or absolute). "
+            "Overrides --chain."
+        ),
+    )
+    parser.add_argument(
+        "--load-file",
+        type=Path,
+        default=None,
+        help="Path to load.json (default: load.json beside --callgraph)",
+    )
     parser.add_argument("--n", type=int, default=100_000_0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rps", type=float, default=None)
     parser.add_argument("--lb-policy", choices=LB_POLICIES, default="power-of-two")
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Output PDF path (default: "
+            f"{OUTPUT_DIR}/{OUTPUT_BASENAME}_<callgraph-relative-path>.pdf)"
+        ),
+    )
     parser.add_argument("--comment", type=str, default=None)
     parser.add_argument("--ms-binary", type=Path, default=None)
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument(
+        "--force-fixed-svc",
+        action="store_true",
+        help="Force constant service times using callgraph means (no exponential sampling)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    callgraph = resolve_callgraph_path(chain=args.chain, callgraph=args.callgraph)
+    load_file = resolve_load_file_path(callgraph, args.load_file)
+    if not callgraph.is_file():
+        raise SystemExit(f"callgraph not found: {callgraph}")
+    if not load_file.is_file():
+        raise SystemExit(f"load file not found: {load_file}")
+
     binary = args.ms_binary
     if binary is None and not args.no_build:
         binary = ensure_release_binary(REPO_ROOT, None, simulator="ms")
@@ -386,14 +460,15 @@ def main() -> None:
 
     data = run_ms_simulation(
         binary,
-        callgraph=args.callgraph,
-        load_file=args.load_file,
+        callgraph=callgraph,
+        load_file=load_file,
         n=args.n,
         lb_policy=args.lb_policy,
         lb_subset_size=args.lb_subset_size,
         seed=args.seed,
         rps=args.rps,
         scheduling=args.scheduling,
+        force_fixed_svc=args.force_fixed_svc,
     )
     if "by_microservice" not in data:
         raise SystemExit("ms JSON missing by_microservice; rebuild the ms binary")
@@ -411,7 +486,8 @@ def main() -> None:
                 "rebuild the ms binary"
             )
 
-    output = output_path_with_comment(args.output, args.comment)
+    output_base = args.output or default_output_path(callgraph)
+    output = output_path_with_comment(output_base, args.comment)
     plot_distributions(data, microservices=microservice_order(data), output=output)
 
 

@@ -294,6 +294,7 @@ def run_ms_simulation(
     rps: float | None = None,
     slo_ms: float | None = None,
     scheduling: str = "fifo",
+    force_fixed_svc: bool = False,
 ) -> dict:
     cmd = [
         str(binary),
@@ -318,6 +319,8 @@ def run_ms_simulation(
         cmd.extend(["--rps", str(rps)])
     if slo_ms is not None:
         cmd.extend(["--slo-ms", str(slo_ms)])
+    if force_fixed_svc:
+        cmd.append("--force-fixed-svc")
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")

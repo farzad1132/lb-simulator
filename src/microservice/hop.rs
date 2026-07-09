@@ -97,9 +97,12 @@ pub fn sample_duration(graph: &CallGraph, endpoint: &str) -> Result<Duration, St
         .interface_means
         .get(endpoint)
         .ok_or_else(|| format!("no mean for endpoint {}", endpoint))?;
-    Ok(Duration::from_secs_f32(crate::rng::with_rng(|rng| sample_exp(
-        rng, mean,
-    ))))
+    let secs = if graph.force_fixed_svc {
+        mean.max(MIN_DURATION_SECS)
+    } else {
+        crate::rng::with_rng(|rng| sample_exp(rng, mean))
+    };
+    Ok(Duration::from_secs_f32(secs))
 }
 
 pub fn microservice_for_endpoint(graph: &CallGraph, endpoint: &str) -> Result<String, String> {

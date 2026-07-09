@@ -17,6 +17,7 @@ pub struct CallGraph {
     pub entrypoints: HashMap<String, String>,
     pub endpoint_microservice: HashMap<String, String>,
     pub microservice_order: Vec<String>,
+    pub force_fixed_svc: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +144,7 @@ impl CallGraph {
             entrypoints,
             endpoint_microservice,
             microservice_order,
+            force_fixed_svc: false,
         })
     }
 

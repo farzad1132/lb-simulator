@@ -55,6 +55,7 @@ pub struct MsArgs {
     pub scale: u32,
     pub verbose: u8,
     pub scheduling: SchedulingPolicyKind,
+    pub force_fixed_svc: bool,
 }
 
 #[derive(Serialize)]
@@ -395,6 +396,7 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
 fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     let mut graph = CallGraph::from_file(&args.callgraph)?;
     graph.apply_scale(args.scale)?;
+    graph.force_fixed_svc = args.force_fixed_svc;
     let graph = Arc::new(graph);
     let mut load = load_spec_from_file(&args.load_file)?;
     apply_load_overrides(&mut load, args.rps, args.slo_ms);
@@ -985,6 +987,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            force_fixed_svc: false,
         }
     }
 
@@ -1007,6 +1010,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            force_fixed_svc: false,
         })
         .unwrap()
         .expect("stats");
@@ -1061,6 +1065,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            force_fixed_svc: false,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1099,6 +1104,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            force_fixed_svc: false,
         })
         .unwrap()
         .expect("stats");
@@ -1248,6 +1254,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling,
+            force_fixed_svc: false,
         })
         .unwrap()
         .expect("stats")
@@ -1257,6 +1264,43 @@ mod tests {
     fn chain3_by_microservice_visit_metrics() {
         assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Fifo), 12.0);
         assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Edf), 12.0);
+    }
+
+    #[test]
+    fn force_fixed_svc_uses_constant_processing_times() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stats = run(&MsArgs {
+            callgraph: root.join("tests/chain/3/callgraph.json"),
+            load_file: root.join("tests/chain/3/load.json"),
+            n: 500,
+            lb_policy: LoadBalancePolicyKind::LeastRequest,
+            lb_subset_size: 0,
+            lb_subset_policy: SubsetPolicyKind::Deterministic,
+            seed: Some(42),
+            rps: None,
+            slo_ms: None,
+            format: OutputFormat::Json,
+            trace: false,
+            trace_limit: 5,
+            scale: 0,
+            verbose: 0,
+            scheduling: SchedulingPolicyKind::Fifo,
+            force_fixed_svc: true,
+        })
+        .unwrap()
+        .expect("stats");
+
+        let expected_ms = [("frontend", 0.1), ("backend1", 1.0), ("backend2", 1.0)];
+        for (ms, expected) in expected_ms {
+            let samples = &stats.by_microservice[ms].processing_time_ms;
+            assert!(!samples.is_empty(), "{ms}");
+            for &sample in samples {
+                assert!(
+                    (sample - expected).abs() < 1e-9,
+                    "{ms}: expected constant {expected} ms, got {sample}"
+                );
+            }
+        }
     }
 
     #[test]
