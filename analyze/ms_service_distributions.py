@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from plot_cdfs import (  # noqa: E402
-    LB_POLICIES,
+    MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
     ensure_release_binary,
     output_path_with_comment,
@@ -420,7 +420,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, default=100_000_0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rps", type=float, default=None)
-    parser.add_argument("--lb-policy", choices=LB_POLICIES, default="power-of-two")
+    parser.add_argument("--lb-policy", choices=MS_LB_POLICIES, default="power-of-two")
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument(
