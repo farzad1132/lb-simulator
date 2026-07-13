@@ -1086,8 +1086,12 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if args.lb_policy.is_cl() {
-        return Err("--lb-policy cl is not supported by the lb simulator".into());
+    if args.lb_policy.is_cl() || args.lb_policy.is_corr() {
+        return Err(format!(
+            "--lb-policy {} is not supported by the lb simulator",
+            if args.lb_policy.is_cl() { "cl" } else { "corr" }
+        )
+        .into());
     }
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;

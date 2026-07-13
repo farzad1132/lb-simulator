@@ -36,16 +36,36 @@ pub struct MicroserviceStats {
     pub slack_d_ms: Vec<f64>,
 }
 
-#[derive(Default)]
 pub struct MicroserviceVisitTracker {
     active: HashMap<(u64, String), ActiveVisit>,
     request_cumulative_queueing: HashMap<u64, Duration>,
     samples: HashMap<String, MicroserviceSamples>,
+    microservice_index: HashMap<String, usize>,
+    num_microservices: usize,
+    per_request_cumulative: HashMap<u64, Vec<f64>>,
+}
+
+impl Default for MicroserviceVisitTracker {
+    fn default() -> Self {
+        Self::new(&[])
+    }
 }
 
 impl MicroserviceVisitTracker {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(microservice_order: &[String]) -> Self {
+        let microservice_index = microservice_order
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (id.clone(), idx))
+            .collect();
+        Self {
+            active: HashMap::new(),
+            request_cumulative_queueing: HashMap::new(),
+            samples: HashMap::new(),
+            num_microservices: microservice_order.len(),
+            microservice_index,
+            per_request_cumulative: HashMap::new(),
+        }
     }
 
     pub fn record_arrival(
@@ -115,6 +135,15 @@ impl MicroserviceVisitTracker {
         let response = departure.duration_since(visit.arrival);
         let queueing = visit.queueing_delay.unwrap_or(Duration::ZERO);
         let cumulative = visit.cumulative_queueing.unwrap_or(queueing);
+        let cumulative_ms = cumulative.as_secs_f64() * SECS_TO_MS;
+
+        if let Some(ms_index) = self.microservice_index.get(microservice_id) {
+            let row = self
+                .per_request_cumulative
+                .entry(request_id)
+                .or_insert_with(|| vec![f64::NAN; self.num_microservices]);
+            row[*ms_index] = cumulative_ms;
+        }
 
         let samples = self.samples.entry(microservice_id.to_string()).or_default();
         samples.arrival_times_ms.push(
@@ -138,11 +167,20 @@ impl MicroserviceVisitTracker {
             .push(queueing.as_secs_f64() * SECS_TO_MS);
         samples
             .cumulative_queueing_delay_ms
-            .push(cumulative.as_secs_f64() * SECS_TO_MS);
+            .push(cumulative_ms);
         samples
             .processing_time_ms
             .push(visit.local_processing.as_secs_f64() * SECS_TO_MS);
         samples.slack_d_ms.push(visit.slack_d_ms);
+    }
+
+    pub fn per_request_cumulative_queueing_ms(&self) -> Vec<Vec<f64>> {
+        let mut request_ids: Vec<_> = self.per_request_cumulative.keys().copied().collect();
+        request_ids.sort_unstable();
+        request_ids
+            .into_iter()
+            .map(|id| self.per_request_cumulative[&id].clone())
+            .collect()
     }
 
     pub fn into_stats(&self, microservice_order: &[String]) -> HashMap<String, MicroserviceStats> {

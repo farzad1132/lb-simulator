@@ -13,11 +13,11 @@
             "interfaces": [
                 {
                     "name": "handle",
-                    "avg_rt": 0.1
+                    "avg_rt": 1
                 }
             ],
-            "cpu": 4,
-            "replicas": 1
+            "cpu": 10,
+            "replicas": 10
         },
         {
             "id": "backend1",

@@ -99,7 +99,7 @@ Under EDF, returns use the same insertion rule as upstream arrivals. req=5 inser
 
 Scheduling does not change:
 
-- Which server a load balancer selects (`EdgeBalancer`, `ReplicaBalancer`, `DownstreamBalancer`)
+- Which server a load balancer selects (`EdgeBalancer`, `ReplicaBalancer`, `DownstreamBalancer`) — except **`corr`**, which reads `Hop.deadline` at the shared `DownstreamBalancer` to compute slack-d for routing
 - Shared `DownstreamBalancer` pull queue ordering (always FIFO under `centralized`)
 
 Scheduling only changes the order in which a replica dequeues waiting queue items.
@@ -108,7 +108,7 @@ Scheduling only changes the order in which a replica dequeues waiting queue item
 
 | LB policy | EDF effect on replica queues |
 |-----------|------------------------------|
-| Push (`random`, `power-of-two`, `round-robin`, `least-request`, **`cl`**) | EDF affects every replica queue when servers are saturated |
+| Push (`random`, `power-of-two`, `round-robin`, `least-request`, **`cl`**, **`corr`**) | EDF affects every replica queue when servers are saturated |
 | **`centralized`** | EDF affects **ingress** (entry) replica queues. Downstream replicas bypass local queuing via `slot_release`, so EDF has no effect on downstream hops |
 
 ## Source files

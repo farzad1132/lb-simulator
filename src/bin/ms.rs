@@ -78,6 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 by_microservice: Default::default(),
                 microservice_order: Default::default(),
                 total_processing_p99_ms: 0.0,
+                per_request_cumulative_queueing_ms: Default::default(),
             });
             let mut stdout = io::stdout().lock();
             serde_json::to_writer(&mut stdout, &output)?;
@@ -151,6 +152,20 @@ mod tests {
             "cl",
         ]);
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Cl);
+    }
+
+    #[test]
+    fn parses_corr_lb_policy() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "corr",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Corr);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
     "handle": {
         "rps": 5000,
-        "slo_ms": 34
+        "slo_ms": 37
     }
 }

@@ -1,6 +1,8 @@
 use clap::ValueEnum;
 use nexosim::model::{Context, Model};
-use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
+use nexosim::ports::{
+    EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue,
+};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
@@ -10,22 +12,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::balancer::{DownstreamBalancer, EdgeBalancer, OutboundGateway, ReplicaBalancer};
+#[cfg(test)]
+use super::callgraph::ApiLoad;
+use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
+use super::hop::{
+    CompletedRequest, Hop, OutboundCall, ReplicaInput, microservice_for_endpoint, sample_exp,
+};
+use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
+use super::replica::{Replica, ReplicaConfig};
+use super::trace::MsTracer;
 use crate::policy::LoadBalancePolicyKind;
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
 use crate::sim_util;
 use crate::subset::{self, SubsetPolicyKind};
-use super::balancer::{DownstreamBalancer, EdgeBalancer, OutboundGateway, ReplicaBalancer};
-use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
-#[cfg(test)]
-use super::callgraph::ApiLoad;
-use super::hop::{
-    CompletedRequest, Hop, OutboundCall, ReplicaInput, sample_exp,
-    microservice_for_endpoint,
-};
-use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
-use super::replica::{Replica, ReplicaConfig};
-use super::trace::MsTracer;
 
 const HUMAN_PERCENTILES: [f64; 12] = [
     1.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 99.0, 100.0,
@@ -75,6 +76,7 @@ pub struct MsStats {
     pub by_microservice: HashMap<String, MicroserviceStats>,
     pub microservice_order: Vec<String>,
     pub total_processing_p99_ms: f64,
+    pub per_request_cumulative_queueing_ms: Vec<Vec<f64>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -127,10 +129,7 @@ impl UserArrival {
             }
         };
         let (request_id, trace) = {
-            let id = self
-                .next_request_id
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
+            let id = self.next_request_id.fetch_add(1, Ordering::Relaxed) + 1;
             let trace = self
                 .tracer
                 .as_ref()
@@ -344,8 +343,7 @@ fn calculate_stats(
                 let total_busy: Duration = server_busy
                     .map(|m| m.values().copied().sum())
                     .unwrap_or(Duration::ZERO);
-                let pct =
-                    total_busy.as_secs_f64() / (obs_secs * f64::from(spec.cpu)) * 100.0;
+                let pct = total_busy.as_secs_f64() / (obs_secs * f64::from(spec.cpu)) * 100.0;
                 microservice_utilization_pct.insert(microservice_id.clone(), pct);
 
                 let concurrency = (spec.cpu / spec.replicas).max(1);
@@ -365,6 +363,7 @@ fn calculate_stats(
     }
 
     let by_microservice = visit_tracker.into_stats(&graph.microservice_order);
+    let per_request_cumulative_queueing_ms = visit_tracker.per_request_cumulative_queueing_ms();
 
     let mut all_processing: Vec<f64> = Vec::new();
     for stats in by_api.values() {
@@ -380,12 +379,15 @@ fn calculate_stats(
         by_microservice,
         microservice_order: graph.microservice_order.clone(),
         total_processing_p99_ms,
+        per_request_cumulative_queueing_ms,
     })
 }
 
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
-        return Err("--lb-subset-size is not supported with --lb-policy cl or centralized".into());
+        return Err(
+            "--lb-subset-size is not supported with --lb-policy cl, centralized, or corr".into(),
+        );
     }
     rng::enter_run(args.seed);
     let result = run_inner(args);
@@ -405,7 +407,9 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let next_request_id = Arc::new(AtomicU64::new(0));
 
-    let visit_tracker = Arc::new(Mutex::new(MicroserviceVisitTracker::new()));
+    let visit_tracker = Arc::new(Mutex::new(MicroserviceVisitTracker::new(
+        &graph.microservice_order,
+    )));
 
     let busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -476,7 +480,6 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     }
 
     let use_shared_downstream = args.lb_policy.uses_shared_downstream();
-    let use_centralized = args.lb_policy.is_centralized();
 
     let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
     let mut edge_balancer_inputs: HashMap<String, Output<Hop>> = HashMap::new();
@@ -530,7 +533,8 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     for pending in &mut pending_edge_balancers {
         for &server_idx in &pending.server_indices {
-            if let Some(mb) = server_mailboxes.get(&(pending.entry_microservice.clone(), server_idx))
+            if let Some(mb) =
+                server_mailboxes.get(&(pending.entry_microservice.clone(), server_idx))
             {
                 pending.balancer.outputs[server_idx].connect(Replica::input, mb);
             }
@@ -573,7 +577,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 target.clone(),
                 n_servers,
                 server_indices.clone(),
-                use_centralized,
+                args.lb_policy,
                 tracer.clone(),
             );
             let mailbox = Mailbox::new();
@@ -624,8 +628,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 let mut outbound = Output::default();
                 outbound.connect(OutboundGateway::input, &mailbox);
                 outbound_gateway_outbound.insert((microservice_id.clone(), server_idx), outbound);
-                outbound_gateway_addresses
-                    .insert((microservice_id.clone(), server_idx), address);
+                outbound_gateway_addresses.insert((microservice_id.clone(), server_idx), address);
 
                 pending_outbound_gateways.push(PendingOutboundGateway {
                     gateway,
@@ -722,7 +725,9 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let apis_by_entry_microservice: HashMap<String, Vec<String>> = {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for (api, microservice) in &entry_microservices {
-            map.entry(microservice.clone()).or_default().push(api.clone());
+            map.entry(microservice.clone())
+                .or_default()
+                .push(api.clone());
         }
         for apis in map.values_mut() {
             apis.sort();
@@ -823,7 +828,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             }
 
             let mut pull_output = None;
-            if use_centralized && downstream_target_set.contains(microservice_id) {
+            if args.lb_policy.is_centralized() && downstream_target_set.contains(microservice_id) {
                 let db_address = downstream_balancer_addresses
                     .get(microservice_id)
                     .expect("downstream balancer address");
@@ -916,18 +921,13 @@ pub fn print_human_stats(stats: &MsStats) {
     for microservice_id in microservice_ids {
         println!(
             "  {}: {:.2}",
-            microservice_id,
-            stats.microservice_utilization_pct[&microservice_id]
+            microservice_id, stats.microservice_utilization_pct[&microservice_id]
         );
         if let Some(servers) = stats.server_utilization_pct.get(&microservice_id) {
             let mut indices: Vec<_> = servers.keys().copied().collect();
             indices.sort_unstable();
             for idx in indices {
-                println!(
-                    "    server {}: {:.2}",
-                    idx,
-                    servers[&idx]
-                );
+                println!("    server {}: {:.2}", idx, servers[&idx]);
             }
         }
     }
@@ -942,10 +942,7 @@ pub fn print_human_stats(stats: &MsStats) {
             api_stats.unloaded_latency_p99_ms
         );
         println!("  SLO latency: {:.4} ms", api_stats.slo_latency_ms);
-        println!(
-            "  P(latency > SLO): {:.6}",
-            api_stats.prob_latency_gt_slo
-        );
+        println!("  P(latency > SLO): {:.6}", api_stats.prob_latency_gt_slo);
         print_percentile_table("  e2e latency (ms):", &mut api_stats.e2e_ms.clone());
         print_percentile_table(
             "  processing time (ms):",
@@ -1069,7 +1066,10 @@ mod tests {
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
-        assert_eq!(first.microservice_utilization_pct, second.microservice_utilization_pct);
+        assert_eq!(
+            first.microservice_utilization_pct,
+            second.microservice_utilization_pct
+        );
         for microservice_id in first.server_utilization_pct.keys() {
             let mut first_vals: Vec<_> = first.server_utilization_pct[microservice_id]
                 .values()
@@ -1234,6 +1234,29 @@ mod tests {
             "mean cumulative queueing should increase down chain: {mean_cumulative:?}"
         );
         assert!(stats.total_processing_p99_ms > 0.0);
+
+        assert_eq!(stats.per_request_cumulative_queueing_ms.len(), 500);
+        for (row_idx, row) in stats.per_request_cumulative_queueing_ms.iter().enumerate() {
+            assert_eq!(row.len(), 3, "row {row_idx}");
+            assert!(
+                row[0] <= row[1] + 1e-6 && row[1] <= row[2] + 1e-6,
+                "row {row_idx}: cumulative should be non-decreasing: {row:?}"
+            );
+        }
+        for (idx, ms) in chain.iter().enumerate() {
+            let ms_stats = &stats.by_microservice[*ms];
+            let per_request_mean = stats
+                .per_request_cumulative_queueing_ms
+                .iter()
+                .map(|row| row[idx])
+                .sum::<f64>()
+                / 500.0;
+            let visit_mean = ms_stats.cumulative_queueing_delay_ms.iter().sum::<f64>() / 500.0;
+            assert!(
+                (per_request_mean - visit_mean).abs() < 1e-6,
+                "{ms}: per-request mean {per_request_mean} vs visit mean {visit_mean}"
+            );
+        }
     }
 
     fn chain3_visit_stats(scheduling: SchedulingPolicyKind) -> MsStats {
@@ -1262,8 +1285,8 @@ mod tests {
 
     #[test]
     fn chain3_by_microservice_visit_metrics() {
-        assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Fifo), 12.0);
-        assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Edf), 12.0);
+        assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Fifo), 16.0);
+        assert_chain3_visit_metrics(&chain3_visit_stats(SchedulingPolicyKind::Edf), 16.0);
     }
 
     #[test]
@@ -1290,7 +1313,7 @@ mod tests {
         .unwrap()
         .expect("stats");
 
-        let expected_ms = [("frontend", 0.1), ("backend1", 1.0), ("backend2", 1.0)];
+        let expected_ms = [("frontend", 1.0), ("backend1", 1.0), ("backend2", 1.0)];
         for (ms, expected) in expected_ms {
             let samples = &stats.by_microservice[ms].processing_time_ms;
             assert!(!samples.is_empty(), "{ms}");

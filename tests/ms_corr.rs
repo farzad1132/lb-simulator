@@ -7,7 +7,7 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
-fn ms_centralized_completes_on_chain_topology() {
+fn ms_corr_completes_on_chain_topology() {
     let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");
     let root = repo_root();
 
@@ -22,7 +22,7 @@ fn ms_centralized_completes_on_chain_topology() {
             "--n",
             "1000",
             "--lb-policy",
-            "centralized",
+            "corr",
             "--seed",
             "42",
         ])
@@ -31,7 +31,7 @@ fn ms_centralized_completes_on_chain_topology() {
 
     assert!(
         output.status.success(),
-        "ms centralized run failed: {}",
+        "ms corr run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -42,7 +42,7 @@ fn ms_centralized_completes_on_chain_topology() {
 }
 
 #[test]
-fn ms_centralized_completes_on_fanin_topology() {
+fn ms_corr_completes_on_fanin_topology() {
     let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");
     let root = repo_root();
 
@@ -57,7 +57,7 @@ fn ms_centralized_completes_on_fanin_topology() {
             "--n",
             "500",
             "--lb-policy",
-            "centralized",
+            "corr",
             "--seed",
             "7",
         ])
@@ -66,7 +66,7 @@ fn ms_centralized_completes_on_fanin_topology() {
 
     assert!(
         output.status.success(),
-        "ms centralized fanin run failed: {}",
+        "ms corr fanin run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -83,36 +83,33 @@ fn ms_centralized_completes_on_fanin_topology() {
 }
 
 #[test]
-fn ms_centralized_rejects_subset_size() {
-    let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");
-    let root = repo_root();
+fn lb_rejects_corr_policy() {
+    let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
-    let output = Command::new(&ms_binary)
+    let output = Command::new(&lb_binary)
         .args([
-            "--callgraph",
-            root.join("tests/chain/3/callgraph.json").to_str().unwrap(),
-            "--load-file",
-            root.join("tests/chain/3/load.json").to_str().unwrap(),
+            "--format",
+            "json",
             "--n",
             "100",
+            "--servers",
+            "4",
             "--lb-policy",
-            "centralized",
-            "--lb-subset-size",
-            "3",
+            "corr",
         ])
         .output()
-        .expect("failed to spawn ms");
+        .expect("failed to spawn lb");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not supported with --lb-policy cl, centralized, or corr"),
+        stderr.contains("not supported by the lb simulator"),
         "unexpected stderr: {stderr}"
     );
 }
 
 #[test]
-fn ms_cl_rejects_subset_size() {
+fn ms_corr_rejects_lb_subset_size() {
     let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");
     let root = repo_root();
 
@@ -122,12 +119,10 @@ fn ms_cl_rejects_subset_size() {
             root.join("tests/chain/3/callgraph.json").to_str().unwrap(),
             "--load-file",
             root.join("tests/chain/3/load.json").to_str().unwrap(),
-            "--n",
-            "100",
             "--lb-policy",
-            "cl",
+            "corr",
             "--lb-subset-size",
-            "3",
+            "2",
         ])
         .output()
         .expect("failed to spawn ms");

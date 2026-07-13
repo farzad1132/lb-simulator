@@ -93,6 +93,8 @@ pub enum LoadBalancePolicyKind {
     Centralized,
     #[value(name = "cl")]
     Cl,
+    #[value(name = "corr")]
+    Corr,
 }
 
 impl LoadBalancePolicyKind {
@@ -106,7 +108,7 @@ impl LoadBalancePolicyKind {
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized => Box::new(CentralizedPolicy),
-            Self::Cl => Box::new(PowerOfTwoPolicy),
+            Self::Cl | Self::Corr => Box::new(PowerOfTwoPolicy),
         }
     }
 
@@ -118,13 +120,17 @@ impl LoadBalancePolicyKind {
         matches!(self, Self::Cl)
     }
 
+    pub fn is_corr(self) -> bool {
+        matches!(self, Self::Corr)
+    }
+
     pub fn uses_shared_downstream(self) -> bool {
-        matches!(self, Self::Cl | Self::Centralized)
+        matches!(self, Self::Cl | Self::Centralized | Self::Corr)
     }
 
     pub fn ingress_policy(self) -> Box<dyn LoadBalancePolicy> {
         match self {
-            Self::Cl | Self::Centralized => Box::new(PowerOfTwoPolicy),
+            Self::Cl | Self::Centralized | Self::Corr => Box::new(PowerOfTwoPolicy),
             other => other.build(),
         }
     }
@@ -147,9 +153,16 @@ mod tests {
     }
 
     #[test]
-    fn uses_shared_downstream_for_cl_and_centralized() {
+    fn corr_policy_kind_is_corr() {
+        assert!(LoadBalancePolicyKind::Corr.is_corr());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_corr());
+    }
+
+    #[test]
+    fn uses_shared_downstream_for_cl_centralized_and_corr() {
         assert!(LoadBalancePolicyKind::Cl.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Centralized.uses_shared_downstream());
+        assert!(LoadBalancePolicyKind::Corr.uses_shared_downstream());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.uses_shared_downstream());
     }
 }

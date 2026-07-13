@@ -110,10 +110,10 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Push routing to entry replicas; honors `--lb-policy` for push policies; always power-of-two for `cl` / `centralized` |
+| **EdgeBalancer** | one per API | Push routing to entry replicas; honors `--lb-policy` for push policies; always power-of-two for `cl` / `centralized` / `corr` |
 | **ReplicaBalancer** | one per server (default policies) | Outbound only: picks downstream servers using local outbound inflight |
-| **DownstreamBalancer** | one per downstream target (`cl`, `centralized`) | Shared outbound LB: push P2C (`cl`) or pull FCFS (`centralized`) across all replicas |
-| **OutboundGateway** | one per server (`cl`, `centralized`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
+| **DownstreamBalancer** | one per downstream target (`cl`, `centralized`, `corr`) | Shared outbound LB: push P2C (`cl`), pull FCFS (`centralized`), or slack-d rank buckets (`corr`) |
+| **OutboundGateway** | one per server (`cl`, `centralized`, `corr`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
 | **Replica** (server) | `replicas` per microservice | Configurable queue (`fifo` default, `edf` optional; see [scheduling.md](scheduling.md)), local processing, nested dispatch/return |
 
 ### What a microservice models
@@ -122,7 +122,7 @@ A callgraph microservice node becomes:
 
 - `replicas` × `Replica` (server) models, each with `max_concurrency = cpu / replicas`
 - Default push policies: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
-- `--lb-policy cl` or `centralized`: one `DownstreamBalancer` per downstream microservice target, plus `replicas` × `OutboundGateway` forwarders
+- `--lb-policy cl`, `centralized`, or `corr`: one `DownstreamBalancer` per downstream microservice target, plus `replicas` × `OutboundGateway` forwarders
 
 All interfaces of a microservice share the same server pool. The queue is per-server, not per-interface.
 
@@ -135,7 +135,7 @@ When `--lb-subset-size k > 0`, each balancer only routes among `min(k, replicas)
 - **EdgeBalancer:** client id is the API index (APIs sorted lexicographically).
 - **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
 
-**Not supported with `cl` or `centralized`:** `--lb-subset-size > 0` is rejected at startup. Both shared-layer policies require all replicas (ingress and outbound).
+**Not supported with `cl`, `centralized`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. All shared-layer policies require all replicas (ingress and outbound).
 
 See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm.
 
@@ -195,7 +195,7 @@ The **EdgeBalancer** handles **user ingress only**. It always uses **push** rout
 | `--lb-policy` | EdgeBalancer algorithm |
 |---------------|------------------------|
 | `random`, `power-of-two`, `least-request`, `round-robin` | Honors `--lb-policy` |
-| `cl`, `centralized` | Always **power-of-two** (the flag changes outbound architecture only) |
+| `cl`, `centralized`, `corr` | Always **power-of-two** (the flag changes outbound architecture only) |
 
 Outbound RPC routing and returns are handled separately (see below).
 
@@ -241,7 +241,53 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 | `centralized` | Pull FCFS queue; inflight released after local service complete at assigned replica (before nested child dispatch) |
 | lb `centralized` | One global flat pool; ms uses one pull queue **per downstream target** |
 
-`--lb-subset-size > 0` is not supported with `cl` or `centralized`.
+`--lb-subset-size > 0` is not supported with `cl`, `centralized`, or `corr`.
+
+### Corr policy (slack-d rank routing)
+
+`--lb-policy corr` uses the same shared outbound topology as `cl` (`DownstreamBalancer` + `OutboundGateway` per downstream target), but dispatch is **push-on-arrival** with routing based on **slack-d** (deadline slack at receive time).
+
+Ingress stays push-based power-of-two on `EdgeBalancer` (same as `cl` / `centralized`).
+
+**Slack-d** is `deadline − now` in milliseconds, matching the `slack_d_ms` metric in [`src/microservice/microservice_stats.rs`](../src/microservice/microservice_stats.rs). The deadline is set once at user ingress (`now + SLO`) and propagated unchanged through nested RPCs.
+
+Each `DownstreamBalancer` maintains two pieces of state:
+
+1. **slack-dist** — empirical CDF of all previously observed slack-d values at this downstream target (updated on every dispatch).
+2. **sorted replicas** — target replicas ordered by shared `local_inflight` ascending (tie-break: replica index). Rebuilt on each dispatch from the shared inflight table.
+
+**Pseudocode** (per outbound call at `DownstreamBalancer`):
+
+```
+now ← simulation time
+sd ← deadline - now
+
+if |slack_dist| < 200:
+    rank ← 0                          // warmup: lowest-inflight replica
+else if sd < 0:
+    rank ← 5                          // overdue: sixth-lowest-inflight replica
+else:
+    p ← empirical_cdf(slack_dist, sd) // fraction of past observations ≤ sd
+    rank ← 0   if p < 0.5
+           1   if 0.5 ≤ p < 0.8
+           2   if p ≥ 0.8
+
+sorted ← replicas sorted by local_inflight ascending (tie-break: replica index)
+replica ← sorted[rank]
+
+slack_dist ← slack_dist ∪ {sd}
+dispatch hop to replica; increment shared inflight
+```
+
+**Example:** sorted list `(1:0),(0:3),(2:5)` by inflight → `rank=0` picks replica 1, `rank=1` picks replica 0, `rank=2` picks replica 2.
+
+| vs | Difference |
+|----|------------|
+| `cl` | Push P2C on shared inflight; no deadline awareness |
+| `corr` | Push on shared inflight; maps slack-d CDF percentile to a fixed inflight rank (0/1/2; 5 if overdue) |
+| `centralized` | Pull FCFS queue; inflight released after local service complete |
+
+`lb --lb-policy corr` is rejected at startup.
 
 ### Replica queue
 
