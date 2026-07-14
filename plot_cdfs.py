@@ -30,7 +30,7 @@ MS_REQUIRED_JSON_KEYS = ("microservice_utilization_pct", "by_api")
 MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
 LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized")
-MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "cl", "corr")
+MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "cl", "cl-lr", "corr")
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
 SIMULATORS = ("lb", "ms")
 

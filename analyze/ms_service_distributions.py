@@ -34,6 +34,7 @@ from plot_cdfs import (  # noqa: E402
 from plotting_primitive import (  # noqa: E402
     ACM_COMPACT_HALF,
     SubplotGrid,
+    configure_x_axis_ticks,
     percentile,
     plot_cdf,
     plot_grouped_bars,
@@ -44,12 +45,17 @@ DEFAULT_CALLGRAPH = REPO_ROOT / "tests" / "chain" / str(DEFAULT_CHAIN) / "callgr
 OUTPUT_DIR = REPO_ROOT / "output"
 OUTPUT_BASENAME = "ms_service_distributions"
 
-ROW_SPECS = (
-    ("processing_time_ms", "Norm. Processing Time", True),
-    ("queueing_delay_ms", "Norm. Queueing", True),
-    ("slack_d_ms", "Slack-d (ms)", False),
-)
-
+def microservice_slo_violation_pct(ms_stats: dict) -> float:
+    if "prob_latency_gt_slo" in ms_stats:
+        return 100.0 * float(ms_stats["prob_latency_gt_slo"])
+    rt = ms_stats.get("response_time_ms") or []
+    sd = ms_stats.get("slack_d_ms") or []
+    if not rt:
+        return 0.0
+    if len(rt) != len(sd):
+        raise SystemExit("response_time_ms and slack_d_ms length mismatch")
+    violations = sum(1 for r, s in zip(rt, sd) if r > s)
+    return 100.0 * violations / len(rt)
 
 def resolve_callgraph_path(*, chain: int | None, callgraph: Path | None) -> Path:
     if callgraph is not None:
@@ -114,6 +120,10 @@ def finalize_violin_y_axis(
     min_ticks: int = 5,
 ) -> None:
     lo = 0.0
+    if len(combined):
+        data_lo = float(np.min(combined))
+        if data_lo < lo:
+            lo = data_lo
     data_hi = float(np.max(combined)) if len(combined) else 1.0
     if data_hi <= lo:
         data_hi = 1.0
@@ -147,16 +157,17 @@ VIOLIN_PERCENTILE_MARKERS = (
 )
 
 
-def plot_cumulative_queueing_violinplot(
+def plot_metric_violinplot(
     ax,
     data: dict,
     microservices: list[str],
+    field: str,
     *,
     style=ACM_COMPACT_HALF,
 ) -> None:
     by_ms = data["by_microservice"]
     violin_data = [
-        np.asarray(by_ms[ms]["cumulative_queueing_delay_ms"], dtype=float)
+        np.asarray(by_ms[ms][field], dtype=float)
         for ms in microservices
     ]
     positions = list(range(len(microservices)))
@@ -196,6 +207,42 @@ def plot_cumulative_queueing_violinplot(
     combined = np.concatenate([samples for samples in violin_data if len(samples) > 0])
     finalize_violin_y_axis(ax, combined, style=style)
 
+    from matplotlib.lines import Line2D
+
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            color=color,
+            linestyle=linestyle,
+            linewidth=line_width,
+            label=f"p{pct}",
+        )
+        for pct, color, linestyle in VIOLIN_PERCENTILE_MARKERS
+    ]
+    ax.legend(
+        handles=handles,
+        fontsize=max(style.font_size - 1, 5),
+        loc="best",
+        frameon=False,
+    )
+
+
+def plot_cumulative_queueing_violinplot(
+    ax,
+    data: dict,
+    microservices: list[str],
+    *,
+    style=ACM_COMPACT_HALF,
+) -> None:
+    plot_metric_violinplot(
+        ax,
+        data,
+        microservices,
+        "cumulative_queueing_delay_ms",
+        style=style,
+    )
+
 
 def plot_cumulative_queueing_stddev_bars(
     ax,
@@ -234,6 +281,80 @@ def plot_cumulative_queueing_stddev_bars(
     ax.legend(fontsize=style.legend_size, loc="upper left", frameon=False)
 
 
+def plot_response_slack_percentile_bars(
+    ax,
+    data: dict,
+    microservices: list[str],
+    *,
+    style=ACM_COMPACT_HALF,
+) -> None:
+    by_ms = data["by_microservice"]
+    rt_p50: list[float] = []
+    rt_p90: list[float] = []
+    sd_p50: list[float] = []
+    sd_p90: list[float] = []
+    for ms in microservices:
+        ms_stats = by_ms[ms]
+        rt = np.asarray(ms_stats["response_time_ms"], dtype=float)
+        sd = np.asarray(ms_stats["slack_d_ms"], dtype=float)
+        if len(rt) == 0:
+            rt_p50.append(0.0)
+            rt_p90.append(0.0)
+            sd_p50.append(0.0)
+            sd_p90.append(0.0)
+            continue
+        if len(rt) != len(sd):
+            raise SystemExit("response_time_ms and slack_d_ms length mismatch")
+        rt_p50.append(percentile(rt, 50))
+        rt_p90.append(percentile(rt, 90))
+        sd_p50.append(percentile(sd, 50))
+        sd_p90.append(percentile(sd, 90))
+
+    positions_p50 = [2 * i for i in range(len(microservices))]
+    positions_p90 = [2 * i + 1 for i in range(len(microservices))]
+    bar_groups = [
+        ("RT", rt_p50, None),
+        ("Slack-d", sd_p50, None),
+    ]
+    plot_grouped_bars(ax, positions_p50, bar_groups, style=style)
+    plot_grouped_bars(
+        ax,
+        positions_p90,
+        [
+            ("RT", rt_p90, None),
+            ("Slack-d", sd_p90, None),
+        ],
+        style=style,
+    )
+    combined = np.asarray(rt_p50 + rt_p90 + sd_p50 + sd_p90, dtype=float)
+    finalize_violin_y_axis(ax, combined, style=style)
+    n_ms = len(microservices)
+    ax.set_xlim(-0.5, 2 * n_ms - 0.5)
+    tick_positions = [2 * i + 0.5 for i in range(n_ms)]
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels([str(i) for i in range(n_ms)], fontsize=style.font_size - 1)
+    for i in range(n_ms):
+        for xpos, label in ((2 * i, "p50"), (2 * i + 1, "p90")):
+            ax.text(
+                xpos,
+                -0.14,
+                label,
+                ha="center",
+                va="top",
+                fontsize=max(style.font_size - 2, 5),
+                transform=ax.get_xaxis_transform(),
+            )
+    handles, labels = ax.get_legend_handles_labels()
+    legend_items = dict(zip(labels, handles))
+    ax.legend(
+        legend_items.values(),
+        legend_items.keys(),
+        fontsize=max(style.font_size - 1, 5),
+        loc="best",
+        frameon=False,
+    )
+
+
 def plot_per_hop_queueing_stddev_bars(
     ax,
     data: dict,
@@ -263,6 +384,71 @@ def plot_per_hop_queueing_stddev_bars(
     finalize_violin_y_axis(ax, np.asarray(per_hop_std, dtype=float), style=style)
 
 
+def plot_slo_violation_pct_bars(
+    ax,
+    data: dict,
+    microservices: list[str],
+    *,
+    style=ACM_COMPACT_HALF,
+) -> None:
+    by_ms = data["by_microservice"]
+    violation_pct = [
+        microservice_slo_violation_pct(by_ms[ms])
+        for ms in microservices
+    ]
+    positions = list(range(len(microservices)))
+    bar_width = style.bar_width_fraction * style.bar_spacing_fraction
+    for idx, (pos, height) in enumerate(zip(positions, violation_pct)):
+        color = style.colors[idx % len(style.colors)]
+        ax.bar(
+            pos,
+            height,
+            bar_width,
+            color=color,
+            edgecolor="black",
+            linewidth=0.6,
+        )
+    ax.set_xticks(positions)
+    ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
+    finalize_violin_y_axis(ax, np.asarray(violation_pct, dtype=float), style=style)
+
+
+def plot_replica_utilization_dots(
+    ax,
+    data: dict,
+    microservices: list[str],
+    *,
+    style=ACM_COMPACT_HALF,
+) -> None:
+    server_util = data["server_utilization_pct"]
+    positions = list(range(len(microservices)))
+    all_util: list[float] = []
+    for idx, ms in enumerate(microservices):
+        by_replica = server_util[ms]
+        replicas = sorted(by_replica, key=lambda k: int(k))
+        n = len(replicas)
+        color = style.colors[idx % len(style.colors)]
+        for r in replicas:
+            util = float(by_replica[r])
+            all_util.append(util)
+            jitter = 0.0 if n <= 1 else (int(r) - (n - 1) / 2) * 0.04
+            ax.scatter(
+                idx + jitter,
+                util,
+                color=color,
+                s=style.marker_size**2,
+                edgecolors="black",
+                linewidths=0.4,
+                zorder=3,
+            )
+    ax.set_xticks(positions)
+    ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
+    combined = np.asarray(all_util, dtype=float) if all_util else np.asarray([0.0, 100.0])
+    finalize_violin_y_axis(ax, combined, style=style)
+    hi = ax.get_ylim()[1]
+    ax.set_ylim(0.0, min(hi, 100.0 + style.axis_guard_fraction * 100.0))
+
+
 def plot_distributions(
     data: dict,
     *,
@@ -270,12 +456,7 @@ def plot_distributions(
     output: Path,
     style=ACM_COMPACT_HALF,
 ) -> None:
-    p99 = float(data["total_processing_p99_ms"])
-    if p99 <= 0.0:
-        raise SystemExit("total_processing_p99_ms must be positive")
-
-    grid = SubplotGrid(style, layout="3x2")
-    nrows, ncols = 3, 2
+    grid = SubplotGrid(style, layout="4x2")
 
     plot_cumulative_queueing_violinplot(
         grid.get_ax(0, 0),
@@ -313,44 +494,87 @@ def plot_distributions(
         auto_ticks=False,
     )
 
-    for idx, (field, xlabel, normalize) in enumerate(ROW_SPECS):
-        row, col = divmod(idx, ncols)
-        row += 1
-        ax = grid.get_ax(row, col)
-        series: list[tuple[str, np.ndarray]] = []
-        for ms in microservices:
-            samples = np.asarray(data["by_microservice"][ms][field], dtype=float)
-            if normalize:
-                samples = samples / p99
-            series.append((ms, samples))
+    plot_metric_violinplot(
+        grid.get_ax(1, 0),
+        data,
+        microservices,
+        "response_time_ms",
+        style=style,
+    )
+    grid.configure_ax(
+        grid.get_ax(1, 0),
+        xlabel="Microservice index",
+        ylabel="Response Time (ms)",
+        show_xlabel=True,
+        show_ylabel=True,
+        show_title=True,
+        show_xticklabels=True,
+        show_yticklabels=True,
+        auto_ticks=False,
+    )
 
-        nonempty = [samples for _, samples in series if len(samples) > 0]
-        xlim = None
-        if nonempty:
-            combined = np.concatenate(nonempty)
-            xlim = (float(np.min(combined)), float(np.max(combined)))
+    plot_response_slack_percentile_bars(
+        grid.get_ax(1, 1),
+        data,
+        microservices,
+        style=style,
+    )
+    grid.configure_ax(
+        grid.get_ax(1, 1),
+        xlabel="Microservice index",
+        ylabel="Percentile (ms)",
+        show_xlabel=True,
+        show_ylabel=True,
+        show_title=True,
+        show_xticklabels=True,
+        show_yticklabels=True,
+        auto_ticks=False,
+    )
 
-        for ms_col, (ms, samples) in enumerate(series):
-            plot_cdf(
-                ax,
-                samples,
-                label=ms,
-                style=style,
-                color_idx=ms_col,
-                xlim=xlim,
-                xlabel=xlabel if row == nrows - 1 else None,
-            )
+    slack_d_ax = grid.get_ax(2, 0)
+    slack_d_series: list[tuple[str, np.ndarray]] = []
+    for ms in microservices:
+        samples = np.asarray(data["by_microservice"][ms]["slack_d_ms"], dtype=float)
+        slack_d_series.append((ms, samples))
 
-        grid.configure_ax(
-            ax,
-            xlabel=xlabel,
-            ylabel="CDF" if col == 0 else "",
-            show_xlabel=True,
-            show_ylabel=col == 0,
-            show_title=True,
-            show_xticklabels=True,
-            show_yticklabels=col == 0,
+    slack_d_nonempty = [samples for _, samples in slack_d_series if len(samples) > 0]
+    slack_d_xlim = None
+    if slack_d_nonempty:
+        slack_d_combined = np.concatenate(slack_d_nonempty)
+        slack_d_xlim = (
+            float(np.min(slack_d_combined)),
+            float(np.max(slack_d_combined)),
         )
+
+    for ms_col, (ms, samples) in enumerate(slack_d_series):
+        plot_cdf(
+            slack_d_ax,
+            samples,
+            label=ms,
+            style=style,
+            color_idx=ms_col,
+            xlim=slack_d_xlim,
+        )
+
+    if slack_d_xlim is not None:
+        configure_x_axis_ticks(
+            slack_d_ax,
+            style=style,
+            xlim=slack_d_xlim,
+            x_step=_fallback_y_step(slack_d_xlim[1] - slack_d_xlim[0], min_ticks=5),
+        )
+
+    grid.configure_ax(
+        slack_d_ax,
+        xlabel="Slack-d (ms)",
+        ylabel="CDF",
+        title="",
+        show_xlabel=True,
+        show_ylabel=True,
+        show_title=True,
+        show_xticklabels=True,
+        show_yticklabels=True,
+    )
 
     plot_per_hop_queueing_stddev_bars(
         grid.get_ax(2, 1),
@@ -370,8 +594,44 @@ def plot_distributions(
         auto_ticks=False,
     )
 
-    cdf_ax = grid.get_ax(1, 0)
-    legend_handles, legend_labels = cdf_ax.get_legend_handles_labels()
+    plot_replica_utilization_dots(
+        grid.get_ax(3, 0),
+        data,
+        microservices,
+        style=style,
+    )
+    grid.configure_ax(
+        grid.get_ax(3, 0),
+        xlabel="Microservice index",
+        ylabel="Utilization (%)",
+        show_xlabel=True,
+        show_ylabel=True,
+        show_title=True,
+        show_xticklabels=True,
+        show_yticklabels=True,
+        auto_ticks=False,
+    )
+
+    plot_slo_violation_pct_bars(
+        grid.get_ax(3, 1),
+        data,
+        microservices,
+        style=style,
+    )
+    grid.configure_ax(
+        grid.get_ax(3, 1),
+        xlabel="Microservice index",
+        ylabel="SLO violations (%)",
+        title="SLO violations",
+        show_xlabel=True,
+        show_ylabel=True,
+        show_title=True,
+        show_xticklabels=True,
+        show_yticklabels=True,
+        auto_ticks=False,
+    )
+
+    legend_handles, legend_labels = slack_d_ax.get_legend_handles_labels()
     grid.add_shared_legend(
         handles=legend_handles,
         labels=legend_labels,
@@ -379,11 +639,6 @@ def plot_distributions(
         wrap_to_plot_width=False,
         two_rows=True,
     )
-    """ grid.fig.suptitle(
-        f"Normalized by total processing p99 = {p99:.3f} ms",
-        fontsize=style.font_size,
-        y=1.02,
-    ) """
     output.parent.mkdir(parents=True, exist_ok=True)
     grid.save(output)
     print(f"wrote {output}")
@@ -420,6 +675,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, default=100_000_0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rps", type=float, default=None)
+    parser.add_argument(
+        "--slo",
+        type=float,
+        default=None,
+        help="Override SLO latency threshold in milliseconds (passed to ms as --slo-ms)",
+    )
     parser.add_argument("--lb-policy", choices=MS_LB_POLICIES, default="power-of-two")
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
@@ -467,6 +728,7 @@ def main() -> None:
         lb_subset_size=args.lb_subset_size,
         seed=args.seed,
         rps=args.rps,
+        slo_ms=args.slo,
         scheduling=args.scheduling,
         force_fixed_svc=args.force_fixed_svc,
     )
@@ -474,15 +736,22 @@ def main() -> None:
         raise SystemExit("ms JSON missing by_microservice; rebuild the ms binary")
     if "microservice_order" not in data:
         raise SystemExit("ms JSON missing microservice_order; rebuild the ms binary")
-    if "total_processing_p99_ms" not in data:
-        raise SystemExit("ms JSON missing total_processing_p99_ms; rebuild the ms binary")
+    if "server_utilization_pct" not in data:
+        raise SystemExit("ms JSON missing server_utilization_pct; rebuild the ms binary")
     for ms in microservice_order(data):
+        if ms not in data["server_utilization_pct"]:
+            raise SystemExit(f"ms JSON missing server_utilization_pct for {ms}")
         ms_stats = data["by_microservice"][ms]
         if "slack_d_ms" not in ms_stats:
             raise SystemExit("ms JSON missing by_microservice slack_d_ms; rebuild the ms binary")
         if "cumulative_queueing_delay_ms" not in ms_stats:
             raise SystemExit(
                 "ms JSON missing by_microservice cumulative_queueing_delay_ms; "
+                "rebuild the ms binary"
+            )
+        if "prob_latency_gt_slo" not in ms_stats:
+            raise SystemExit(
+                "ms JSON missing by_microservice prob_latency_gt_slo; "
                 "rebuild the ms binary"
             )
 

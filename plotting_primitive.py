@@ -629,6 +629,37 @@ def _configure_log_x_limits(ax, x_min: float, x_max: float) -> None:
     ax.xaxis.set_major_locator(LogLocator(base=10))
 
 
+def _fallback_axis_step(span: float) -> float:
+    """Pick a readable tick step; safe when span is zero."""
+    import math
+
+    if span <= 0:
+        return 1.0
+    raw = span / 5.0
+    magnitude = 10 ** math.floor(math.log10(max(raw, 1e-12)))
+    for mult in (1, 2, 5, 10):
+        step = mult * magnitude
+        if span / step <= 6:
+            return step
+    return raw
+
+
+def _degenerate_axis_limits(
+    lo: float,
+    hi: float,
+    *,
+    step: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Expand a zero-width axis range so ticks and limits are drawable."""
+    span = hi - lo
+    if span > 0:
+        return lo, hi
+    center = (lo + hi) / 2.0
+    tick_step = step if step is not None else _fallback_axis_step(span)
+    pad = 2 * tick_step
+    return center - pad, center + pad
+
+
 def _clip_x_ticks_to_limits(ax, x_min: float, x_max: float,
                             style: Optional[PlotStyle] = None) -> None:
     """Keep only x tick marks within the displayed range."""
@@ -674,28 +705,37 @@ def configure_x_axis_ticks(ax, x_data=None, style: Optional[PlotStyle] = None,
         final_x_min = final_x_max = None
     
     if final_x_min is not None and final_x_max is not None:
-        
+        if final_x_max - final_x_min <= 0:
+            final_x_min, final_x_max = _degenerate_axis_limits(
+                final_x_min,
+                final_x_max,
+                step=x_step,
+            )
+
         # Auto-calculate step if not provided
         if x_step is None:
             x_range = final_x_max - final_x_min
-            # Use nice step sizes to get roughly 4-6 ticks
-            magnitude = 10 ** math.floor(math.log10(x_range))
-            nice_steps = [1, 2, 5, 10]
-            
-            # Find the step that gives us closest to 5 ticks
-            target_ticks = 5
-            best_step = nice_steps[0] * magnitude
-            best_tick_count = abs(x_range / best_step - target_ticks)
-            
-            for step_multiplier in nice_steps:
-                candidate_step = step_multiplier * magnitude
-                tick_count = x_range / candidate_step
-                error = abs(tick_count - target_ticks)
-                if error < best_tick_count:
-                    best_tick_count = error
-                    best_step = candidate_step
-            
-            x_step = best_step
+            if x_range <= 0:
+                x_step = _fallback_axis_step(x_range)
+            else:
+                # Use nice step sizes to get roughly 4-6 ticks
+                magnitude = 10 ** math.floor(math.log10(x_range))
+                nice_steps = [1, 2, 5, 10]
+
+                # Find the step that gives us closest to 5 ticks
+                target_ticks = 5
+                best_step = nice_steps[0] * magnitude
+                best_tick_count = abs(x_range / best_step - target_ticks)
+
+                for step_multiplier in nice_steps:
+                    candidate_step = step_multiplier * magnitude
+                    tick_count = x_range / candidate_step
+                    error = abs(tick_count - target_ticks)
+                    if error < best_tick_count:
+                        best_tick_count = error
+                        best_step = candidate_step
+
+                x_step = best_step
         
         # Generate tick positions
         tick_start = math.floor(final_x_min / x_step) * x_step
@@ -752,28 +792,37 @@ def configure_y_axis_ticks(ax, y_data=None, style: Optional[PlotStyle] = None,
         final_y_min = final_y_max = None
     
     if final_y_min is not None and final_y_max is not None:
-        
+        if final_y_max - final_y_min <= 0:
+            final_y_min, final_y_max = _degenerate_axis_limits(
+                final_y_min,
+                final_y_max,
+                step=y_step,
+            )
+
         # Auto-calculate step if not provided
         if y_step is None:
             y_range = final_y_max - final_y_min
-            # Use nice step sizes to get roughly 4-6 ticks
-            magnitude = 10 ** math.floor(math.log10(y_range))
-            nice_steps = [1, 2, 5, 10]
-            
-            # Find the step that gives us closest to 5 ticks
-            target_ticks = 5
-            best_step = nice_steps[0] * magnitude
-            best_tick_count = abs(y_range / best_step - target_ticks)
-            
-            for step_multiplier in nice_steps:
-                candidate_step = step_multiplier * magnitude
-                tick_count = y_range / candidate_step
-                error = abs(tick_count - target_ticks)
-                if error < best_tick_count:
-                    best_tick_count = error
-                    best_step = candidate_step
-            
-            y_step = best_step
+            if y_range <= 0:
+                y_step = _fallback_axis_step(y_range)
+            else:
+                # Use nice step sizes to get roughly 4-6 ticks
+                magnitude = 10 ** math.floor(math.log10(y_range))
+                nice_steps = [1, 2, 5, 10]
+
+                # Find the step that gives us closest to 5 ticks
+                target_ticks = 5
+                best_step = nice_steps[0] * magnitude
+                best_tick_count = abs(y_range / best_step - target_ticks)
+
+                for step_multiplier in nice_steps:
+                    candidate_step = step_multiplier * magnitude
+                    tick_count = y_range / candidate_step
+                    error = abs(tick_count - target_ticks)
+                    if error < best_tick_count:
+                        best_tick_count = error
+                        best_step = candidate_step
+
+                y_step = best_step
         
         # Generate tick positions
         tick_start = math.floor(final_y_min / y_step) * y_step
@@ -1127,6 +1176,9 @@ def plot_cdf(ax, data, label: Optional[str] = None,
         resolved_xlim = (lo, hi)
     else:
         resolved_xlim = None
+
+    if resolved_xlim is not None:
+        resolved_xlim = _degenerate_axis_limits(*resolved_xlim)
 
     if log_x and resolved_xlim is not None:
         x_lo, x_hi = resolved_xlim
