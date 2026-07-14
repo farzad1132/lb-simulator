@@ -118,9 +118,15 @@ impl Replica {
         }
     }
 
-    fn finalize_visit(&self, request_id: u64, departure: nexosim::time::MonotonicTime) {
+    fn finalize_visit(
+        &self,
+        request_id: u64,
+        departure: nexosim::time::MonotonicTime,
+    ) -> Option<f64> {
         if let Ok(mut tracker) = self.visit_tracker.lock() {
-            tracker.finalize_visit(request_id, &self.microservice_id, departure);
+            tracker.finalize_visit(request_id, &self.microservice_id, departure)
+        } else {
+            None
         }
     }
 
@@ -233,7 +239,7 @@ impl Replica {
                 outbound_target_microservice,
                 outbound_target_server,
             } = caller;
-            self.finalize_visit(hop.request_id, cx.time());
+            let response_ms = self.finalize_visit(hop.request_id, cx.time());
             self.trace(
                 &hop,
                 cx,
@@ -249,6 +255,9 @@ impl Replica {
                 hop.outbound_release = Some(OutboundRelease {
                     target_microservice: outbound_target_microservice,
                     target_server: outbound_target_server,
+                    response_time_ms: response_ms
+                        .map(|ms| ms.round().max(0.0) as u64)
+                        .unwrap_or(0),
                 });
             }
             let key = (microservice, server);

@@ -48,7 +48,7 @@ flowchart LR
 
 | Script | Simulator | Description |
 |--------|-----------|-------------|
-| [`analyze/ms_service_distributions.py`](../analyze/ms_service_distributions.py) | `ms` | Per-microservice inter-arrival, inter-departure, normalized processing time, and queueing delay CDFs for a chain topology |
+| [`analyze/ms_service_distributions.py`](../analyze/ms_service_distributions.py) | `ms` | Per-microservice visit distributions, queueing/stddev panels, replica utilization, and SLO violation rates for a chain topology |
 
 ## Per-microservice visit metrics
 
@@ -61,6 +61,8 @@ Each user request produces one **visit** per microservice on its path (exactly o
 | **Response time** | `departure − arrival` (queueing, local processing, and time blocked waiting for downstream RPCs) |
 | **Queueing delay** | `service_start − arrival` (FIFO wait before local processing begins) |
 | **Processing time** | Sum of sampled local hop durations at that microservice only (excludes queueing) |
+| **Slack-d** | `deadline − arrival` at visit arrival |
+| **prob_latency_gt_slo** | Fraction of visits where the global API deadline was exceeded at departure (`response_time_ms > slack_d_ms`) |
 
 ### Visit lifecycle
 
@@ -79,7 +81,9 @@ Each user request produces one **visit** per microservice on its path (exactly o
       "inter_departure_ms": [0.15, 0.11, ...],
       "response_time_ms": [1.2, 0.9, ...],
       "queueing_delay_ms": [0.3, 0.1, ...],
-      "processing_time_ms": [0.5, 0.4, ...]
+      "processing_time_ms": [0.5, 0.4, ...],
+      "slack_d_ms": [14.8, 15.1, ...],
+      "prob_latency_gt_slo": 0.012
     }
   },
   "total_processing_p99_ms": 6.76
@@ -116,14 +120,16 @@ Custom fixtures:
 
 ## Output artifacts
 
-`ms_service_distributions.py` writes a **2 × 2 CDF grid** (default: `output/ms_service_distributions_chain3.pdf`):
+`ms_service_distributions.py` writes a **4 × 2** multi-panel PDF (default: `output/ms_service_distributions_tests_chain_<N>.pdf`):
 
-| | Left | Right |
-|---|------|-------|
-| **Top** | Inter-arrival (ms) | Inter-departure (ms) |
-| **Bottom** | Norm. processing time | Norm. queueing delay |
+| Row | Left | Right |
+|-----|------|-------|
+| **0** | Cumulative queueing violin | Cumulative queueing stddev (independent vs actual) |
+| **1** | Response time violin | RT / slack-d p50 & p90 (grouped bars) |
+| **2** | Slack-d CDF | Per-hop queueing stddev |
+| **3** | Replica utilization | SLO violations (%) per microservice |
 
-Each panel overlays CDFs for all microservices (legend at top). The figure suptitle annotates the normalization divisor.
+The slack-d CDF overlays all microservices (shared legend at top). Violin panels show p50, p90, and p99 percentile markers.
 
 ## Extending
 

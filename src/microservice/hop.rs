@@ -34,6 +34,8 @@ pub struct CallerRef {
 pub struct OutboundRelease {
     pub target_microservice: String,
     pub target_server: usize,
+    #[serde(default)]
+    pub response_time_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

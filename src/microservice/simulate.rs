@@ -386,7 +386,7 @@ fn calculate_stats(
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
         return Err(
-            "--lb-subset-size is not supported with --lb-policy cl, centralized, or corr".into(),
+            "--lb-subset-size is not supported with --lb-policy cl, cl-lr, centralized, or corr".into(),
         );
     }
     rng::enter_run(args.seed);
@@ -1208,6 +1208,22 @@ mod tests {
             mean_slack[idx] = ms_stats.slack_d_ms.iter().sum::<f64>() / 500.0;
             mean_cumulative[idx] =
                 ms_stats.cumulative_queueing_delay_ms.iter().sum::<f64>() / 500.0;
+            assert!(
+                (0.0..=1.0).contains(&ms_stats.prob_latency_gt_slo),
+                "{ms}: prob_latency_gt_slo out of range"
+            );
+            let expected = ms_stats
+                .response_time_ms
+                .iter()
+                .zip(ms_stats.slack_d_ms.iter())
+                .filter(|(rt, sd)| **rt > **sd)
+                .count() as f64
+                / 500.0;
+            assert!(
+                (ms_stats.prob_latency_gt_slo - expected).abs() < 1e-12,
+                "{ms}: prob_latency_gt_slo {} vs expected {expected}",
+                ms_stats.prob_latency_gt_slo
+            );
             for i in 0..500 {
                 assert!(
                     ms_stats.queueing_delay_ms[i] + ms_stats.processing_time_ms[i]

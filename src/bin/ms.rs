@@ -155,6 +155,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_cl_lr_lb_policy() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "cl-lr",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::ClLr);
+    }
+
+    #[test]
     fn parses_corr_lb_policy() {
         let cli = Args::parse_from([
             "ms",

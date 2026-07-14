@@ -99,7 +99,7 @@ Under EDF, returns use the same insertion rule as upstream arrivals. req=5 inser
 
 Scheduling does not change:
 
-- Which server a load balancer selects (`EdgeBalancer`, `ReplicaBalancer`, `DownstreamBalancer`) — except **`corr`**, which reads `Hop.deadline` at the shared `DownstreamBalancer` to compute slack-d for routing
+- Which server a load balancer selects (`EdgeBalancer`, `ReplicaBalancer`, `DownstreamBalancer`)
 - Shared `DownstreamBalancer` pull queue ordering (always FIFO under `centralized`)
 
 Scheduling only changes the order in which a replica dequeues waiting queue items.

@@ -23,6 +23,7 @@ struct MicroserviceSamples {
     cumulative_queueing_delay_ms: Vec<f64>,
     processing_time_ms: Vec<f64>,
     slack_d_ms: Vec<f64>,
+    slo_violations: usize,
 }
 
 #[derive(Serialize)]
@@ -34,6 +35,7 @@ pub struct MicroserviceStats {
     pub cumulative_queueing_delay_ms: Vec<f64>,
     pub processing_time_ms: Vec<f64>,
     pub slack_d_ms: Vec<f64>,
+    pub prob_latency_gt_slo: f64,
 }
 
 pub struct MicroserviceVisitTracker {
@@ -126,10 +128,10 @@ impl MicroserviceVisitTracker {
         request_id: u64,
         microservice_id: &str,
         departure: MonotonicTime,
-    ) {
+    ) -> Option<f64> {
         let key = (request_id, microservice_id.to_string());
         let Some(visit) = self.active.remove(&key) else {
-            return;
+            return None;
         };
 
         let response = departure.duration_since(visit.arrival);
@@ -159,9 +161,8 @@ impl MicroserviceVisitTracker {
                 .as_secs_f64()
                 * SECS_TO_MS,
         );
-        samples
-            .response_time_ms
-            .push(response.as_secs_f64() * SECS_TO_MS);
+        let response_ms = response.as_secs_f64() * SECS_TO_MS;
+        samples.response_time_ms.push(response_ms);
         samples
             .queueing_delay_ms
             .push(queueing.as_secs_f64() * SECS_TO_MS);
@@ -172,6 +173,10 @@ impl MicroserviceVisitTracker {
             .processing_time_ms
             .push(visit.local_processing.as_secs_f64() * SECS_TO_MS);
         samples.slack_d_ms.push(visit.slack_d_ms);
+        if response_ms > visit.slack_d_ms {
+            samples.slo_violations += 1;
+        }
+        Some(response_ms)
     }
 
     pub fn per_request_cumulative_queueing_ms(&self) -> Vec<Vec<f64>> {
@@ -189,6 +194,12 @@ impl MicroserviceVisitTracker {
             let Some(samples) = self.samples.get(microservice_id) else {
                 continue;
             };
+            let n = samples.response_time_ms.len();
+            let prob_latency_gt_slo = if n == 0 {
+                0.0
+            } else {
+                samples.slo_violations as f64 / n as f64
+            };
             out.insert(
                 microservice_id.clone(),
                 MicroserviceStats {
@@ -199,6 +210,7 @@ impl MicroserviceVisitTracker {
                     cumulative_queueing_delay_ms: samples.cumulative_queueing_delay_ms.clone(),
                     processing_time_ms: samples.processing_time_ms.clone(),
                     slack_d_ms: samples.slack_d_ms.clone(),
+                    prob_latency_gt_slo,
                 },
             );
         }

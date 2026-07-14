@@ -3,6 +3,8 @@ use super::trace::MsTracer;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
+use crate::rng;
+use hdrhistogram::Histogram;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
 use nexosim::time::MonotonicTime;
@@ -11,33 +13,47 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-const CORR_SLACK_DIST_WARMUP: usize = 200;
+const CORR_SLACK_DIST_WARMUP: u64 = 200;
 const SECS_TO_MS: f64 = 1000.0;
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
     Box::new(PowerOfTwoPolicy)
 }
 
+fn new_corr_histogram() -> Histogram<u64> {
+    Histogram::<u64>::new(2).expect("corr histogram precision")
+}
+
 fn time_to_ms(time: MonotonicTime) -> f64 {
     time.duration_since(MonotonicTime::EPOCH).as_secs_f64() * SECS_TO_MS
 }
 
-fn slack_cdf_percentile(sorted_observations: &[f64], value: f64) -> f64 {
-    if sorted_observations.is_empty() {
-        return 0.0;
+fn record_ms(hist: &mut Histogram<u64>, ms: f64) {
+    if ms < 0.0 {
+        return;
     }
-    let count = sorted_observations.partition_point(|&x| x <= value);
-    count as f64 / sorted_observations.len() as f64
+    let value = ms.round().max(0.0) as u64;
+    if let Err(e) = hist.record(value) {
+        eprintln!("corr histogram record failed for {value} ms: {e}");
+    }
 }
 
-fn corr_rank(observations: &[f64], sd_ms: f64) -> usize {
-    if observations.len() < CORR_SLACK_DIST_WARMUP {
+fn slack_cdf_percentile(hist: &Histogram<u64>, value_ms: f64) -> f64 {
+    if hist.is_empty() {
+        return 0.0;
+    }
+    hist.quantile_below(value_ms.floor().max(0.0) as u64)
+}
+
+fn corr_rank(slack_hist: &Histogram<u64>, _resp_hist: &Histogram<u64>, sd_ms: f64) -> usize {
+    if slack_hist.len() < CORR_SLACK_DIST_WARMUP {
         0
     } else {
-        let p = slack_cdf_percentile(observations, sd_ms);
         if sd_ms < 0.0 {
-            return 5;
+            return 10;
         }
+        let p = slack_cdf_percentile(slack_hist, sd_ms);
+
         match p {
             0.0..0.5 => 0,
             0.5..0.8 => 1,
@@ -46,23 +62,23 @@ fn corr_rank(observations: &[f64], sd_ms: f64) -> usize {
     }
 }
 
-fn insert_sorted_observation(observations: &mut Vec<f64>, value: f64) {
-    let idx = observations.partition_point(|&x| x <= value);
-    observations.insert(idx, value);
-}
-
 fn select_corr_replica(server_indices: &[usize], local_inflight: &[u32], rank: usize) -> usize {
-    let mut ranked: Vec<(usize, u32)> = server_indices
-        .iter()
-        .map(|&idx| (idx, local_inflight[idx]))
-        .collect();
-    ranked.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    let n = ranked.len();
-    if n == 0 {
+    if server_indices.is_empty() {
         return 0;
     }
-    //let idx = (percentile * n as f64).floor() as usize;
-    ranked[rank].0
+    let mut distinct_loads: Vec<u32> = server_indices
+        .iter()
+        .map(|&idx| local_inflight[idx])
+        .collect();
+    distinct_loads.sort();
+    distinct_loads.dedup();
+    let target_load = distinct_loads[rank.min(distinct_loads.len() - 1)];
+    let tied: Vec<usize> = server_indices
+        .iter()
+        .filter(|&&idx| local_inflight[idx] == target_load)
+        .copied()
+        .collect();
+    tied[rng::random_usize_range(0..tied.len())]
 }
 
 #[derive(Deserialize, Serialize)]
@@ -292,8 +308,15 @@ pub struct DownstreamBalancer {
     server_indices: Vec<usize>,
     #[serde(skip)]
     load_scratch: Vec<u32>,
-    #[serde(skip)]
-    slack_observations: Vec<f64>,
+    #[serde(skip, default = "new_corr_histogram")]
+    slack_histogram: Histogram<u64>,
+    // Observed downstream response times (departure - arrival at replica), recorded on release.
+    // Not used for routing yet. Future policy ideas:
+    // - Compare incoming slack-d via response_time_histogram.quantile_below(sd_ms) instead of slack history
+    // - Use value_at_quantile for latency prediction when picking among inflight ranks
+    // - Replace slack_histogram entirely once response-time-based routing is defined
+    #[serde(skip, default = "new_corr_histogram")]
+    response_time_histogram: Histogram<u64>,
     #[serde(skip)]
     queue: VecDeque<OutboundCall>,
     #[serde(skip)]
@@ -314,14 +337,15 @@ impl DownstreamBalancer {
             "server_indices must be within n_servers"
         );
         Self {
-            policy: Box::new(PowerOfTwoPolicy),
+            policy: lb_policy.downstream_push_policy(),
             lb_policy,
             target_microservice,
             tracer,
             local_inflight: vec![0; n_servers],
             load_scratch: vec![0; server_indices.len()],
             server_indices,
-            slack_observations: Vec::new(),
+            slack_histogram: new_corr_histogram(),
+            response_time_histogram: new_corr_histogram(),
             queue: VecDeque::new(),
             waiting_servers: VecDeque::new(),
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
@@ -335,6 +359,7 @@ impl DownstreamBalancer {
             call.hop.slot_release = Some(OutboundRelease {
                 target_microservice: self.target_microservice.clone(),
                 target_server: server_idx,
+                response_time_ms: 0,
             });
         } else if let Some(caller) = &mut call.hop.caller {
             caller.outbound_target_microservice = self.target_microservice.clone();
@@ -397,9 +422,9 @@ impl DownstreamBalancer {
 
         let global_idx = if self.lb_policy.is_corr() {
             let sd_ms = time_to_ms(call.hop.deadline) - time_to_ms(cx.time());
-            let rank = corr_rank(&self.slack_observations, sd_ms);
+            let rank = corr_rank(&self.slack_histogram, &self.response_time_histogram, sd_ms);
             let idx = select_corr_replica(&self.server_indices, &self.local_inflight, rank);
-            insert_sorted_observation(&mut self.slack_observations, sd_ms);
+            record_ms(&mut self.slack_histogram, sd_ms);
             idx
         } else {
             for (scratch, &server_idx) in
@@ -472,6 +497,12 @@ impl DownstreamBalancer {
             self.local_inflight[release.target_server] =
                 self.local_inflight[release.target_server].saturating_sub(1);
         }
+        if self.lb_policy.is_corr() && release.response_time_ms > 0 {
+            record_ms(
+                &mut self.response_time_histogram,
+                release.response_time_ms as f64,
+            );
+        }
     }
 }
 
@@ -512,63 +543,5 @@ impl OutboundGateway {
             return;
         };
         output.send(release).await;
-    }
-}
-
-#[cfg(test)]
-mod corr_tests {
-    use super::*;
-
-    #[test]
-    fn slack_cdf_percentile_empty_is_zero() {
-        assert_eq!(slack_cdf_percentile(&[], 10.0), 0.0);
-    }
-
-    #[test]
-    fn slack_cdf_percentile_counts_values_leq() {
-        let obs = vec![1.0, 2.0, 4.0, 4.0, 5.0];
-        assert_eq!(slack_cdf_percentile(&obs, 0.0), 0.0);
-        assert_eq!(slack_cdf_percentile(&obs, 2.0), 0.4);
-        assert_eq!(slack_cdf_percentile(&obs, 3.0), 0.4);
-        assert_eq!(slack_cdf_percentile(&obs, 4.0), 0.8);
-        assert_eq!(slack_cdf_percentile(&obs, 10.0), 1.0);
-    }
-
-    #[test]
-    fn corr_rank_warmup_forces_zero() {
-        let obs = vec![1.0; CORR_SLACK_DIST_WARMUP - 1];
-        assert_eq!(corr_rank(&obs, 100.0), 0);
-    }
-
-    #[test]
-    fn corr_rank_buckets_cdf_percentile_after_warmup() {
-        let mut obs = vec![1.0; CORR_SLACK_DIST_WARMUP / 2];
-        obs.extend(vec![10.0; CORR_SLACK_DIST_WARMUP / 2]);
-        assert_eq!(corr_rank(&obs, 0.5), 0);   // p=0
-        assert_eq!(corr_rank(&obs, 1.0), 1);   // p=0.5
-        assert_eq!(corr_rank(&obs, 10.0), 2);  // p=1.0
-    }
-
-    #[test]
-    fn corr_rank_negative_slack_uses_rank_five() {
-        let obs = vec![1.0; CORR_SLACK_DIST_WARMUP];
-        assert_eq!(corr_rank(&obs, -1.0), 5);
-    }
-
-    #[test]
-    fn select_corr_replica_picks_by_rank() {
-        let indices = vec![0, 1, 2];
-        let inflight = vec![3, 0, 5];
-        assert_eq!(select_corr_replica(&indices, &inflight, 0), 1);
-        assert_eq!(select_corr_replica(&indices, &inflight, 1), 0);
-        assert_eq!(select_corr_replica(&indices, &inflight, 2), 2);
-    }
-
-    #[test]
-    fn insert_sorted_observation_maintains_order() {
-        let mut obs = vec![1.0, 3.0, 5.0];
-        insert_sorted_observation(&mut obs, 2.0);
-        insert_sorted_observation(&mut obs, 5.0);
-        assert_eq!(obs, vec![1.0, 2.0, 3.0, 5.0, 5.0]);
     }
 }

@@ -93,6 +93,8 @@ pub enum LoadBalancePolicyKind {
     Centralized,
     #[value(name = "cl")]
     Cl,
+    #[value(name = "cl-lr")]
+    ClLr,
     #[value(name = "corr")]
     Corr,
 }
@@ -108,7 +110,7 @@ impl LoadBalancePolicyKind {
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized => Box::new(CentralizedPolicy),
-            Self::Cl | Self::Corr => Box::new(PowerOfTwoPolicy),
+            Self::Cl | Self::ClLr | Self::Corr => Box::new(PowerOfTwoPolicy),
         }
     }
 
@@ -124,14 +126,31 @@ impl LoadBalancePolicyKind {
         matches!(self, Self::Corr)
     }
 
+    pub fn is_ms_only(self) -> bool {
+        matches!(self, Self::Cl | Self::ClLr | Self::Corr)
+    }
+
     pub fn uses_shared_downstream(self) -> bool {
-        matches!(self, Self::Cl | Self::Centralized | Self::Corr)
+        matches!(
+            self,
+            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr
+        )
     }
 
     pub fn ingress_policy(self) -> Box<dyn LoadBalancePolicy> {
         match self {
-            Self::Cl | Self::Centralized | Self::Corr => Box::new(PowerOfTwoPolicy),
+            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr => {
+                Box::new(PowerOfTwoPolicy)
+            }
             other => other.build(),
+        }
+    }
+
+    pub fn downstream_push_policy(self) -> Box<dyn LoadBalancePolicy> {
+        match self {
+            Self::ClLr => Box::new(LeastRequestPolicy),
+            Self::Cl => Box::new(PowerOfTwoPolicy),
+            _ => Box::new(PowerOfTwoPolicy),
         }
     }
 }
@@ -161,8 +180,38 @@ mod tests {
     #[test]
     fn uses_shared_downstream_for_cl_centralized_and_corr() {
         assert!(LoadBalancePolicyKind::Cl.uses_shared_downstream());
+        assert!(LoadBalancePolicyKind::ClLr.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Centralized.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Corr.uses_shared_downstream());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.uses_shared_downstream());
+    }
+
+    #[test]
+    fn is_ms_only_for_cl_cl_lr_and_corr() {
+        assert!(LoadBalancePolicyKind::Cl.is_ms_only());
+        assert!(LoadBalancePolicyKind::ClLr.is_ms_only());
+        assert!(LoadBalancePolicyKind::Corr.is_ms_only());
+        assert!(!LoadBalancePolicyKind::Centralized.is_ms_only());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_ms_only());
+    }
+
+    #[test]
+    fn cl_lr_ingress_is_power_of_two() {
+        crate::rng::enter_run(Some(42));
+        let mut cl = LoadBalancePolicyKind::Cl.ingress_policy();
+        let loads = [3u32, 0, 7, 2];
+        let cl_pick = cl.select(&loads);
+
+        crate::rng::enter_run(Some(42));
+        let mut cl_lr = LoadBalancePolicyKind::ClLr.ingress_policy();
+        assert_eq!(cl_lr.select(&loads), cl_pick);
+        crate::rng::exit_run();
+    }
+
+    #[test]
+    fn cl_lr_downstream_is_least_request() {
+        let mut policy = LoadBalancePolicyKind::ClLr.downstream_push_policy();
+        let loads = [5u32, 1, 3];
+        assert_eq!(policy.select(&loads), 1);
     }
 }

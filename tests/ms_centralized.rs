@@ -106,7 +106,7 @@ fn ms_centralized_rejects_subset_size() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not supported with --lb-policy cl, centralized, or corr"),
+        stderr.contains("not supported with --lb-policy cl, cl-lr, centralized, or corr"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -135,7 +135,7 @@ fn ms_cl_rejects_subset_size() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not supported with --lb-policy cl, centralized, or corr"),
+        stderr.contains("not supported with --lb-policy cl, cl-lr, centralized, or corr"),
         "unexpected stderr: {stderr}"
     );
 }

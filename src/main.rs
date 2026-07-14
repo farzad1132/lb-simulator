@@ -1086,10 +1086,15 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if args.lb_policy.is_cl() || args.lb_policy.is_corr() {
+    if args.lb_policy.is_ms_only() {
+        let name = match args.lb_policy {
+            LoadBalancePolicyKind::Cl => "cl",
+            LoadBalancePolicyKind::ClLr => "cl-lr",
+            LoadBalancePolicyKind::Corr => "corr",
+            _ => unreachable!(),
+        };
         return Err(format!(
-            "--lb-policy {} is not supported by the lb simulator",
-            if args.lb_policy.is_cl() { "cl" } else { "corr" }
+            "--lb-policy {name} is not supported by the lb simulator"
         )
         .into());
     }

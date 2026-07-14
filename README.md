@@ -29,9 +29,10 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 - **centralized** — pull-based: one global queue at a single dispatcher; servers request work when they have spare capacity (`lb`: flat pool; ignores `--lb-subset-size`; incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target); see [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer).
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
-- **corr** — shared push outbound layer routing by slack-d CDF buckets to inflight rank (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
+- **cl-lr** — shared push least-request outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
+- **corr** — experimental shared push outbound layer (`ms` only; same topology as `cl`; ingress stays P2C; `--lb-subset-size > 0` rejected)
 
-Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only; not supported with `cl`, `centralized`, or `corr` in `ms`). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
+Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only; not supported with `cl`, `cl-lr`, `centralized`, or `corr` in `ms`). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
 
 ## Metrics
 
@@ -125,8 +126,8 @@ cargo build --release
 | `--callgraph` | (required) | Path to callgraph JSON |
 | `--load-file` | (required) | Path to per-API load JSON (`rps` + `slo_ms`) |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `centralized`, `corr`) |
-| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `cl`, `centralized`, or `corr`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `corr`) |
+| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `cl`, `cl-lr`, `centralized`, or `corr`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`); see [docs/scheduling.md](docs/scheduling.md) |
@@ -533,7 +534,7 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range |
 | `--n` | `100000` | Requests per run |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `centralized`, `corr`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `corr`) |
 | `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas) |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`) |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |
@@ -551,7 +552,7 @@ python compare_lb_ms.py --scenario all --plot
 | `--scenario` | `all` | `single`, `multi`, or `all` fixture topologies |
 | `--n` | `200000` | Total requests per run |
 | `--load` | `0.8` | Target utilization for lb (ms `load.json` rps must match) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (`cl`, `corr`, and ms `centralized` are shared-layer outbound; subset not supported with those policies) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (`cl`, `cl-lr`, `corr`, and ms `centralized` are shared-layer outbound; subset not supported with those policies) |
 | `--plot` | (off) | Write lb vs ms overlay CDF plots to `--output-dir` |
 | `--output-dir` | `output/` | Directory for optional CDF plots |
 | `--no-build` | (off) | Do not run `cargo build --release` |
