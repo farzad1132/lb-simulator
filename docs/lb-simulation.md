@@ -76,6 +76,7 @@ Each server has:
 - **`input`** — receives `Task` from any load balancer
 - **`output`** — sends completed `Task` to the shared stats sink
 - **`release_outputs: Vec<Output<usize>>`** — one output per client load balancer; on completion, sends `server_idx` to the originating LB's `release` handler (identified via `task.lb_id`)
+- **`shed_outputs: Vec<Output<Task>>`** (when `--shed-delay` is set) — one output per client load balancer; on shed, returns the task to that LB's `input` for re-routing
 
 ### Stats sink
 
@@ -97,6 +98,9 @@ For each load balancer i and server j:
 For each server j and client i:
     Server_j.release_outputs[i] ──▶ LoadBalancer_i.release
 
+For each server j and client i (when --shed-delay is set):
+    Server_j.shed_outputs[i] ──▶ LoadBalancer_i.input
+
 For each server j:
     Server_j.output ──▶ shared stats sink
 ```
@@ -111,12 +115,13 @@ A **Task** is the unit of work flowing through the simulation.
 | `duration` | Arrival source | Sampled service time (exponential, constant, or bimodal) |
 | `finish` | `Server::complete` | E2e latency end time |
 | `lb_id` | LoadBalancer before dispatch | Routes release notification back to the correct LB |
+| `shed_at` | `Server::forward_shed` | Timestamp when a shed task was returned to the LB (only when `--shed-delay` is set) |
 
 ### End-to-end flow
 
 1. **Arrival.** `task_source` schedules `Task { start, duration }` to the client's load balancer `input`.
 2. **Routing.** The load balancer fills a scratch buffer with local inflight values for servers in its subset, calls the policy to pick a server, increments `local_inflight[server]`, sets `task.lb_id`, and sends the task on `outputs[server]`.
-3. **Queueing.** The server accepts the task into service immediately if `in_flight < max_concurrency`, otherwise pushes it onto a FIFO queue.
+3. **Queueing.** The server accepts the task into service immediately if `in_flight < max_concurrency`, otherwise pushes it onto a FIFO queue. With `--shed-delay`, the server may return the newest queued task to the originating LB if queueing delay exceeds the threshold (see [work-shedding.md](work-shedding.md)).
 4. **Service.** `begin_service` increments `in_flight` and schedules a completion event after `task.duration`.
 5. **Completion.** `Server::complete` sets `finish`, sends the task to the stats sink, sends `server_idx` on `release_outputs[task.lb_id]`, decrements `in_flight`, and drains the queue.
 6. **Release.** The load balancer's `release` handler decrements `local_inflight[server_idx]`.
@@ -447,6 +452,7 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Load-probe-based server selection under centralized (assignment is pull-order FCFS)
 - Centralized policy in the `ms` simulator (per-downstream-target outbound pull layer)
 - Express lane with client `--lb-policy centralized`
+- Work shedding with client `--lb-policy centralized` or `approx`
 
 ## Source file map
 

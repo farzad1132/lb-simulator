@@ -28,7 +28,13 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import numpy as np
 from tqdm import tqdm
 
-from lb_plot_configs import ExperimentConfig, select_configs, uses_express_lane, uses_pull_policy
+from lb_plot_configs import (
+    ExperimentConfig,
+    select_configs,
+    uses_express_lane,
+    uses_pull_policy,
+    uses_work_shedding,
+)
 from plot_cdfs import (
     REPO_ROOT,
     ensure_release_binary,
@@ -61,7 +67,8 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("CL-1-LR", "least-request", 1, 10),
     ExperimentConfig("CL-1-P2C", "power-of-two", 1, 10),
     ExperimentConfig("Approx-LR", "approx", 10, 10, pull_policy="least-request"),
-    ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
+    #ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
+    ExperimentConfig("P2C-S5", "power-of-two", 10, 10, shed_delay=5),
     #ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
     #ExperimentConfig("P2C-E36-ideal", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, ideal=True),
     #ExperimentConfig("CQ-LR-2", "least-request", 2, 10, lb_subset_size=0),
@@ -73,6 +80,7 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     #ExperimentConfig("P2C-E2021", "power-of-two", 10, 100, lb_subset_size=0, express_size=20, express_del_th=2, express_th=3),
     #ExperimentConfig("P2C-E491", "power-of-two", 10, 10, lb_subset_size=0, express_size=4, express_del_th=9, express_th=1),
     #ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
+    #ExperimentConfig("P2C-S0.5", "power-of-two", 10, 10, shed_delay=0.5),
 ]
 
 
@@ -115,6 +123,8 @@ def format_run_summary(
             parts.append(f"express_th={config.express_th}")
         if config.ideal:
             parts.append("ideal")
+    if uses_work_shedding(config):
+        parts.append(f"shed_delay={config.shed_delay:g}")
     if kind == "utilization":
         parts.append(f"utilization={metric_value:.1f}%")
     elif kind == "slo-violation":
@@ -164,6 +174,8 @@ def run_load_sweep(
                 express_th=config.express_th,
                 ideal=config.ideal,
             )
+        if uses_work_shedding(config):
+            sim_kwargs["shed_delay"] = config.shed_delay
         data = run_simulation(binary, **sim_kwargs)
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)

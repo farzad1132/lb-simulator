@@ -235,6 +235,7 @@ struct ServiceStats {
     express_queueing_delays: Option<Vec<f64>>,
     pre_eviction_queueing_delays: Option<Vec<f64>>,
     post_eviction_queueing_delays: Option<Vec<f64>>,
+    pct_shed_requests: Option<f64>,
 }
 
 struct ExpressLaneStatsConfig {
@@ -276,6 +277,8 @@ struct RunOutput {
     pre_eviction_queueing_delays: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     post_eviction_queueing_delays: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pct_shed_requests: Option<f64>,
 }
 
 fn validate_slo(slo: Option<f64>) -> Result<Option<f64>, String> {
@@ -325,6 +328,7 @@ fn calculate_stats(
     observation: Duration,
     total_capacity: u32,
     express_lane: Option<&ExpressLaneStatsConfig>,
+    work_shedding: bool,
 ) -> Option<ServiceStats> {
     let mut task_samples: Vec<(f64, f64, bool, Option<f64>, Option<f64>)> = Vec::new();
     let mut arrival_times: Vec<f64> = Vec::new();
@@ -332,8 +336,14 @@ fn calculate_stats(
     let mut busy = Duration::ZERO;
     let mut regular_busy = Duration::ZERO;
     let mut express_busy = Duration::ZERO;
+    let mut total_requests = 0usize;
+    let mut shed_requests = 0usize;
 
     while let Some(task) = output.try_read() {
+        total_requests += 1;
+        if work_shedding && task.shed_at.is_some() {
+            shed_requests += 1;
+        }
         arrival_times.push(time_secs(task.start));
         departure_times.push(time_secs(task.finish));
         busy += task.duration;
@@ -461,6 +471,12 @@ fn calculate_stats(
         None => (None, None, None, None, None, None, None, None),
     };
 
+    let pct_shed_requests = if work_shedding && total_requests > 0 {
+        Some(shed_requests as f64 / total_requests as f64 * 100.0)
+    } else {
+        None
+    };
+
     Some(ServiceStats {
         utilization_pct,
         regular_utilization_pct,
@@ -477,6 +493,7 @@ fn calculate_stats(
         express_queueing_delays,
         pre_eviction_queueing_delays,
         post_eviction_queueing_delays,
+        pct_shed_requests,
     })
 }
 
@@ -527,6 +544,9 @@ fn print_human_stats(stats: &ServiceStats, rates: &Rates, slo: Option<f64>) {
             "P(latency > SLO): {:.6}",
             prob_latency_gt_slo(&stats.e2e, slo)
         );
+    }
+    if let Some(pct) = stats.pct_shed_requests {
+        println!("shed requests: {pct:.2}%");
     }
     print_percentile_table("e2e latency (s):", &mut stats.e2e.clone());
     print_percentile_table("processing time (s):", &mut stats.processing_times.clone());
@@ -612,6 +632,8 @@ struct Args {
     express_del_th: Option<f64>,
     #[arg(long)]
     ideal: bool,
+    #[arg(long)]
+    shed_delay: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -718,6 +740,42 @@ fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String
     }))
 }
 
+fn validate_shed_delay(value: f64) -> Result<Duration, String> {
+    if value > 0.0 && value.is_finite() {
+        Ok(Duration::from_secs_f64(value))
+    } else {
+        Err("--shed-delay must be positive and finite".into())
+    }
+}
+
+fn validate_work_shedding(args: &Args) -> Result<Option<Duration>, String> {
+    if args.shed_delay.is_none() {
+        return Ok(None);
+    }
+
+    if args.lb_policy.is_centralized() || args.lb_policy.is_approx() {
+        let policy = if args.lb_policy.is_centralized() {
+            "centralized"
+        } else {
+            "approx"
+        };
+        return Err(format!(
+            "--shed-delay is not supported with --lb-policy {policy}"
+        ));
+    }
+
+    let has_express_flags = args.expresslane
+        || args.express_size.is_some()
+        || args.express_th.is_some()
+        || args.express_del_th.is_some();
+    if has_express_flags {
+        return Err("--shed-delay cannot be combined with --expresslane".into());
+    }
+
+    validate_shed_delay(args.shed_delay.expect("checked above"))
+        .map(Some)
+}
+
 fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
     let clients = clients.max(1);
     let base = n / clients;
@@ -729,11 +787,12 @@ fn run_simulation(
     args: &Args,
     service_time: &ServiceTimeConfig,
     express_lane: Option<&ExpressLaneConfig>,
+    work_shedding: Option<Duration>,
 ) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
     if args.lb_policy.is_centralized() {
         return run_centralized_simulation(args, service_time);
     }
-    run_push_simulation(args, service_time, express_lane)
+    run_push_simulation(args, service_time, express_lane, work_shedding)
 }
 
 fn run_centralized_simulation(
@@ -786,6 +845,7 @@ fn run_centralized_simulation(
             i,
             release_outputs,
             None,
+            None,
             false,
             None,
             DispatchMode::Centralized,
@@ -833,6 +893,7 @@ fn run_centralized_simulation(
         observation,
         total_capacity,
         None,
+        false,
     ))
 }
 
@@ -840,6 +901,7 @@ fn run_push_simulation(
     args: &Args,
     service_time: &ServiceTimeConfig,
     express_lane: Option<&ExpressLaneConfig>,
+    work_shedding: Option<Duration>,
 ) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
     let n_clients = args.clients.max(1) as usize;
     let n_servers = args.servers.max(1) as usize;
@@ -986,11 +1048,18 @@ fn run_push_simulation(
             DispatchMode::Push
         };
 
+        let server_work_shedding = if !is_express && dispatch_mode == DispatchMode::Push {
+            work_shedding
+        } else {
+            None
+        };
+
         let mut server = Server::new(
             concurrency,
             i,
             release_outputs,
             server_express_eviction,
+            server_work_shedding,
             is_express,
             server_express_lb_id,
             dispatch_mode,
@@ -1008,6 +1077,13 @@ fn run_push_simulation(
                     .express_output
                     .connect(LoadBalancer::input, express_addr);
             }
+        }
+        if server_work_shedding.is_some() {
+            let mut shed_outputs: Vec<_> = (0..n_clients).map(|_| Output::default()).collect();
+            for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
+                shed_outputs[lb_id].connect(LoadBalancer::input, lb_address);
+            }
+            server.set_shed_outputs(shed_outputs);
         }
         if is_express {
             if let Some(express_addr) = express_lb_address.as_ref() {
@@ -1063,6 +1139,7 @@ fn run_push_simulation(
         observation,
         total_capacity,
         stats_config.as_ref(),
+        work_shedding.is_some(),
     ))
 }
 
@@ -1097,6 +1174,7 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             express_queueing_delays: stats.express_queueing_delays,
             pre_eviction_queueing_delays: stats.pre_eviction_queueing_delays,
             post_eviction_queueing_delays: stats.post_eviction_queueing_delays,
+            pct_shed_requests: stats.pct_shed_requests,
         },
         None => RunOutput {
             total_service_rate: rates.total_service_rate,
@@ -1120,6 +1198,7 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             express_queueing_delays: None,
             pre_eviction_queueing_delays: None,
             post_eviction_queueing_delays: None,
+            pct_shed_requests: None,
         },
     }
 }
@@ -1141,10 +1220,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_pull_policy(args.lb_policy, args.pull_policy).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;
+    let work_shedding = validate_work_shedding(&args)?;
     let service_time = resolve_service_time(&args)?;
     let rates = compute_rates(&args, service_time.mean);
     rng::enter_run(args.seed);
-    let stats = run_simulation(&args, &service_time, express_lane.as_ref());
+    let stats = run_simulation(&args, &service_time, express_lane.as_ref(), work_shedding);
     rng::exit_run();
     let stats = stats?;
 
@@ -1625,6 +1705,139 @@ mod tests {
     }
 
     #[test]
+    fn validate_work_shedding_accepts_positive_threshold() {
+        let threshold = validate_work_shedding(
+            &Args::try_parse_from(["lb", "--shed-delay", "0.5"]).unwrap(),
+        )
+        .unwrap()
+        .expect("expected work shedding config");
+        assert_eq!(threshold, Duration::from_secs_f64(0.5));
+    }
+
+    #[test]
+    fn validate_work_shedding_rejects_non_positive_threshold() {
+        let err = validate_work_shedding(
+            &Args::try_parse_from(["lb", "--shed-delay", "0"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--shed-delay must be positive"));
+    }
+
+    #[test]
+    fn validate_work_shedding_rejects_centralized() {
+        let err = validate_work_shedding(
+            &Args::try_parse_from([
+                "lb",
+                "--shed-delay",
+                "0.5",
+                "--lb-policy",
+                "centralized",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("not supported with --lb-policy centralized"));
+    }
+
+    #[test]
+    fn validate_work_shedding_rejects_approx() {
+        let err = validate_work_shedding(
+            &Args::try_parse_from([
+                "lb",
+                "--shed-delay",
+                "0.5",
+                "--lb-policy",
+                "approx",
+                "--pull-policy",
+                "power-of-two",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("not supported with --lb-policy approx"));
+    }
+
+    #[test]
+    fn validate_work_shedding_rejects_expresslane() {
+        let err = validate_work_shedding(
+            &Args::try_parse_from([
+                "lb",
+                "--shed-delay",
+                "0.5",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-th",
+                "5",
+                "--servers",
+                "10",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot be combined with --expresslane"));
+    }
+
+    #[test]
+    fn work_shedding_simulation_completes_tasks() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--shed-delay",
+            "2.0",
+            "--servers",
+            "4",
+            "--n",
+            "200",
+            "--load",
+            "0.3",
+            "--seed",
+            "42",
+        ])
+        .unwrap();
+        let work_shedding = validate_work_shedding(&args).unwrap();
+        let service_time = resolve_service_time(&args).unwrap();
+        rng::enter_run(args.seed);
+        let stats = run_simulation(&args, &service_time, None, work_shedding).unwrap();
+        rng::exit_run();
+        let stats = stats.expect("expected completed tasks");
+        assert_eq!(stats.e2e.len(), 200);
+        let pct = stats.pct_shed_requests.expect("expected shed metric");
+        assert!((0.0..=100.0).contains(&pct));
+
+        let output = run_output(Some(stats), &compute_rates(&args, service_time.mean), None);
+        let json = serde_json::to_value(&output).unwrap();
+        assert!(json.get("pct_shed_requests").is_some());
+    }
+
+    #[test]
+    fn work_shedding_reports_pct_under_load() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--shed-delay",
+            "2.0",
+            "--servers",
+            "3",
+            "--concurrency",
+            "1",
+            "--n",
+            "50",
+            "--load",
+            "0.85",
+            "--seed",
+            "42",
+        ])
+        .unwrap();
+        let work_shedding = validate_work_shedding(&args).unwrap();
+        let service_time = resolve_service_time(&args).unwrap();
+        rng::enter_run(args.seed);
+        let stats = run_simulation(&args, &service_time, None, work_shedding).unwrap();
+        rng::exit_run();
+        let stats = stats.expect("expected completed tasks");
+        let pct = stats.pct_shed_requests.expect("expected shed metric");
+        assert!((0.0..=100.0).contains(&pct));
+    }
+
+    #[test]
     fn expresslane_subset_uses_regular_pool_only() {
         let n_regular = 8;
         let subset = subset::assign_subset(SubsetPolicyKind::Deterministic, n_regular, 0, 0);
@@ -1654,7 +1867,7 @@ mod tests {
         let express_lane = validate_expresslane(&args).unwrap();
         let service_time = resolve_service_time(&args).unwrap();
         rng::enter_run(args.seed);
-        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref(), None).unwrap();
         rng::exit_run();
         let stats = stats.expect("expected completed tasks");
         assert_eq!(stats.e2e.len(), 1000);
@@ -1698,7 +1911,7 @@ mod tests {
         let capacity = args.servers.max(1) * args.concurrency.max(1);
         let arrival_mean = service_time.mean / (args.load * capacity as f32);
         rng::enter_run(args.seed);
-        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref(), None).unwrap();
         rng::exit_run();
         let stats = stats.expect("expected completed tasks");
         assert_eq!(stats.inter_arrival.len(), 49);
@@ -1729,7 +1942,7 @@ mod tests {
         let capacity = args.servers.max(1) * args.concurrency.max(1);
         let arrival_mean = service_time.mean / (args.load * capacity as f32);
         rng::enter_run(args.seed);
-        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref(), None).unwrap();
         rng::exit_run();
         let stats = stats.expect("expected completed tasks");
         assert_eq!(stats.inter_arrival.len(), 29);
@@ -1747,7 +1960,7 @@ mod tests {
         let express_lane = validate_expresslane(&args).unwrap();
         let service_time = resolve_service_time(&args).unwrap();
         rng::enter_run(args.seed);
-        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref(), None).unwrap();
         rng::exit_run();
         let stats = stats.expect("expected completed tasks");
         assert_eq!(stats.inter_arrival.len(), 499);
@@ -1762,7 +1975,7 @@ mod tests {
         assert!(express_lane.is_none());
         let service_time = resolve_service_time(&args).unwrap();
         rng::enter_run(args.seed);
-        let stats = run_simulation(&args, &service_time, express_lane.as_ref()).unwrap();
+        let stats = run_simulation(&args, &service_time, express_lane.as_ref(), None).unwrap();
         rng::exit_run();
         let stats = stats.expect("expected completed tasks");
         assert!(stats.regular_utilization_pct.is_none());
@@ -1773,6 +1986,7 @@ mod tests {
         assert!(stats.express_queueing_delays.is_none());
         assert!(stats.pre_eviction_queueing_delays.is_none());
         assert!(stats.post_eviction_queueing_delays.is_none());
+        assert!(stats.pct_shed_requests.is_none());
 
         let output = run_output(Some(stats), &compute_rates(&args, service_time.mean), None);
         let json = serde_json::to_value(&output).unwrap();
@@ -1784,5 +1998,6 @@ mod tests {
         assert!(json.get("express_queueing_delays").is_none());
         assert!(json.get("pre_eviction_queueing_delays").is_none());
         assert!(json.get("post_eviction_queueing_delays").is_none());
+        assert!(json.get("pct_shed_requests").is_none());
     }
 }

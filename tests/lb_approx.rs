@@ -127,3 +127,33 @@ fn lb_approx_rejects_expresslane() {
         "unexpected stderr: {stderr}"
     );
 }
+
+#[test]
+fn lb_approx_rejects_shed_delay() {
+    let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
+
+    let output = Command::new(&lb_binary)
+        .args([
+            "--format",
+            "json",
+            "--n",
+            "100",
+            "--servers",
+            "4",
+            "--shed-delay",
+            "0.5",
+            "--lb-policy",
+            "approx",
+            "--pull-policy",
+            "power-of-two",
+        ])
+        .output()
+        .expect("failed to spawn lb");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not supported with --lb-policy approx"),
+        "unexpected stderr: {stderr}"
+    );
+}

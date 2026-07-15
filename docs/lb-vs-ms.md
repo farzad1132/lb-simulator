@@ -24,6 +24,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | SLO violation rate | yes | yes | lb: optional `--slo` (seconds); ms: `slo_ms` per API in `load.json` |
 | Unloaded latency p99 | yes | yes | lb: p99 of service durations; ms: p99 of `processing_time_ms` |
 | **Express lane** | yes | — | lb-only; see [expresslane.md](expresslane.md) |
+| **Work shedding** | yes | — | lb-only; `--shed-delay`; see [work-shedding.md](work-shedding.md) |
 | **Centralized pull dispatch** | yes | yes | lb: one global queue; servers pull on spare capacity. ms: one pull queue per downstream target (outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Approx decentralized pull** | yes | yes (outbound only) | lb: per-client queues; ms: per-caller-replica `ReplicaBalancer` queues; `--pull-policy` selects pull-intent targets. ms ingress stays push P2C. See [lb-simulation.md](lb-simulation.md#approx-policy-decentralized-pull) and [microservice-simulation.md](microservice-simulation.md#approx-policy-decentralized-outbound-pull). |
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
@@ -141,6 +142,14 @@ Flags: `--expresslane`, `--express-size`, `--express-th`, `--express-del-th`, `-
 
 Full design: [expresslane.md](expresslane.md).
 
+### Work shedding
+
+Queue-delay shedding from regular servers back to the originating client load balancer for re-routing. Enable with `--shed-delay <seconds>`. Uses monitored delay triggers (head-of-line wait and projected delay). Mutually exclusive with express lane. Not implemented in `ms`.
+
+Flag: `--shed-delay`.
+
+Full design: [work-shedding.md](work-shedding.md).
+
 ### Multiple ingress clients
 
 `--clients C` creates C independent arrival sources and C load balancers. Aggregate arrival rate is unchanged (`per_client_arrival_mean = arrival_mean × C`); `--n` is split evenly across clients.
@@ -253,10 +262,11 @@ python compare_lb_ms.py --scenario all --n 200000
 
 Automated check: `cargo test lb_ms_equivalence`.
 
-Multi-hop ms topologies (fan-in, chains, caller queue) have **no** lb equivalent. Express lane has **no** ms equivalent.
+Multi-hop ms topologies (fan-in, chains, caller queue) have **no** lb equivalent. Express lane and work shedding have **no** ms equivalent.
 
 ## See also
 
 - [lb-simulation.md](lb-simulation.md) — flat simulator design
 - [microservice-simulation.md](microservice-simulation.md) — callgraph simulator design
 - [expresslane.md](expresslane.md) — express lane mode (lb only)
+- [work-shedding.md](work-shedding.md) — work shedding mode (lb only)

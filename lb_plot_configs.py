@@ -19,6 +19,7 @@ class ExperimentConfig:
     express_del_th: float | None = None
     express_th: int | None = None
     ideal: bool = False
+    shed_delay: float | None = None
 
 
 def uses_pull_policy(config: ExperimentConfig) -> bool:
@@ -36,6 +37,10 @@ def uses_express_lane(config: ExperimentConfig) -> bool:
     )
 
 
+def uses_work_shedding(config: ExperimentConfig) -> bool:
+    return config.shed_delay is not None
+
+
 def validate_config(config: ExperimentConfig) -> None:
     label = config.label
     if uses_pull_policy(config):
@@ -47,6 +52,19 @@ def validate_config(config: ExperimentConfig) -> None:
         raise SystemExit(
             f"config {label!r}: pull_policy is only valid when lb_policy is approx"
         )
+    if uses_work_shedding(config):
+        if config.lb_policy in ("centralized", "approx"):
+            raise SystemExit(
+                f"config {label!r}: shed_delay is incompatible with {config.lb_policy} policy"
+            )
+        if uses_express_lane(config):
+            raise SystemExit(
+                f"config {label!r}: shed_delay cannot be combined with express lane"
+            )
+        if config.shed_delay <= 0:
+            raise SystemExit(
+                f"config {label!r}: shed_delay must be positive (got {config.shed_delay:g})"
+            )
     if not uses_express_lane(config):
         return
     if config.lb_policy in ("centralized", "approx"):

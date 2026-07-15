@@ -238,6 +238,7 @@ def run_simulation(
     express_del_th: float | None = None,
     express_th: int | None = None,
     ideal: bool = False,
+    shed_delay: float | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -280,6 +281,8 @@ def run_simulation(
             cmd.extend(["--express-th", str(express_th)])
         if ideal:
             cmd.append("--ideal")
+    if shed_delay is not None:
+        cmd.extend(["--shed-delay", str(shed_delay)])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")

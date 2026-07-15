@@ -21,6 +21,8 @@ For a side-by-side feature comparison with the microservice simulator, see [docs
 
 **Express lane mode** (`--expresslane`) adds a dedicated overflow path to express servers when regular-server queues exceed a threshold. Use `--express-th`, `--express-del-th`, or both (combined OR eviction). Delay-only runs support monitored timers by default; `--ideal` selects immediate eviction for delay triggers (not compatible with `--express-th`). See [docs/expresslane.md](docs/expresslane.md).
 
+**Work shedding** (`--shed-delay`) returns queued tasks from overloaded servers back to the originating client load balancer for re-routing. Uses monitored queue-delay triggers (head-of-line wait and projected delay). Mutually exclusive with express lane. See [docs/work-shedding.md](docs/work-shedding.md).
+
 Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available policies:
 
 - **random** — uniform random server selection
@@ -184,6 +186,7 @@ Options:
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--slo` | (none) | SLO latency threshold in seconds; when set, reports P(latency > SLO) |
+| `--shed-delay` | (none) | Work shedding threshold in seconds; overloaded servers return queued tasks to the client LB for re-routing (push policies only; not combinable with `--expresslane`) |
 | `--format` | `human` | `human` (utilization + p1–p100 tables) or `json` |
 
 With default `--servers 1 --concurrency 1`, behavior matches the original single-server simulator.
@@ -202,6 +205,8 @@ JSON output shape (with `--slo 5.0`):
 ```
 
 Without `--slo`, `slo_latency` and `prob_latency_gt_slo` are omitted from JSON.
+
+With `--shed-delay`, JSON includes `pct_shed_requests` (percentage of completed requests shed at least once). Human output prints `shed requests: X.XX%`.
 
 ## Plot scripts overview
 

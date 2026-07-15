@@ -15,6 +15,7 @@ pub struct Task {
     pub origin_server_idx: usize,
     pub served_by_express: bool,
     pub evicted_at: Option<MonotonicTime>,
+    pub shed_at: Option<MonotonicTime>,
     pub service_started_at: Option<MonotonicTime>,
 }
 
@@ -28,6 +29,7 @@ impl Task {
             origin_server_idx: 0,
             served_by_express: false,
             evicted_at: None,
+            shed_at: None,
             service_started_at: None,
         }
     }
@@ -59,6 +61,10 @@ struct InFlightService {
 }
 
 struct PendingEviction {
+    event_key: EventKey,
+}
+
+struct PendingShed {
     event_key: EventKey,
 }
 
@@ -126,10 +132,15 @@ pub struct Server {
     #[serde(skip)]
     pull_intent_queue: VecDeque<usize>,
     express_eviction: Option<ExpressEvictionPolicy>,
+    work_shedding: Option<Duration>,
     is_express: bool,
     express_lb_id: Option<usize>,
     #[serde(skip)]
     pending_evictions: Vec<(MonotonicTime, PendingEviction)>,
+    #[serde(skip)]
+    shed_outputs: Vec<Output<Task>>,
+    #[serde(skip)]
+    pending_sheds: Vec<(MonotonicTime, PendingShed)>,
 }
 
 impl Server {
@@ -138,6 +149,7 @@ impl Server {
         server_idx: usize,
         release_outputs: Vec<Output<usize>>,
         express_eviction: Option<ExpressEvictionPolicy>,
+        work_shedding: Option<Duration>,
         is_express: bool,
         express_lb_id: Option<usize>,
         dispatch_mode: DispatchMode,
@@ -156,14 +168,21 @@ impl Server {
             queue: Vec::new(),
             pull_intent_queue: VecDeque::new(),
             express_eviction,
+            work_shedding,
             is_express,
             express_lb_id,
             pending_evictions: Vec::new(),
+            shed_outputs: Vec::new(),
+            pending_sheds: Vec::new(),
         }
     }
 
     pub fn set_pull_outputs(&mut self, pull_outputs: Vec<Output<usize>>) {
         self.pull_outputs = pull_outputs;
+    }
+
+    pub fn set_shed_outputs(&mut self, shed_outputs: Vec<Output<Task>>) {
+        self.shed_outputs = shed_outputs;
     }
 
     fn depth_exceeds(&self, th: u32) -> bool {
@@ -267,8 +286,62 @@ impl Server {
         self.express_output.send(task).await;
     }
 
+    async fn shed_newest(&mut self, cx: &Context<Self>) {
+        let shed = self.queue.pop().expect("queue non-empty");
+        self.forward_shed(shed, cx).await;
+    }
+
+    async fn apply_work_shedding_on_enqueue(&mut self, task_start: MonotonicTime, cx: &Context<Self>) {
+        let Some(threshold) = self.work_shedding else {
+            return;
+        };
+        let now = cx.time();
+        if head_of_line_exceeds_threshold(&self.in_flight_services, now, threshold) {
+            self.shed_newest(cx).await;
+        } else if ideal_queue_delay_estimate(&self.queue, &self.in_flight_services, now)
+            > threshold
+        {
+            self.schedule_monitored_shed(task_start, threshold, cx);
+        }
+    }
+
+    fn cancel_pending_shed(&mut self, task_start: MonotonicTime) {
+        if let Some(idx) = self
+            .pending_sheds
+            .iter()
+            .position(|(start, _)| *start == task_start)
+        {
+            let (_, pending) = self.pending_sheds.remove(idx);
+            pending.event_key.cancel();
+        }
+    }
+
+    fn schedule_monitored_shed(
+        &mut self,
+        task_start: MonotonicTime,
+        threshold: Duration,
+        cx: &Context<Self>,
+    ) {
+        if let Ok(event_key) =
+            cx.schedule_keyed_event(threshold, schedulable!(Self::shed_task), task_start)
+        {
+            self.pending_sheds
+                .push((task_start, PendingShed { event_key }));
+        }
+    }
+
+    async fn forward_shed(&mut self, mut task: Task, cx: &Context<Self>) {
+        task.shed_at = Some(cx.time());
+        let lb_id = task.lb_id;
+        self.release_outputs[lb_id]
+            .send(self.server_idx)
+            .await;
+        self.shed_outputs[lb_id].send(task).await;
+    }
+
     fn begin_service(&mut self, mut task: Task, cx: &Context<Self>) {
         self.cancel_pending_eviction(task.start);
+        self.cancel_pending_shed(task.start);
         let started_at = cx.time();
         task.service_started_at = Some(started_at);
         self.in_flight_services.push(InFlightService {
@@ -318,6 +391,7 @@ impl Server {
             let task_start = task.start;
             self.queue.push(task);
             self.apply_enqueue_eviction(task_start, cx).await;
+            self.apply_work_shedding_on_enqueue(task_start, cx).await;
         }
     }
 
@@ -349,6 +423,14 @@ impl Server {
         self.pending_evictions.retain(|(start, _)| *start != task_start);
         if let Some(task) = remove_task_from_queue(&mut self.queue, task_start) {
             self.forward_evicted(task, cx).await;
+        }
+    }
+
+    #[nexosim(schedulable)]
+    async fn shed_task(&mut self, task_start: MonotonicTime, cx: &Context<Self>) {
+        self.pending_sheds.retain(|(start, _)| *start != task_start);
+        if let Some(task) = remove_task_from_queue(&mut self.queue, task_start) {
+            self.forward_shed(task, cx).await;
         }
     }
 
