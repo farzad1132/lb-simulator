@@ -121,6 +121,10 @@ def validate_lb_data(data: dict) -> None:
 
 
 def run_all_simulations(args: argparse.Namespace, binary: Path) -> list[tuple[str, dict]]:
+    if args.lb_policy == "approx" and args.pull_policy is None:
+        raise SystemExit("--pull-policy is required when --lb-policy approx")
+    if args.lb_policy != "approx" and args.pull_policy is not None:
+        raise SystemExit("--pull-policy is only valid with --lb-policy approx")
     results: list[tuple[str, dict]] = []
     for service_dist, arrival, title, modes, probs in DIST_SPECS:
         data = run_simulation(
@@ -133,6 +137,7 @@ def run_all_simulations(args: argparse.Namespace, binary: Path) -> list[tuple[st
             concurrency=args.concurrency,
             clients=args.clients,
             lb_policy=args.lb_policy,
+            pull_policy=args.pull_policy,
             lb_subset_size=args.lb_subset_size,
             service_modes=modes,
             service_mode_probs=probs,
@@ -219,6 +224,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--clients", type=int, default=1)
     parser.add_argument("--lb-policy", choices=LB_POLICIES, default="power-of-two")
+    parser.add_argument(
+        "--pull-policy",
+        choices=PULL_POLICIES,
+        default=None,
+        help="Required when --lb-policy approx",
+    )
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--comment", type=str, default=None)

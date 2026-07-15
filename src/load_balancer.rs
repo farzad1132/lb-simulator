@@ -27,8 +27,11 @@ pub struct LoadBalancer {
     queue: Vec<Task>,
     #[serde(skip)]
     waiting_servers: VecDeque<usize>,
+    #[serde(skip)]
+    pull_intent_load: Vec<u32>,
     preserve_client_metadata: bool,
     pub outputs: Vec<Output<Task>>,
+    pub pull_intent_outputs: Vec<Output<usize>>,
 }
 
 impl LoadBalancer {
@@ -49,8 +52,10 @@ impl LoadBalancer {
             server_indices,
             queue: Vec::new(),
             waiting_servers: VecDeque::new(),
+            pull_intent_load: vec![0; n_servers],
             preserve_client_metadata,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
+            pull_intent_outputs: (0..n_servers).map(|_| Output::default()).collect(),
         }
     }
 
@@ -84,6 +89,22 @@ impl LoadBalancer {
             return;
         }
 
+        if self.lb_policy.is_approx() {
+            self.queue.push(task);
+            for (scratch, &server_idx) in
+                self.load_scratch.iter_mut().zip(self.server_indices.iter())
+            {
+                *scratch = self.pull_intent_load[server_idx];
+            }
+            let local_idx = self.policy.select(&self.load_scratch);
+            let global_idx = self.server_indices[local_idx];
+            self.pull_intent_load[global_idx] += 1;
+            self.pull_intent_outputs[global_idx]
+                .send(self.lb_id)
+                .await;
+            return;
+        }
+
         for (scratch, &server_idx) in self.load_scratch.iter_mut().zip(self.server_indices.iter()) {
             *scratch = self.local_inflight[server_idx];
         }
@@ -98,6 +119,17 @@ impl LoadBalancer {
     }
 
     pub async fn pull(&mut self, server_idx: usize, _cx: &Context<Self>) {
+        if self.lb_policy.is_approx() {
+            if self.queue.is_empty() {
+                return;
+            }
+            self.pull_intent_load[server_idx] =
+                self.pull_intent_load[server_idx].saturating_sub(1);
+            let task = self.queue.remove(0);
+            self.dispatch_to_server(server_idx, task).await;
+            return;
+        }
+
         if self.queue.is_empty() {
             self.waiting_servers.push_back(server_idx);
         } else {

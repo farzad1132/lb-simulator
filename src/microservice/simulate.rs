@@ -428,6 +428,9 @@ fn calculate_stats(
 }
 
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
+    if args.lb_policy.is_lb_only() {
+        return Err("--lb-policy approx is not supported by the ms simulator".into());
+    }
     if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
         return Err(
             "--lb-subset-size is not supported with --lb-policy cl, cl-lr, centralized, or corr".into(),

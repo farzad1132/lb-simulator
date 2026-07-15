@@ -28,7 +28,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 from tqdm import tqdm
 import numpy as np
 
-from lb_plot_configs import ExperimentConfig, select_configs, uses_express_lane
+from lb_plot_configs import ExperimentConfig, select_configs, uses_express_lane, uses_pull_policy
 from plot_cdfs import (
     REPO_ROOT,
     SERVICE_MEAN,
@@ -56,12 +56,13 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("CQ", "centralized", 100, 10),
+    ExperimentConfig("Approx-P2C", "approx", 100, 10, pull_policy="power-of-two"),
+    ExperimentConfig("Approx-LR", "approx", 10, 10, pull_policy="least-request"),
     ExperimentConfig("CL-2", "power-of-two", 2, 10),
     ExperimentConfig("CL-5", "power-of-two", 5, 10),
     ExperimentConfig("P2C", "power-of-two", 100, 10),
     ExperimentConfig("LR", "least-request", 10, 11),
     ExperimentConfig("R", "random", 10, 11),
-    
 ]
 
 
@@ -129,6 +130,8 @@ def format_run_summary(
         f"clients={config.clients}",
         f"measured_rate={measured_rate:.4f}",
     ]
+    if uses_pull_policy(config):
+        parts.append(f"pull_policy={config.pull_policy}")
     if uses_express_lane(config):
         parts.append(f"express_size={config.express_size}")
         if config.express_del_th is not None:
@@ -181,6 +184,8 @@ def run_comparison_sweep(
             "concurrency": config.concurrency,
             "lb_subset_size": config.lb_subset_size,
         }
+        if uses_pull_policy(config):
+            sim_kwargs["pull_policy"] = config.pull_policy
         if uses_express_lane(config):
             sim_kwargs.update(
                 expresslane=True,
@@ -302,7 +307,7 @@ def default_output_path(metric: str) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare centralized vs push LB policies at equal offered load "
+            "Compare centralized, approx, and push LB policies at equal offered load "
             "(task/s), scaling --load per server count."
         ),
     )

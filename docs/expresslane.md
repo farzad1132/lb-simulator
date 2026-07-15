@@ -56,7 +56,7 @@ At least one of `--express-th` and `--express-del-th` must be set when `--expres
 
 ## Compatibility
 
-**`--lb-policy centralized` is not supported with `--expresslane`.** The simulator rejects the combination at startup. Express lane requires push-based client load balancers and regular-server queue eviction; centralized policy on client LBs holds all backlog at the central dispatcher with no server-side queues.
+**`--lb-policy centralized` and `--lb-policy approx` are not supported with `--expresslane`.** The simulator rejects both combinations at startup. Express lane requires push-based client load balancers and regular-server queue eviction; centralized and approx policies hold backlog at client load balancers with no regular-server task queues.
 
 The express load balancer always uses centralized (pull-based) dispatch regardless of `--lb-policy`. That flag applies to client LBs routing to the regular pool only.
 

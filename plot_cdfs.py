@@ -29,7 +29,8 @@ LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e")
 MS_REQUIRED_JSON_KEYS = ("microservice_utilization_pct", "by_api")
 MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
-LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized")
+LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx")
+PULL_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
 MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "cl", "cl-lr", "corr")
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
 SIMULATORS = ("lb", "ms")
@@ -226,6 +227,7 @@ def run_simulation(
     concurrency: int = 1,
     clients: int = 1,
     lb_policy: str = "power-of-two",
+    pull_policy: str | None = None,
     lb_subset_size: int = 0,
     service_modes: list[float] | None = None,
     service_mode_probs: list[float] | None = None,
@@ -260,6 +262,8 @@ def run_simulation(
         "--lb-subset-size",
         str(lb_subset_size),
     ]
+    if pull_policy is not None:
+        cmd.extend(["--pull-policy", pull_policy])
     if seed is not None:
         cmd.extend(["--seed", str(seed)])
     if service_modes is not None:

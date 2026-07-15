@@ -13,11 +13,16 @@ class ExperimentConfig:
     servers: int
     concurrency: int = 1
     lb_subset_size: int = 0  # 0 = full pool; ignored by centralized policy
+    pull_policy: str | None = None  # required when lb_policy == "approx"
     expresslane: bool = False
     express_size: int | None = None
     express_del_th: float | None = None
     express_th: int | None = None
     ideal: bool = False
+
+
+def uses_pull_policy(config: ExperimentConfig) -> bool:
+    return config.lb_policy == "approx"
 
 
 def uses_express_lane(config: ExperimentConfig) -> bool:
@@ -32,12 +37,21 @@ def uses_express_lane(config: ExperimentConfig) -> bool:
 
 
 def validate_config(config: ExperimentConfig) -> None:
+    label = config.label
+    if uses_pull_policy(config):
+        if config.pull_policy is None:
+            raise SystemExit(
+                f"config {label!r}: pull_policy is required when lb_policy is approx"
+            )
+    elif config.pull_policy is not None:
+        raise SystemExit(
+            f"config {label!r}: pull_policy is only valid when lb_policy is approx"
+        )
     if not uses_express_lane(config):
         return
-    label = config.label
-    if config.lb_policy == "centralized":
+    if config.lb_policy in ("centralized", "approx"):
         raise SystemExit(
-            f"config {label!r}: expresslane is incompatible with centralized policy"
+            f"config {label!r}: expresslane is incompatible with {config.lb_policy} policy"
         )
     if config.express_size is None:
         raise SystemExit(f"config {label!r}: express_size is required for express lane")

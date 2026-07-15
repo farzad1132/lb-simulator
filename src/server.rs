@@ -3,6 +3,7 @@ use nexosim::ports::Output;
 use nexosim::simulation::EventKey;
 use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 #[derive(Default, Deserialize, Serialize, Clone)]
@@ -101,6 +102,13 @@ fn remove_task_from_queue(queue: &mut Vec<Task>, task_start: MonotonicTime) -> O
     Some(queue.remove(idx))
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum DispatchMode {
+    Push,
+    Centralized,
+    Approx,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct Server {
     pub output: Output<Task>,
@@ -108,12 +116,15 @@ pub struct Server {
     pub pull_output: Output<usize>,
     server_idx: usize,
     release_outputs: Vec<Output<usize>>,
+    pull_outputs: Vec<Output<usize>>,
     max_concurrency: u32,
     in_flight: u32,
-    centralized: bool,
+    dispatch_mode: DispatchMode,
     #[serde(skip)]
     in_flight_services: Vec<InFlightService>,
     queue: Vec<Task>,
+    #[serde(skip)]
+    pull_intent_queue: VecDeque<usize>,
     express_eviction: Option<ExpressEvictionPolicy>,
     is_express: bool,
     express_lb_id: Option<usize>,
@@ -129,7 +140,7 @@ impl Server {
         express_eviction: Option<ExpressEvictionPolicy>,
         is_express: bool,
         express_lb_id: Option<usize>,
-        centralized: bool,
+        dispatch_mode: DispatchMode,
     ) -> Self {
         Self {
             output: Output::default(),
@@ -137,16 +148,22 @@ impl Server {
             pull_output: Output::default(),
             server_idx,
             release_outputs,
+            pull_outputs: Vec::new(),
             max_concurrency: max_concurrency.max(1),
             in_flight: 0,
-            centralized,
+            dispatch_mode,
             in_flight_services: Vec::new(),
             queue: Vec::new(),
+            pull_intent_queue: VecDeque::new(),
             express_eviction,
             is_express,
             express_lb_id,
             pending_evictions: Vec::new(),
         }
+    }
+
+    pub fn set_pull_outputs(&mut self, pull_outputs: Vec<Output<usize>>) {
+        self.pull_outputs = pull_outputs;
     }
 
     fn depth_exceeds(&self, th: u32) -> bool {
@@ -287,7 +304,10 @@ impl Server {
 #[Model]
 impl Server {
     pub async fn input(&mut self, task: Task, cx: &Context<Self>) {
-        if self.centralized {
+        if matches!(
+            self.dispatch_mode,
+            DispatchMode::Centralized | DispatchMode::Approx
+        ) {
             self.begin_service(task, cx);
             return;
         }
@@ -301,9 +321,26 @@ impl Server {
         }
     }
 
+    pub async fn receive_pull_intent(&mut self, lb_id: usize, _cx: &Context<Self>) {
+        if self.dispatch_mode != DispatchMode::Approx {
+            return;
+        }
+        self.pull_intent_queue.push_back(lb_id);
+        self.drain_pull_intents_async().await;
+    }
+
     pub async fn request_pull(&mut self, _: (), _cx: &Context<Self>) {
-        if self.centralized && self.in_flight < self.max_concurrency {
+        if self.dispatch_mode == DispatchMode::Centralized && self.in_flight < self.max_concurrency {
             self.pull_output.send(self.server_idx).await;
+        }
+    }
+
+    async fn drain_pull_intents_async(&mut self) {
+        while self.in_flight < self.max_concurrency && !self.pull_intent_queue.is_empty() {
+            let lb_id = self.pull_intent_queue.pop_front().expect("queue non-empty");
+            if let Some(output) = self.pull_outputs.get_mut(lb_id) {
+                output.send(self.server_idx).await;
+            }
         }
     }
 
@@ -341,10 +378,16 @@ impl Server {
                 .await;
         }
         self.in_flight -= 1;
-        if self.centralized {
-            self.pull_output.send(self.server_idx).await;
-        } else {
-            self.drain_queue(cx);
+        match self.dispatch_mode {
+            DispatchMode::Centralized => {
+                self.pull_output.send(self.server_idx).await;
+            }
+            DispatchMode::Approx => {
+                self.drain_pull_intents_async().await;
+            }
+            DispatchMode::Push => {
+                self.drain_queue(cx);
+            }
         }
     }
 }

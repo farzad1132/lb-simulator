@@ -9,12 +9,12 @@ use load_balancer::LoadBalancer;
 use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
-use lb::policy::LoadBalancePolicyKind;
+use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
 use lb::sim_util;
 use lb::subset::{self, SubsetPolicyKind};
 use rand::Rng;
 use serde::Serialize;
-use server::{ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task};
+use server::{DispatchMode, ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task};
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -586,6 +586,8 @@ struct Args {
     concurrency: u32,
     #[arg(long, value_enum, default_value_t = LoadBalancePolicyKind::PowerOfTwo)]
     lb_policy: LoadBalancePolicyKind,
+    #[arg(long, value_enum)]
+    pull_policy: Option<PullPolicyKind>,
     #[arg(long, default_value_t = 0)]
     lb_subset_size: u32,
     #[arg(long, value_enum, default_value_t = SubsetPolicyKind::Deterministic)]
@@ -639,14 +641,29 @@ fn validate_express_del_th(value: f64) -> Result<Duration, String> {
     }
 }
 
+fn validate_pull_policy(args: &Args) -> Result<(), String> {
+    match (args.lb_policy.is_approx(), args.pull_policy) {
+        (true, None) => Err("--pull-policy is required with --lb-policy approx".into()),
+        (false, Some(_)) => Err("--pull-policy is only valid with --lb-policy approx".into()),
+        _ => Ok(()),
+    }
+}
+
 fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String> {
     let has_express_flags = args.express_size.is_some()
         || args.express_th.is_some()
         || args.express_del_th.is_some();
 
-    if args.lb_policy.is_centralized() {
+    if args.lb_policy.is_centralized() || args.lb_policy.is_approx() {
+        let policy = if args.lb_policy.is_centralized() {
+            "centralized"
+        } else {
+            "approx"
+        };
         if args.expresslane || has_express_flags {
-            return Err("--expresslane is not supported with --lb-policy centralized".into());
+            return Err(format!(
+                "--expresslane is not supported with --lb-policy {policy}"
+            ));
         }
         return Ok(None);
     }
@@ -779,7 +796,7 @@ fn run_centralized_simulation(
             None,
             false,
             None,
-            true,
+            DispatchMode::Centralized,
         );
         server
             .pull_output
@@ -860,6 +877,8 @@ fn run_push_simulation(
         n_servers
     };
 
+    let is_approx = args.lb_policy.is_approx();
+
     for i in 0..n_clients {
         let server_indices = subset::assign_subset(
             args.lb_subset_policy,
@@ -870,9 +889,19 @@ fn run_push_simulation(
         if args.verbose >= 1 {
             eprintln!("client {i} subset: {server_indices:?}");
         }
+        let (policy, lb_policy) = if is_approx {
+            (
+                args.pull_policy
+                    .expect("pull_policy validated before simulation")
+                    .build(),
+                LoadBalancePolicyKind::Approx,
+            )
+        } else {
+            (args.lb_policy.build(), args.lb_policy)
+        };
         let mut load_balancer = LoadBalancer::new(
-            args.lb_policy.build(),
-            args.lb_policy,
+            policy,
+            lb_policy,
             client_lb_pool,
             server_indices,
             i,
@@ -880,6 +909,10 @@ fn run_push_simulation(
         );
         for j in 0..client_lb_pool {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
+            if is_approx {
+                load_balancer.pull_intent_outputs[j]
+                    .connect(Server::receive_pull_intent, &server_mailboxes[j]);
+            }
         }
         let lb_mailbox = Mailbox::new();
         lb_addresses.push(lb_mailbox.address());
@@ -953,6 +986,14 @@ fn run_push_simulation(
             None
         };
 
+        let dispatch_mode = if is_express {
+            DispatchMode::Centralized
+        } else if is_approx {
+            DispatchMode::Approx
+        } else {
+            DispatchMode::Push
+        };
+
         let mut server = Server::new(
             concurrency,
             i,
@@ -960,8 +1001,15 @@ fn run_push_simulation(
             server_express_eviction,
             is_express,
             server_express_lb_id,
-            is_express,
+            dispatch_mode,
         );
+        if is_approx && !is_express {
+            let mut pull_outputs: Vec<_> = (0..n_clients).map(|_| Output::default()).collect();
+            for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
+                pull_outputs[lb_id].connect(LoadBalancer::pull, lb_address);
+            }
+            server.set_pull_outputs(pull_outputs);
+        }
         if express_lane.is_some() && !is_express {
             if let Some(express_addr) = express_lb_address.as_ref() {
                 server
@@ -1098,6 +1146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    validate_pull_policy(&args).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;
     let service_time = resolve_service_time(&args)?;
@@ -1277,6 +1326,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("not supported with --lb-policy centralized"));
+    }
+
+    #[test]
+    fn validate_expresslane_rejects_approx_policy() {
+        let err = validate_expresslane(
+            &Args::try_parse_from([
+                "lb",
+                "--expresslane",
+                "--express-size",
+                "2",
+                "--express-th",
+                "5",
+                "--lb-policy",
+                "approx",
+                "--pull-policy",
+                "power-of-two",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("not supported with --lb-policy approx"));
+    }
+
+    #[test]
+    fn validate_pull_policy_required_for_approx() {
+        let err = validate_pull_policy(
+            &Args::try_parse_from(["lb", "--lb-policy", "approx"]).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--pull-policy is required"));
+    }
+
+    #[test]
+    fn validate_pull_policy_rejected_without_approx() {
+        let err = validate_pull_policy(
+            &Args::try_parse_from([
+                "lb",
+                "--lb-policy",
+                "power-of-two",
+                "--pull-policy",
+                "least-request",
+            ])
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--pull-policy is only valid"));
     }
 
     #[test]

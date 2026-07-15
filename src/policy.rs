@@ -84,6 +84,37 @@ impl LoadBalancePolicy for CentralizedPolicy {
     }
 }
 
+pub struct ApproxPolicy;
+
+impl LoadBalancePolicy for ApproxPolicy {
+    fn select(&mut self, loads: &[u32]) -> usize {
+        let _ = loads;
+        0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+pub enum PullPolicyKind {
+    Random,
+    #[value(name = "power-of-two")]
+    PowerOfTwo,
+    #[value(name = "round-robin")]
+    RoundRobin,
+    #[value(name = "least-request")]
+    LeastRequest,
+}
+
+impl PullPolicyKind {
+    pub fn build(self) -> Box<dyn LoadBalancePolicy> {
+        match self {
+            Self::Random => LoadBalancePolicyKind::Random.build(),
+            Self::PowerOfTwo => LoadBalancePolicyKind::PowerOfTwo.build(),
+            Self::RoundRobin => LoadBalancePolicyKind::RoundRobin.build(),
+            Self::LeastRequest => LoadBalancePolicyKind::LeastRequest.build(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum LoadBalancePolicyKind {
     Random,
@@ -91,6 +122,8 @@ pub enum LoadBalancePolicyKind {
     RoundRobin,
     LeastRequest,
     Centralized,
+    #[value(name = "approx")]
+    Approx,
     #[value(name = "cl")]
     Cl,
     #[value(name = "cl-lr")]
@@ -110,12 +143,25 @@ impl LoadBalancePolicyKind {
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized => Box::new(CentralizedPolicy),
+            Self::Approx => Box::new(ApproxPolicy),
             Self::Cl | Self::ClLr | Self::Corr => Box::new(PowerOfTwoPolicy),
         }
     }
 
     pub fn is_centralized(self) -> bool {
         matches!(self, Self::Centralized)
+    }
+
+    pub fn is_approx(self) -> bool {
+        matches!(self, Self::Approx)
+    }
+
+    pub fn is_pull_based(self) -> bool {
+        matches!(self, Self::Centralized | Self::Approx)
+    }
+
+    pub fn is_lb_only(self) -> bool {
+        matches!(self, Self::Approx)
     }
 
     pub fn is_cl(self) -> bool {
@@ -163,6 +209,22 @@ mod tests {
     fn centralized_policy_kind_is_centralized() {
         assert!(LoadBalancePolicyKind::Centralized.is_centralized());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_centralized());
+    }
+
+    #[test]
+    fn approx_policy_kind_is_approx() {
+        assert!(LoadBalancePolicyKind::Approx.is_approx());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_approx());
+        assert!(LoadBalancePolicyKind::Approx.is_lb_only());
+        assert!(!LoadBalancePolicyKind::Centralized.is_lb_only());
+    }
+
+    #[test]
+    fn pull_policy_kind_build_delegates_to_push_policies() {
+        let loads = [5u32, 1, 3];
+        let mut pull_lr = PullPolicyKind::LeastRequest.build();
+        let mut lb_lr = LoadBalancePolicyKind::LeastRequest.build();
+        assert_eq!(pull_lr.select(&loads), lb_lr.select(&loads));
     }
 
     #[test]

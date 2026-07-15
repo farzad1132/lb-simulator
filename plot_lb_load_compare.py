@@ -28,7 +28,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import numpy as np
 from tqdm import tqdm
 
-from lb_plot_configs import ExperimentConfig, select_configs, uses_express_lane
+from lb_plot_configs import ExperimentConfig, select_configs, uses_express_lane, uses_pull_policy
 from plot_cdfs import (
     REPO_ROOT,
     ensure_release_binary,
@@ -60,8 +60,10 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("R", "random", 10, 10),
     ExperimentConfig("CL-1-LR", "least-request", 1, 10),
     ExperimentConfig("CL-1-P2C", "power-of-two", 1, 10),
-    ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
-    ExperimentConfig("P2C-E36-ideal", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, ideal=True),
+    ExperimentConfig("Approx-LR", "approx", 10, 10, pull_policy="least-request"),
+    ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
+    #ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
+    #ExperimentConfig("P2C-E36-ideal", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, ideal=True),
     #ExperimentConfig("CQ-LR-2", "least-request", 2, 10, lb_subset_size=0),
     #ExperimentConfig("CQ-LR-5", "least-request", 5, 10, lb_subset_size=0),
     #ExperimentConfig("CQ-P2C-2", "power-of-two", 2, 10, lb_subset_size=0),
@@ -103,6 +105,8 @@ def format_run_summary(
         f"servers={config.servers}",
         f"clients={config.clients}",
     ]
+    if uses_pull_policy(config):
+        parts.append(f"pull_policy={config.pull_policy}")
     if uses_express_lane(config):
         parts.append(f"express_size={config.express_size}")
         if config.express_del_th is not None:
@@ -150,6 +154,8 @@ def run_load_sweep(
             "concurrency": config.concurrency,
             "lb_subset_size": config.lb_subset_size,
         }
+        if uses_pull_policy(config):
+            sim_kwargs["pull_policy"] = config.pull_policy
         if uses_express_lane(config):
             sim_kwargs.update(
                 expresslane=True,

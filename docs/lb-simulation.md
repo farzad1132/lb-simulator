@@ -167,8 +167,9 @@ The load-balancing policy only chooses among servers in this subset.
 | **random** | `--lb-policy random` | Uniform random server from the subset (ignores load slice) |
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
 | **centralized** | `--lb-policy centralized` | Pull-based: global FIFO queue at one dispatcher; servers request work on spare capacity ([details below](#centralized-policy-pull-based)) |
+| **approx** | `--lb-policy approx` + `--pull-policy` | Decentralized pull: per-client FIFO queues; push policy selects pull-intent target ([details below](#approx-policy-decentralized-pull)) |
 
-Local inflight tracking runs for all push policies so switching among them does not require different wiring.
+Local inflight tracking runs for all push policies so switching among them does not require different wiring. Under **approx**, server selection uses outstanding pull-intent counts instead of local inflight.
 
 ## Centralized policy (pull-based)
 
@@ -233,6 +234,75 @@ flowchart LR
 4. **Service.** The server starts service immediately (no local queue). `begin_service` schedules completion after `task.duration`.
 5. **Completion.** `Server::complete` sets `finish`, sends the task to the stats sink, sends `server_idx` on `release_outputs[0]`, decrements `in_flight`, and sends a new pull.
 6. **Release.** The load balancer's `release` handler decrements `local_inflight[server_idx]`.
+
+## Approx policy (decentralized pull)
+
+With `--lb-policy approx`, routing is **pull-based** but decentralized: each client has its own `LoadBalancer` (like push policies). A separate `--pull-policy` flag (`random`, `power-of-two`, `least-request`, `round-robin`) selects which server receives each pull intent. **`--pull-policy` is required** with `approx` and has no default.
+
+```mermaid
+flowchart LR
+  subgraph clients [Clients]
+    ES0["arrival source 0"]
+    ES1["arrival source 1"]
+  end
+  subgraph lbs [PerClientLBs]
+    LB0["LoadBalancer 0\nFIFO queue"]
+    LB1["LoadBalancer 1\nFIFO queue"]
+  end
+  subgraph pool [ServerPool]
+    S0["Server 0\npull-intent queue"]
+    S1["Server N\npull-intent queue"]
+  end
+  ES0 --> LB0
+  ES1 --> LB1
+  LB0 -->|"pull intent (lb_id)"| S0
+  LB0 -->|"pull intent (lb_id)"| S1
+  LB1 -->|"pull intent (lb_id)"| S0
+  LB1 -->|"pull intent (lb_id)"| S1
+  S0 -->|"pull(server_idx)"| LB0
+  S0 -->|"pull(server_idx)"| LB1
+  S0 -->|"task"| LB0
+  S1 -->|"pull(server_idx)"| LB1
+  S1 -->|"task"| LB1
+```
+
+### Pull-intent load semantics
+
+Unlike push policies, `--pull-policy` does **not** use `local_inflight` for server selection. From each client LB's perspective, a server's load is the number of **outstanding pull intents** sent to that server (intents not yet fulfilled by a server pull + task dispatch). The server with fewer outstanding pull intents is considered less loaded.
+
+| Stage | `pull_intent_load` | `local_inflight` |
+|-------|-------------------|------------------|
+| Task arrival + pull intent sent | `+1` on chosen server | unchanged |
+| Server pulls + task dispatched | `-1` on pulling server | `+1` on pulling server |
+| Server completes | unchanged | `-1` via `release` |
+
+### Design choices
+
+| Choice | Decision | Rationale / implications |
+|--------|----------|--------------------------|
+| **Simulator scope** | `lb` only | Not supported in `ms`. |
+| **LB topology** | One LB per client | Same as push policies; supports `--lb-subset-size`. |
+| **Server choice** | `--pull-policy` on arrival | Push algorithm picks target server for each pull intent. |
+| **Server-side queue** | FIFO pull-intent queue per server | Servers queue incoming pull intents; on spare capacity, pop intent and pull from that client LB. |
+| **Task queue** | Per-client FIFO at LB | Tasks wait at the client LB until the targeted server pulls. |
+| **Express lane** | Not supported | Backlog lives at client LBs, not server queues; same rejection as `centralized`. |
+| **`--pull-policy`** | Required, no default | Must be one of `random`, `power-of-two`, `least-request`, `round-robin`. Forbidden with other `--lb-policy` values. |
+
+### Port wiring (approx)
+
+- **`LoadBalancer::input`** — enqueue task; `pull_policy.select(pull_intent_loads)`; send `lb_id` to chosen server's `receive_pull_intent`
+- **`Server::receive_pull_intent`** — enqueue `lb_id`; drain if spare capacity
+- **`Server::pull_outputs[lb_id]`** → **`LoadBalancer::pull`** — server requests task from the client LB identified by the drained intent
+- **`LoadBalancer::outputs[server]`** → **`Server::input`** — dispatched task (immediate service, no local queue)
+- **`Server::release_outputs[lb_id]`** → **`LoadBalancer::release`** — standard inflight accounting
+
+### Task lifecycle (approx)
+
+1. **Arrival.** Task enqueued at the client LB.
+2. **Pull intent.** LB selects server via `--pull-policy` using `pull_intent_load`; sends pull intent; increments `pull_intent_load[server]`.
+3. **Server queues intent.** Server enqueues `lb_id`; if spare capacity, pops intent and sends pull to that LB.
+4. **Dispatch.** LB pops front task, decrements `pull_intent_load`, dispatches to server.
+5. **Service + completion.** Same as centralized: immediate service, `release` on complete, then drain next pull intent if any.
 
 ## Server concurrency model
 
