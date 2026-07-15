@@ -346,6 +346,7 @@ Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a p
 | Metric | Definition |
 |--------|------------|
 | **server_utilization_pct** | `busy_time[ms][s] / (observation_time × (cpu[ms] / replicas[ms])) × 100` |
+| **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server. Under `--lb-policy centralized`, downstream pull targets also add `DownstreamBalancer.queue.len() / replicas[ms]` as an equal fair-share per server (work waiting at the shared pull queue before dispatch). |
 
 `busy_time[ms][s]` is the sum of local hop durations executed on server `s` of microservice `ms`. Per-server utilization uses that server's concurrency slots (`cpu / replicas`) as capacity. When all servers have equal capacity, the microservice-level overall utilization equals the average of per-server utilizations.
 
@@ -461,6 +462,12 @@ Only the first `--trace-limit` user arrivals are traced. Keep this small when `-
     "backend1": { "0": 10.2, "1": 9.1, "2": 8.9 },
     "backend2": { "0": 2.80, "1": 2.28 },
     "shared": { "0": 8.1, "1": 7.2, "2": 7.0, "3": 6.5 }
+  },
+  "server_avg_queue_inflight": {
+    "frontend": { "0": 0.12, "1": 0.09 },
+    "backend1": { "0": 1.4, "1": 1.2, "2": 1.1 },
+    "backend2": { "0": 0.35, "1": 0.31 },
+    "shared": { "0": 0.9, "1": 0.8, "2": 0.7, "3": 0.6 }
   },
   "by_api": {
     "f1": {

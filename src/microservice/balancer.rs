@@ -1,4 +1,5 @@
 use super::hop::{Hop, OutboundCall, OutboundRelease, ReplicaInput};
+use super::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
@@ -11,7 +12,7 @@ use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const CORR_SLACK_DIST_WARMUP: u64 = 200;
 const SECS_TO_MS: f64 = 1000.0;
@@ -321,6 +322,8 @@ pub struct DownstreamBalancer {
     queue: VecDeque<OutboundCall>,
     #[serde(skip)]
     waiting_servers: VecDeque<usize>,
+    #[serde(skip)]
+    balancer_queue_occupancy: Arc<Mutex<HashMap<String, OccupancyAccumulator>>>,
     pub outputs: Vec<Output<ReplicaInput>>,
 }
 
@@ -331,6 +334,7 @@ impl DownstreamBalancer {
         server_indices: Vec<usize>,
         lb_policy: LoadBalancePolicyKind,
         tracer: Option<Arc<MsTracer>>,
+        balancer_queue_occupancy: Arc<Mutex<HashMap<String, OccupancyAccumulator>>>,
     ) -> Self {
         debug_assert!(
             server_indices.iter().all(|&i| i < n_servers),
@@ -348,7 +352,16 @@ impl DownstreamBalancer {
             response_time_histogram: new_corr_histogram(),
             queue: VecDeque::new(),
             waiting_servers: VecDeque::new(),
+            balancer_queue_occupancy,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
+        }
+    }
+
+    fn sample_queue_occupancy(&self, now: MonotonicTime) {
+        if let Ok(mut occ) = self.balancer_queue_occupancy.lock() {
+            occ.entry(self.target_microservice.clone())
+                .or_default()
+                .record(now, self.queue.len() as u32);
         }
     }
 
@@ -371,13 +384,15 @@ impl DownstreamBalancer {
             .await;
     }
 
-    async fn dispatch_waiting(&mut self) {
+    async fn dispatch_waiting(&mut self, now: MonotonicTime) {
         while let Some(server_idx) = self.waiting_servers.pop_front() {
             if self.queue.is_empty() {
                 self.waiting_servers.push_front(server_idx);
                 break;
             }
+            self.sample_queue_occupancy(now);
             let call = self.queue.pop_front().unwrap();
+            self.sample_queue_occupancy(now);
             self.dispatch_to_server(server_idx, call).await;
         }
     }
@@ -415,8 +430,10 @@ impl DownstreamBalancer {
                     ),
                 );
             }
+            self.sample_queue_occupancy(cx.time());
             self.queue.push_back(call);
-            self.dispatch_waiting().await;
+            self.sample_queue_occupancy(cx.time());
+            self.dispatch_waiting(cx.time()).await;
             return;
         }
 
@@ -473,7 +490,9 @@ impl DownstreamBalancer {
         if self.queue.is_empty() {
             self.waiting_servers.push_back(server_idx);
         } else {
+            self.sample_queue_occupancy(cx.time());
             let call = self.queue.pop_front().unwrap();
+            self.sample_queue_occupancy(cx.time());
             if let Some(tracer) = &self.tracer {
                 tracer.log(
                     call.hop.trace,

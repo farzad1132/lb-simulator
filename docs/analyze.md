@@ -35,6 +35,7 @@ flowchart LR
 |-------|-------------|
 | `microservice_utilization_pct` | Per-microservice utilization (%) |
 | `server_utilization_pct` | Per-server utilization nested under each microservice |
+| `server_avg_queue_inflight` | Per-server time-weighted average occupancy (`queue + in_flight`; under centralized, includes fair-share of downstream pull-queue depth) |
 | `by_api` | Per-API request metrics (`e2e_ms`, `processing_time_ms`, SLO fields) |
 | `by_microservice` | Per-microservice visit sample arrays (see below) |
 | `total_processing_p99_ms` | p99 of per-request total local processing time across the call tree |
@@ -125,7 +126,7 @@ Custom fixtures:
 | Row | Left | Right |
 |-----|------|-------|
 | **0** | Cumulative queueing violin | Cumulative queueing stddev (independent vs actual) |
-| **1** | Response time violin | RT / slack-d p50 & p90 (grouped bars) |
+| **1** | Response time violin | Avg queue+in-flight occupancy per replica (scatter) |
 | **2** | Slack-d CDF | Per-hop queueing stddev |
 | **3** | Replica utilization | SLO violations (%) per microservice |
 

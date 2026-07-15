@@ -281,78 +281,38 @@ def plot_cumulative_queueing_stddev_bars(
     ax.legend(fontsize=style.legend_size, loc="upper left", frameon=False)
 
 
-def plot_response_slack_percentile_bars(
+def plot_replica_avg_queue_inflight_dots(
     ax,
     data: dict,
     microservices: list[str],
     *,
     style=ACM_COMPACT_HALF,
 ) -> None:
-    by_ms = data["by_microservice"]
-    rt_p50: list[float] = []
-    rt_p90: list[float] = []
-    sd_p50: list[float] = []
-    sd_p90: list[float] = []
-    for ms in microservices:
-        ms_stats = by_ms[ms]
-        rt = np.asarray(ms_stats["response_time_ms"], dtype=float)
-        sd = np.asarray(ms_stats["slack_d_ms"], dtype=float)
-        if len(rt) == 0:
-            rt_p50.append(0.0)
-            rt_p90.append(0.0)
-            sd_p50.append(0.0)
-            sd_p90.append(0.0)
-            continue
-        if len(rt) != len(sd):
-            raise SystemExit("response_time_ms and slack_d_ms length mismatch")
-        rt_p50.append(percentile(rt, 50))
-        rt_p90.append(percentile(rt, 90))
-        sd_p50.append(percentile(sd, 50))
-        sd_p90.append(percentile(sd, 90))
-
-    positions_p50 = [2 * i for i in range(len(microservices))]
-    positions_p90 = [2 * i + 1 for i in range(len(microservices))]
-    bar_groups = [
-        ("RT", rt_p50, None),
-        ("Slack-d", sd_p50, None),
-    ]
-    plot_grouped_bars(ax, positions_p50, bar_groups, style=style)
-    plot_grouped_bars(
-        ax,
-        positions_p90,
-        [
-            ("RT", rt_p90, None),
-            ("Slack-d", sd_p90, None),
-        ],
-        style=style,
-    )
-    combined = np.asarray(rt_p50 + rt_p90 + sd_p50 + sd_p90, dtype=float)
-    finalize_violin_y_axis(ax, combined, style=style)
-    n_ms = len(microservices)
-    ax.set_xlim(-0.5, 2 * n_ms - 0.5)
-    tick_positions = [2 * i + 0.5 for i in range(n_ms)]
-    ax.set_xticks(tick_positions)
-    ax.set_xticklabels([str(i) for i in range(n_ms)], fontsize=style.font_size - 1)
-    for i in range(n_ms):
-        for xpos, label in ((2 * i, "p50"), (2 * i + 1, "p90")):
-            ax.text(
-                xpos,
-                -0.14,
-                label,
-                ha="center",
-                va="top",
-                fontsize=max(style.font_size - 2, 5),
-                transform=ax.get_xaxis_transform(),
+    avg_queue_inflight = data["server_avg_queue_inflight"]
+    positions = list(range(len(microservices)))
+    all_avg: list[float] = []
+    for idx, ms in enumerate(microservices):
+        by_replica = avg_queue_inflight[ms]
+        replicas = sorted(by_replica, key=lambda k: int(k))
+        n = len(replicas)
+        color = style.colors[idx % len(style.colors)]
+        for r in replicas:
+            avg = float(by_replica[r])
+            all_avg.append(avg)
+            jitter = 0.0 if n <= 1 else (int(r) - (n - 1) / 2) * 0.04
+            ax.scatter(
+                idx + jitter,
+                avg,
+                color=color,
+                s=style.marker_size**2,
+                edgecolors="black",
+                linewidths=0.4,
+                zorder=3,
             )
-    handles, labels = ax.get_legend_handles_labels()
-    legend_items = dict(zip(labels, handles))
-    ax.legend(
-        legend_items.values(),
-        legend_items.keys(),
-        fontsize=max(style.font_size - 1, 5),
-        loc="best",
-        frameon=False,
-    )
+    ax.set_xticks(positions)
+    ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
+    combined = np.asarray(all_avg, dtype=float) if all_avg else np.asarray([0.0, 1.0])
+    finalize_violin_y_axis(ax, combined, style=style)
 
 
 def plot_per_hop_queueing_stddev_bars(
@@ -513,7 +473,7 @@ def plot_distributions(
         auto_ticks=False,
     )
 
-    plot_response_slack_percentile_bars(
+    plot_replica_avg_queue_inflight_dots(
         grid.get_ax(1, 1),
         data,
         microservices,
@@ -522,7 +482,7 @@ def plot_distributions(
     grid.configure_ax(
         grid.get_ax(1, 1),
         xlabel="Microservice index",
-        ylabel="Percentile (ms)",
+        ylabel="Avg occupancy",
         show_xlabel=True,
         show_ylabel=True,
         show_title=True,
@@ -738,9 +698,13 @@ def main() -> None:
         raise SystemExit("ms JSON missing microservice_order; rebuild the ms binary")
     if "server_utilization_pct" not in data:
         raise SystemExit("ms JSON missing server_utilization_pct; rebuild the ms binary")
+    if "server_avg_queue_inflight" not in data:
+        raise SystemExit("ms JSON missing server_avg_queue_inflight; rebuild the ms binary")
     for ms in microservice_order(data):
         if ms not in data["server_utilization_pct"]:
             raise SystemExit(f"ms JSON missing server_utilization_pct for {ms}")
+        if ms not in data["server_avg_queue_inflight"]:
+            raise SystemExit(f"ms JSON missing server_avg_queue_inflight for {ms}")
         ms_stats = data["by_microservice"][ms]
         if "slack_d_ms" not in ms_stats:
             raise SystemExit("ms JSON missing by_microservice slack_d_ms; rebuild the ms binary")

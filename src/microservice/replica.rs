@@ -4,10 +4,12 @@ use super::hop::{
     filtered_children, microservice_for_endpoint, sample_duration,
 };
 use super::microservice_stats::MicroserviceVisitTracker;
+use super::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
+use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -28,6 +30,7 @@ pub struct ReplicaConfig {
     pub server_idx: usize,
     pub max_concurrency: u32,
     pub busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
+    pub replica_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>>,
     pub visit_tracker: Arc<Mutex<MicroserviceVisitTracker>>,
     pub balancer_outbound: Output<OutboundCall>,
     pub outbound_release: Output<OutboundRelease>,
@@ -54,6 +57,8 @@ pub struct Replica {
     queue: VecDeque<ReplicaWork>,
     #[serde(skip)]
     busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
+    #[serde(skip)]
+    replica_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>>,
     #[serde(skip)]
     visit_tracker: Arc<Mutex<MicroserviceVisitTracker>>,
     #[serde(skip)]
@@ -82,6 +87,7 @@ impl Replica {
             in_flight: 0,
             queue: VecDeque::new(),
             busy_time: config.busy_time,
+            replica_occupancy: config.replica_occupancy,
             visit_tracker: config.visit_tracker,
             balancer_outbound: config.balancer_outbound,
             return_outputs: config.return_outputs,
@@ -89,6 +95,20 @@ impl Replica {
             tracer: config.tracer,
             pull_output: config.pull_output,
             scheduling: config.scheduling,
+        }
+    }
+
+    fn occupancy_level(&self) -> u32 {
+        self.queue.len() as u32 + self.in_flight
+    }
+
+    fn sample_occupancy(&self, now: MonotonicTime) {
+        if let Ok(mut occ) = self.replica_occupancy.lock() {
+            occ.entry(self.microservice_id.clone())
+                .or_default()
+                .entry(self.server_idx)
+                .or_default()
+                .record(now, self.occupancy_level());
         }
     }
 
@@ -149,6 +169,7 @@ impl Replica {
             Err(e) => {
                 eprintln!("sample_duration: {}", e);
                 self.in_flight = self.in_flight.saturating_sub(1);
+                self.sample_occupancy(cx.time());
                 return;
             }
         }
@@ -163,20 +184,24 @@ impl Replica {
         if let Err(h) = cx.schedule_event(hop.duration, schedulable!(Self::complete), hop) {
             eprintln!("could not schedule complete. err: {}", h);
             self.in_flight = self.in_flight.saturating_sub(1);
+            self.sample_occupancy(cx.time());
         }
     }
 
     async fn drain_queue(&mut self, cx: &Context<Self>) {
         while !self.queue.is_empty() && self.in_flight < self.max_concurrency {
             let work = self.queue.pop_front().unwrap();
+            self.sample_occupancy(cx.time());
             match work {
                 ReplicaWork::Upstream(hop) => {
                     self.in_flight += 1;
+                    self.sample_occupancy(cx.time());
                     self.begin_service(hop, cx);
                     break;
                 }
                 ReplicaWork::DownstreamReturn(hop) => {
                     self.handle_return(hop, cx).await;
+                    self.sample_occupancy(cx.time());
                 }
             }
         }
@@ -320,6 +345,7 @@ impl Replica {
                         ),
                     );
                     self.in_flight += 1;
+                    self.sample_occupancy(cx.time());
                     self.begin_service(hop, cx);
                     return;
                 }
@@ -336,6 +362,7 @@ impl Replica {
                     ),
                 );
                 self.enqueue_work(ReplicaWork::Upstream(hop));
+                self.sample_occupancy(cx.time());
             }
             ReplicaInput::DownstreamReturn(hop) => {
                 self.trace(
@@ -351,9 +378,11 @@ impl Replica {
                     ),
                 );
                 self.enqueue_work(ReplicaWork::DownstreamReturn(hop));
+                self.sample_occupancy(cx.time());
             }
         }
         self.drain_queue(cx).await;
+        self.sample_occupancy(cx.time());
     }
 
     pub async fn request_pull(&mut self, _: (), _cx: &Context<Self>) {
@@ -389,6 +418,7 @@ impl Replica {
             ),
         );
         self.in_flight = self.in_flight.saturating_sub(1);
+        self.sample_occupancy(cx.time());
 
         if let Some(release) = hop.slot_release.take() {
             self.release_outbound(release).await;
@@ -404,5 +434,6 @@ impl Replica {
             eprintln!("advance after local complete failed: {}", e);
         }
         self.drain_queue(cx).await;
+        self.sample_occupancy(cx.time());
     }
 }

@@ -74,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let output = stats.unwrap_or(MsStats {
                 microservice_utilization_pct: Default::default(),
                 server_utilization_pct: Default::default(),
+                server_avg_queue_inflight: Default::default(),
                 by_api: Default::default(),
                 by_microservice: Default::default(),
                 microservice_order: Default::default(),
