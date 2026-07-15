@@ -23,7 +23,7 @@ use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
 use super::occupancy::OccupancyAccumulator;
 use super::replica::{Replica, ReplicaConfig};
 use super::trace::MsTracer;
-use crate::policy::LoadBalancePolicyKind;
+use crate::policy::{validate_pull_policy, LoadBalancePolicyKind, PullPolicyKind};
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
 use crate::sim_util;
@@ -46,6 +46,7 @@ pub struct MsArgs {
     pub load_file: PathBuf,
     pub n: u32,
     pub lb_policy: LoadBalancePolicyKind,
+    pub pull_policy: Option<PullPolicyKind>,
     pub lb_subset_size: u32,
     pub lb_subset_policy: SubsetPolicyKind,
     pub seed: Option<u64>,
@@ -428,9 +429,7 @@ fn calculate_stats(
 }
 
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
-    if args.lb_policy.is_lb_only() {
-        return Err("--lb-policy approx is not supported by the ms simulator".into());
-    }
+    validate_pull_policy(args.lb_policy, args.pull_policy)?;
     if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
         return Err(
             "--lb-subset-size is not supported with --lb-policy cl, cl-lr, centralized, or corr".into(),
@@ -524,6 +523,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     struct PendingReplicaBalancer {
         balancer: ReplicaBalancer,
         mailbox: Mailbox<ReplicaBalancer>,
+        rb_id: usize,
         microservice_id: String,
         server_idx: usize,
         downstream_indices: HashMap<String, Vec<usize>>,
@@ -544,6 +544,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     }
 
     let use_shared_downstream = args.lb_policy.uses_shared_downstream();
+    let is_approx = args.lb_policy.is_approx();
 
     let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
     let mut edge_balancer_inputs: HashMap<String, Output<Hop>> = HashMap::new();
@@ -704,6 +705,16 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             }
         }
     } else {
+        let resolved_pull_policy = if is_approx {
+            Some(
+                args.pull_policy
+                    .expect("pull_policy validated before simulation"),
+            )
+        } else {
+            None
+        };
+        let mut next_rb_id = 0usize;
+
         for microservice_id in &graph.microservice_order {
             let n_servers = graph.microservices[microservice_id].replicas as usize;
 
@@ -725,9 +736,24 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     downstream_indices.insert(target.clone(), indices);
                 }
 
+                let (policy, lb_policy) = if is_approx {
+                    (
+                        resolved_pull_policy
+                            .expect("pull_policy validated before simulation")
+                            .build(),
+                        LoadBalancePolicyKind::Approx,
+                    )
+                } else {
+                    (args.lb_policy.build(), args.lb_policy)
+                };
+
+                let rb_id = next_rb_id;
+                next_rb_id += 1;
+
                 let balancer = ReplicaBalancer::new(
-                    args.lb_policy.build(),
-                    args.lb_policy,
+                    policy,
+                    lb_policy,
+                    rb_id,
                     microservice_id.clone(),
                     server_idx,
                     downstream_indices.clone(),
@@ -746,6 +772,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 pending_replica_balancers.push(PendingReplicaBalancer {
                     balancer,
                     mailbox,
+                    rb_id,
                     microservice_id: microservice_id.clone(),
                     server_idx,
                     downstream_indices: downstream_indices.clone(),
@@ -771,6 +798,28 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                         server_mailboxes.get(&(target_microservice.clone(), server_idx))
                     {
                         outputs[server_idx].connect(Replica::input, mb);
+                    }
+                }
+            }
+        }
+
+        if is_approx {
+            for pending in &mut pending_replica_balancers {
+                for (target_microservice, indices) in &pending.downstream_indices {
+                    let intent_outputs = pending
+                        .balancer
+                        .pull_intent_outputs
+                        .get_mut(target_microservice)
+                        .unwrap_or_else(|| {
+                            panic!("missing pull intent outputs for {target_microservice}")
+                        });
+                    for &server_idx in indices {
+                        if let Some(mb) =
+                            server_mailboxes.get(&(target_microservice.clone(), server_idx))
+                        {
+                            intent_outputs[server_idx]
+                                .connect(Replica::receive_pull_intent, mb);
+                        }
                     }
                 }
             }
@@ -808,17 +857,6 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         );
     }
 
-    for pending in pending_replica_balancers {
-        bench = bench.add_model(
-            pending.balancer,
-            pending.mailbox,
-            &format!(
-                "replica-balancer-{}-{}",
-                pending.microservice_id, pending.server_idx
-            ),
-        );
-    }
-
     for pending in pending_downstream_balancers {
         bench = bench.add_model(
             pending.balancer,
@@ -843,6 +881,18 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     } else {
         HashSet::new()
     };
+
+    let total_rb_count = pending_replica_balancers.len();
+    let mut approx_pull_targets: HashSet<(String, usize)> = HashSet::new();
+    if is_approx {
+        for pending in &pending_replica_balancers {
+            for (target, indices) in &pending.downstream_indices {
+                for &server_idx in indices {
+                    approx_pull_targets.insert((target.clone(), server_idx));
+                }
+            }
+        }
+    }
 
     let mut pull_registrations: Vec<(EventId<()>, u32)> = Vec::new();
 
@@ -912,6 +962,24 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 None
             };
 
+            let mut approx_pull_outputs = Vec::new();
+            if is_approx && approx_pull_targets.contains(&(microservice_id.clone(), i)) {
+                approx_pull_outputs = vec![Output::default(); total_rb_count];
+                for pending in &pending_replica_balancers {
+                    if pending
+                        .downstream_indices
+                        .get(microservice_id)
+                        .is_some_and(|indices| indices.contains(&i))
+                    {
+                        let rb_address = replica_balancer_addresses
+                            .get(&(pending.microservice_id.clone(), pending.server_idx))
+                            .expect("replica balancer address");
+                        approx_pull_outputs[pending.rb_id]
+                            .connect(ReplicaBalancer::pull, rb_address);
+                    }
+                }
+            }
+
             let replica = Replica::new(ReplicaConfig {
                 graph: graph.clone(),
                 microservice_id: microservice_id.clone(),
@@ -927,6 +995,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 completed: completed_output.clone(),
                 tracer: tracer.clone(),
                 pull_output,
+                approx_pull_outputs,
                 scheduling: args.scheduling,
             });
             bench = bench.add_model(replica, mb, &format!("{microservice_id}-server-{i}"));
@@ -934,6 +1003,17 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 pull_registrations.push((pull_input, concurrency));
             }
         }
+    }
+
+    for pending in pending_replica_balancers {
+        bench = bench.add_model(
+            pending.balancer,
+            pending.mailbox,
+            &format!(
+                "replica-balancer-{}-{}",
+                pending.microservice_id, pending.server_idx
+            ),
+        );
     }
 
     let arrival = UserArrival::new(
@@ -1046,6 +1126,7 @@ mod tests {
             load_file: root.join("tests/client_server/single_replica/load.json"),
             n: 5_000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(seed),
@@ -1069,6 +1150,7 @@ mod tests {
             load_file: root.join("tests/fanin/multi/load.json"),
             n: 1000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(1),
@@ -1124,6 +1206,7 @@ mod tests {
             load_file: root.join("tests/fanin/multi/load.json"),
             n: 1000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(99),
@@ -1166,6 +1249,7 @@ mod tests {
             load_file: root.join("tests/fanin/multi/load.json"),
             n: 1000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(1),
@@ -1205,6 +1289,7 @@ mod tests {
             load_file: root.join("tests/fanin/multi/load.json"),
             n: 1000,
             lb_policy: LoadBalancePolicyKind::Cl,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(99),
@@ -1234,6 +1319,7 @@ mod tests {
             load_file: root.join("tests/chain/3/load.json"),
             n: 5000,
             lb_policy: LoadBalancePolicyKind::Centralized,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(42),
@@ -1255,6 +1341,7 @@ mod tests {
             load_file: root.join("tests/chain/3/load.json"),
             n: 5000,
             lb_policy: LoadBalancePolicyKind::Cl,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(42),
@@ -1331,6 +1418,7 @@ mod tests {
             load_file: root.join("tests/fanin/multi/load.json"),
             n: 1000,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(1),
@@ -1520,6 +1608,7 @@ mod tests {
             load_file: root.join("tests/chain/3/load.json"),
             n: 500,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(42),
@@ -1551,6 +1640,7 @@ mod tests {
             load_file: root.join("tests/chain/3/load.json"),
             n: 500,
             lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
             seed: Some(42),

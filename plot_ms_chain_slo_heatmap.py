@@ -30,6 +30,7 @@ except ModuleNotFoundError:
 from plot_cdfs import (
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
+    PULL_POLICIES,
     REPO_ROOT,
     ensure_release_binary,
     output_path_with_comment,
@@ -88,6 +89,7 @@ def run_chain_sweep(
     rps_per_load_level: float,
     n: int,
     lb_policy: str,
+    pull_policy: str | None,
     lb_subset_size: int,
     scheduling: str,
     seed: int | None,
@@ -111,6 +113,7 @@ def run_chain_sweep(
                 load_file=load_file,
                 n=n,
                 lb_policy=lb_policy,
+                pull_policy=pull_policy,
                 lb_subset_size=lb_subset_size,
                 scheduling=scheduling,
                 seed=seed,
@@ -176,6 +179,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rps-per-load-level", type=float, default=DEFAULT_RPS_PER_LOAD_LEVEL)
     parser.add_argument("--n", type=int, default=100000)
     parser.add_argument("--lb-policy", choices=MS_LB_POLICIES, default="power-of-two")
+    parser.add_argument(
+        "--pull-policy",
+        choices=PULL_POLICIES,
+        default=None,
+        help="Pull-intent server selection for approx (required when --lb-policy approx)",
+    )
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument("--seed", type=int, default=None)
@@ -184,6 +193,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.lb_policy == "approx" and args.pull_policy is None:
+        raise SystemExit("--pull-policy is required when --lb-policy approx")
+    if args.lb_policy != "approx" and args.pull_policy is not None:
+        raise SystemExit("--pull-policy is only valid with --lb-policy approx")
+
     loads = load_values(args.load_min, args.load_max, args.load_step)
     if not loads:
         print("no load values in sweep range", file=sys.stderr)
@@ -203,6 +217,7 @@ def main() -> None:
         rps_per_load_level=args.rps_per_load_level,
         n=args.n,
         lb_policy=args.lb_policy,
+        pull_policy=args.pull_policy,
         lb_subset_size=args.lb_subset_size,
         scheduling=args.scheduling,
         seed=args.seed,

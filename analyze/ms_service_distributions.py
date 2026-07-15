@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from plot_cdfs import (  # noqa: E402
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
+    PULL_POLICIES,
     ensure_release_binary,
     output_path_with_comment,
     run_ms_simulation,
@@ -642,6 +643,12 @@ def parse_args() -> argparse.Namespace:
         help="Override SLO latency threshold in milliseconds (passed to ms as --slo-ms)",
     )
     parser.add_argument("--lb-policy", choices=MS_LB_POLICIES, default="power-of-two")
+    parser.add_argument(
+        "--pull-policy",
+        choices=PULL_POLICIES,
+        default=None,
+        help="Pull-intent server selection for approx (required when --lb-policy approx)",
+    )
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument(
@@ -672,6 +679,10 @@ def main() -> None:
         raise SystemExit(f"callgraph not found: {callgraph}")
     if not load_file.is_file():
         raise SystemExit(f"load file not found: {load_file}")
+    if args.lb_policy == "approx" and args.pull_policy is None:
+        raise SystemExit("--pull-policy is required when --lb-policy approx")
+    if args.lb_policy != "approx" and args.pull_policy is not None:
+        raise SystemExit("--pull-policy is only valid with --lb-policy approx")
 
     binary = args.ms_binary
     if binary is None and not args.no_build:
@@ -685,6 +696,7 @@ def main() -> None:
         load_file=load_file,
         n=args.n,
         lb_policy=args.lb_policy,
+        pull_policy=args.pull_policy,
         lb_subset_size=args.lb_subset_size,
         seed=args.seed,
         rps=args.rps,

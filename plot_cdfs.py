@@ -31,7 +31,7 @@ MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
 LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx")
 PULL_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
-MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "cl", "cl-lr", "corr")
+MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx", "cl", "cl-lr", "corr")
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
 SIMULATORS = ("lb", "ms")
 
@@ -293,6 +293,7 @@ def run_ms_simulation(
     load_file: Path,
     n: int,
     lb_policy: str = "power-of-two",
+    pull_policy: str | None = None,
     lb_subset_size: int = 0,
     seed: int | None = None,
     rps: float | None = None,
@@ -317,6 +318,8 @@ def run_ms_simulation(
         "--scheduling",
         scheduling,
     ]
+    if pull_policy is not None:
+        cmd.extend(["--pull-policy", pull_policy])
     if seed is not None:
         cmd.extend(["--seed", str(seed)])
     if rps is not None:

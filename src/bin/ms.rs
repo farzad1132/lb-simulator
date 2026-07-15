@@ -1,6 +1,6 @@
 use clap::Parser;
 use lb::microservice::{MsArgs, MsStats, OutputFormat, print_human_stats, run};
-use lb::policy::LoadBalancePolicyKind;
+use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::io::{self, Write};
@@ -16,6 +16,8 @@ struct Args {
     n: u32,
     #[arg(long, value_enum, default_value = "power-of-two")]
     lb_policy: LoadBalancePolicyKind,
+    #[arg(long, value_enum)]
+    pull_policy: Option<PullPolicyKind>,
     #[arg(long, default_value_t = 0)]
     lb_subset_size: u32,
     #[arg(long, value_enum, default_value_t = SubsetPolicyKind::Deterministic)]
@@ -49,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         load_file: cli.load_file,
         n: cli.n,
         lb_policy: cli.lb_policy,
+        pull_policy: cli.pull_policy,
         lb_subset_size: cli.lb_subset_size,
         lb_subset_policy: cli.lb_subset_policy,
         seed: cli.seed,
@@ -139,6 +142,23 @@ mod tests {
             "tests/fanin/load.json",
         ]);
         assert_eq!(cli.verbose, 0);
+    }
+
+    #[test]
+    fn parses_approx_lb_policy() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "approx",
+            "--pull-policy",
+            "least-request",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Approx);
+        assert_eq!(cli.pull_policy, Some(PullPolicyKind::LeastRequest));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use load_balancer::LoadBalancer;
 use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
-use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{validate_pull_policy, LoadBalancePolicyKind, PullPolicyKind};
 use lb::sim_util;
 use lb::subset::{self, SubsetPolicyKind};
 use rand::Rng;
@@ -641,14 +641,6 @@ fn validate_express_del_th(value: f64) -> Result<Duration, String> {
     }
 }
 
-fn validate_pull_policy(args: &Args) -> Result<(), String> {
-    match (args.lb_policy.is_approx(), args.pull_policy) {
-        (true, None) => Err("--pull-policy is required with --lb-policy approx".into()),
-        (false, Some(_)) => Err("--pull-policy is only valid with --lb-policy approx".into()),
-        _ => Ok(()),
-    }
-}
-
 fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String> {
     let has_express_flags = args.express_size.is_some()
         || args.express_th.is_some()
@@ -1146,7 +1138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    validate_pull_policy(&args).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    validate_pull_policy(args.lb_policy, args.pull_policy).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;
     let service_time = resolve_service_time(&args)?;
@@ -1351,26 +1343,22 @@ mod tests {
 
     #[test]
     fn validate_pull_policy_required_for_approx() {
-        let err = validate_pull_policy(
-            &Args::try_parse_from(["lb", "--lb-policy", "approx"]).unwrap(),
-        )
-        .unwrap_err();
+        let args = Args::try_parse_from(["lb", "--lb-policy", "approx"]).unwrap();
+        let err = validate_pull_policy(args.lb_policy, args.pull_policy).unwrap_err();
         assert!(err.contains("--pull-policy is required"));
     }
 
     #[test]
     fn validate_pull_policy_rejected_without_approx() {
-        let err = validate_pull_policy(
-            &Args::try_parse_from([
-                "lb",
-                "--lb-policy",
-                "power-of-two",
-                "--pull-policy",
-                "least-request",
-            ])
-            .unwrap(),
-        )
-        .unwrap_err();
+        let args = Args::try_parse_from([
+            "lb",
+            "--lb-policy",
+            "power-of-two",
+            "--pull-policy",
+            "least-request",
+        ])
+        .unwrap();
+        let err = validate_pull_policy(args.lb_policy, args.pull_policy).unwrap_err();
         assert!(err.contains("--pull-policy is only valid"));
     }
 

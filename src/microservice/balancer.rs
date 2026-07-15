@@ -82,6 +82,12 @@ fn select_corr_replica(server_indices: &[usize], local_inflight: &[u32], rank: u
     tied[rng::random_usize_range(0..tied.len())]
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReplicaPull {
+    pub target_microservice: String,
+    pub server_idx: usize,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct EdgeBalancer {
     #[serde(skip, default = "default_policy")]
@@ -160,6 +166,7 @@ pub struct ReplicaBalancer {
     #[serde(skip, default = "default_policy")]
     policy: Box<dyn LoadBalancePolicy>,
     lb_policy: LoadBalancePolicyKind,
+    rb_id: usize,
     #[serde(skip)]
     microservice_id: String,
     #[serde(skip)]
@@ -172,13 +179,19 @@ pub struct ReplicaBalancer {
     downstream_indices: HashMap<String, Vec<usize>>,
     #[serde(skip)]
     outbound_scratch: Vec<u32>,
+    #[serde(skip)]
+    outbound_queues: HashMap<String, VecDeque<OutboundCall>>,
+    #[serde(skip)]
+    pull_intent_load: HashMap<String, Vec<u32>>,
     pub downstream_outputs: HashMap<String, Vec<Output<ReplicaInput>>>,
+    pub pull_intent_outputs: HashMap<String, Vec<Output<usize>>>,
 }
 
 impl ReplicaBalancer {
     pub fn new(
         policy: Box<dyn LoadBalancePolicy>,
         lb_policy: LoadBalancePolicyKind,
+        rb_id: usize,
         microservice_id: String,
         server_idx: usize,
         downstream_indices: HashMap<String, Vec<usize>>,
@@ -186,6 +199,9 @@ impl ReplicaBalancer {
         tracer: Option<Arc<MsTracer>>,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
+        let mut outbound_queues = HashMap::new();
+        let mut pull_intent_load = HashMap::new();
+        let mut pull_intent_outputs = HashMap::new();
         for (target, indices) in &downstream_indices {
             let n = graph_server_counts.get(target).copied().unwrap_or(0) as usize;
             debug_assert!(
@@ -193,6 +209,9 @@ impl ReplicaBalancer {
                 "downstream indices must be within target servers"
             );
             local_outbound_inflight.insert(target.clone(), vec![0; n]);
+            outbound_queues.insert(target.clone(), VecDeque::new());
+            pull_intent_load.insert(target.clone(), vec![0; n]);
+            pull_intent_outputs.insert(target.clone(), (0..n).map(|_| Output::default()).collect());
         }
         let downstream_outputs = downstream_indices
             .keys()
@@ -202,14 +221,42 @@ impl ReplicaBalancer {
         Self {
             policy,
             lb_policy,
+            rb_id,
             microservice_id,
             server_idx,
             tracer,
             local_outbound_inflight,
             downstream_indices,
             outbound_scratch: Vec::new(),
+            outbound_queues,
+            pull_intent_load,
             downstream_outputs,
+            pull_intent_outputs,
         }
+    }
+
+    async fn dispatch_to_server(&mut self, target: &str, server_idx: usize, mut call: OutboundCall) {
+        if let Some(inflight) = self.local_outbound_inflight.get_mut(target) {
+            inflight[server_idx] += 1;
+        }
+
+        if self.lb_policy.is_approx() {
+            call.hop.slot_release = Some(OutboundRelease {
+                target_microservice: target.to_string(),
+                target_server: server_idx,
+                response_time_ms: 0,
+            });
+        } else if let Some(caller) = &mut call.hop.caller {
+            caller.outbound_target_microservice = target.to_string();
+            caller.outbound_target_server = server_idx;
+        }
+
+        let Some(outputs) = self.downstream_outputs.get_mut(target) else {
+            return;
+        };
+        outputs[server_idx]
+            .send(ReplicaInput::Upstream(call.hop))
+            .await;
     }
 }
 
@@ -234,6 +281,54 @@ impl ReplicaBalancer {
                 "replica balancer outbound: no servers for microservice {}",
                 target
             );
+            return;
+        }
+
+        if self.lb_policy.is_approx() {
+            if let Some(tracer) = &self.tracer {
+                tracer.log(
+                    call.hop.trace,
+                    cx.time(),
+                    call.hop.request_id,
+                    &format!(
+                        "ReplicaBalancer({}/{}) approx enqueue target={target} queue={} endpoint={}",
+                        self.microservice_id,
+                        self.server_idx,
+                        self.outbound_queues
+                            .get(&target)
+                            .map(|q| q.len() + 1)
+                            .unwrap_or(1),
+                        call.hop.endpoint
+                    ),
+                );
+            }
+            self.outbound_queues
+                .entry(target.clone())
+                .or_default()
+                .push_back(call);
+
+            let pull_intent_load = self
+                .pull_intent_load
+                .get(&target)
+                .expect("missing pull intent load table");
+            self.outbound_scratch.clear();
+            self.outbound_scratch.extend(
+                indices
+                    .iter()
+                    .map(|&i| pull_intent_load.get(i).copied().unwrap_or(0)),
+            );
+            let local_idx = self
+                .policy
+                .select(&self.outbound_scratch)
+                .min(self.outbound_scratch.len().saturating_sub(1));
+            let global_idx = indices[local_idx];
+
+            if let Some(loads) = self.pull_intent_load.get_mut(&target) {
+                loads[global_idx] += 1;
+            }
+            if let Some(outputs) = self.pull_intent_outputs.get_mut(&target) {
+                outputs[global_idx].send(self.rb_id).await;
+            }
             return;
         }
 
@@ -281,6 +376,38 @@ impl ReplicaBalancer {
         outputs[global_idx]
             .send(ReplicaInput::Upstream(call.hop))
             .await;
+    }
+
+    pub async fn pull(&mut self, pull: ReplicaPull, cx: &Context<Self>) {
+        if !self.lb_policy.is_approx() {
+            return;
+        }
+        let target = pull.target_microservice;
+        let server_idx = pull.server_idx;
+        let Some(queue) = self.outbound_queues.get_mut(&target) else {
+            return;
+        };
+        if queue.is_empty() {
+            return;
+        }
+        if let Some(loads) = self.pull_intent_load.get_mut(&target) {
+            if server_idx < loads.len() {
+                loads[server_idx] = loads[server_idx].saturating_sub(1);
+            }
+        }
+        let call = queue.pop_front().unwrap();
+        if let Some(tracer) = &self.tracer {
+            tracer.log(
+                call.hop.trace,
+                cx.time(),
+                call.hop.request_id,
+                &format!(
+                    "ReplicaBalancer({}/{}) approx dispatch target={target} -> server={server_idx} endpoint={}",
+                    self.microservice_id, self.server_idx, call.hop.endpoint
+                ),
+            );
+        }
+        self.dispatch_to_server(&target, server_idx, call).await;
     }
 
     pub async fn release_outbound(&mut self, release: OutboundRelease, _cx: &Context<Self>) {

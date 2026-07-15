@@ -1,3 +1,4 @@
+use super::balancer::ReplicaPull;
 use super::callgraph::CallGraph;
 use super::hop::{
     CallerRef, CompletedRequest, Hop, OutboundCall, OutboundRelease, ReplicaInput,
@@ -39,6 +40,7 @@ pub struct ReplicaConfig {
     pub completed: Output<CompletedRequest>,
     pub tracer: Option<Arc<MsTracer>>,
     pub pull_output: Option<Output<usize>>,
+    pub approx_pull_outputs: Vec<Output<ReplicaPull>>,
     pub scheduling: SchedulingPolicyKind,
 }
 
@@ -72,6 +74,10 @@ pub struct Replica {
     #[serde(skip)]
     pull_output: Option<Output<usize>>,
     #[serde(skip)]
+    approx_pull_outputs: Vec<Output<ReplicaPull>>,
+    #[serde(skip)]
+    pull_intent_queue: VecDeque<usize>,
+    #[serde(skip)]
     scheduling: SchedulingPolicyKind,
 }
 
@@ -94,7 +100,23 @@ impl Replica {
             completed: config.completed,
             tracer: config.tracer,
             pull_output: config.pull_output,
+            approx_pull_outputs: config.approx_pull_outputs,
+            pull_intent_queue: VecDeque::new(),
             scheduling: config.scheduling,
+        }
+    }
+
+    async fn drain_pull_intents_async(&mut self) {
+        while self.in_flight < self.max_concurrency && !self.pull_intent_queue.is_empty() {
+            let rb_id = self.pull_intent_queue.pop_front().expect("queue non-empty");
+            if let Some(output) = self.approx_pull_outputs.get_mut(rb_id) {
+                output
+                    .send(ReplicaPull {
+                        target_microservice: self.microservice_id.clone(),
+                        server_idx: self.server_idx,
+                    })
+                    .await;
+            }
         }
     }
 
@@ -393,6 +415,14 @@ impl Replica {
         }
     }
 
+    pub async fn receive_pull_intent(&mut self, rb_id: usize, _cx: &Context<Self>) {
+        if self.approx_pull_outputs.is_empty() {
+            return;
+        }
+        self.pull_intent_queue.push_back(rb_id);
+        self.drain_pull_intents_async().await;
+    }
+
     #[nexosim(schedulable)]
     async fn complete(&mut self, mut hop: Hop, cx: &Context<Self>) {
         if let Ok(mut busy) = self.busy_time.lock() {
@@ -426,6 +456,9 @@ impl Replica {
                 if let Some(output) = &mut self.pull_output {
                     output.send(self.server_idx).await;
                 }
+            }
+            if !self.approx_pull_outputs.is_empty() {
+                self.drain_pull_intents_async().await;
             }
         }
 

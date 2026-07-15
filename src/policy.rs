@@ -161,7 +161,7 @@ impl LoadBalancePolicyKind {
     }
 
     pub fn is_lb_only(self) -> bool {
-        matches!(self, Self::Approx)
+        false
     }
 
     pub fn is_cl(self) -> bool {
@@ -185,7 +185,7 @@ impl LoadBalancePolicyKind {
 
     pub fn ingress_policy(self) -> Box<dyn LoadBalancePolicy> {
         match self {
-            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr => {
+            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr | Self::Approx => {
                 Box::new(PowerOfTwoPolicy)
             }
             other => other.build(),
@@ -198,6 +198,17 @@ impl LoadBalancePolicyKind {
             Self::Cl => Box::new(PowerOfTwoPolicy),
             _ => Box::new(PowerOfTwoPolicy),
         }
+    }
+}
+
+pub fn validate_pull_policy(
+    lb_policy: LoadBalancePolicyKind,
+    pull_policy: Option<PullPolicyKind>,
+) -> Result<(), String> {
+    match (lb_policy.is_approx(), pull_policy) {
+        (true, None) => Err("--pull-policy is required with --lb-policy approx".into()),
+        (false, Some(_)) => Err("--pull-policy is only valid with --lb-policy approx".into()),
+        _ => Ok(()),
     }
 }
 
@@ -215,8 +226,37 @@ mod tests {
     fn approx_policy_kind_is_approx() {
         assert!(LoadBalancePolicyKind::Approx.is_approx());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_approx());
-        assert!(LoadBalancePolicyKind::Approx.is_lb_only());
+        assert!(!LoadBalancePolicyKind::Approx.is_lb_only());
         assert!(!LoadBalancePolicyKind::Centralized.is_lb_only());
+    }
+
+    #[test]
+    fn approx_ingress_is_power_of_two() {
+        crate::rng::enter_run(Some(42));
+        let mut approx = LoadBalancePolicyKind::Approx.ingress_policy();
+        let loads = [3u32, 0, 7, 2];
+        let approx_pick = approx.select(&loads);
+
+        crate::rng::enter_run(Some(42));
+        let mut centralized = LoadBalancePolicyKind::Centralized.ingress_policy();
+        assert_eq!(centralized.select(&loads), approx_pick);
+        crate::rng::exit_run();
+    }
+
+    #[test]
+    fn validate_pull_policy_required_for_approx() {
+        let err = validate_pull_policy(LoadBalancePolicyKind::Approx, None).unwrap_err();
+        assert!(err.contains("--pull-policy is required"));
+    }
+
+    #[test]
+    fn validate_pull_policy_rejected_without_approx() {
+        let err = validate_pull_policy(
+            LoadBalancePolicyKind::PowerOfTwo,
+            Some(PullPolicyKind::LeastRequest),
+        )
+        .unwrap_err();
+        assert!(err.contains("--pull-policy is only valid"));
     }
 
     #[test]
