@@ -1,3 +1,4 @@
+use lb::approx::{fatal_pull_abort, PullIntent, PullRequest};
 use lb::policy::LoadBalancePolicy;
 use lb::policy::LoadBalancePolicyKind;
 use lb::policy::PowerOfTwoPolicy;
@@ -29,9 +30,11 @@ pub struct LoadBalancer {
     waiting_servers: VecDeque<usize>,
     #[serde(skip)]
     pull_intent_load: Vec<u32>,
+    #[serde(skip)]
+    next_task_id: u64,
     preserve_client_metadata: bool,
     pub outputs: Vec<Output<Task>>,
-    pub pull_intent_outputs: Vec<Output<usize>>,
+    pub pull_intent_outputs: Vec<Output<PullIntent>>,
 }
 
 impl LoadBalancer {
@@ -53,6 +56,7 @@ impl LoadBalancer {
             queue: Vec::new(),
             waiting_servers: VecDeque::new(),
             pull_intent_load: vec![0; n_servers],
+            next_task_id: 0,
             preserve_client_metadata,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
             pull_intent_outputs: (0..n_servers).map(|_| Output::default()).collect(),
@@ -78,6 +82,29 @@ impl LoadBalancer {
             self.dispatch_to_server(server_idx, task).await;
         }
     }
+
+    fn remove_task_for_pull(&mut self, request_id: u64) -> Option<Task> {
+        let idx = self
+            .queue
+            .iter()
+            .position(|task| task.task_id == request_id)?;
+        Some(self.queue.remove(idx))
+    }
+
+    async fn send_pull_intent(&mut self, request_id: u64) {
+        for (scratch, &server_idx) in self.load_scratch.iter_mut().zip(self.server_indices.iter()) {
+            *scratch = self.pull_intent_load[server_idx];
+        }
+        let local_idx = self.policy.select(&self.load_scratch);
+        let global_idx = self.server_indices[local_idx];
+        self.pull_intent_load[global_idx] += 1;
+        self.pull_intent_outputs[global_idx]
+            .send(PullIntent {
+                sender_id: self.lb_id,
+                request_id,
+            })
+            .await;
+    }
 }
 
 #[Model]
@@ -90,18 +117,11 @@ impl LoadBalancer {
         }
 
         if self.lb_policy.is_approx() {
+            task.task_id = self.next_task_id;
+            self.next_task_id += 1;
+            let request_id = task.task_id;
             self.queue.push(task);
-            for (scratch, &server_idx) in
-                self.load_scratch.iter_mut().zip(self.server_indices.iter())
-            {
-                *scratch = self.pull_intent_load[server_idx];
-            }
-            let local_idx = self.policy.select(&self.load_scratch);
-            let global_idx = self.server_indices[local_idx];
-            self.pull_intent_load[global_idx] += 1;
-            self.pull_intent_outputs[global_idx]
-                .send(self.lb_id)
-                .await;
+            self.send_pull_intent(request_id).await;
             return;
         }
 
@@ -118,18 +138,39 @@ impl LoadBalancer {
         self.outputs[global_idx].send(task).await;
     }
 
-    pub async fn pull(&mut self, server_idx: usize, _cx: &Context<Self>) {
+    pub async fn pull(&mut self, pull: PullRequest, _cx: &Context<Self>) {
         if self.lb_policy.is_approx() {
-            if self.queue.is_empty() {
-                return;
-            }
+            let server_idx = pull.server_idx;
+            let Some(request_id) = pull.request_id else {
+                fatal_pull_abort(
+                    "lb",
+                    format!(
+                        "missing request_id on approx pull (lb_id={}, server_idx={})",
+                        self.lb_id, server_idx
+                    ),
+                );
+            };
+            let Some(task) = self.remove_task_for_pull(request_id) else {
+                let queued_task_ids: Vec<u64> = self.queue.iter().map(|t| t.task_id).collect();
+                fatal_pull_abort(
+                    "lb",
+                    format!(
+                        "bound task not found (lb_id={}, server_idx={}, request_id={}, queue_len={}, queued_task_ids={:?})",
+                        self.lb_id,
+                        server_idx,
+                        request_id,
+                        self.queue.len(),
+                        queued_task_ids,
+                    ),
+                );
+            };
             self.pull_intent_load[server_idx] =
                 self.pull_intent_load[server_idx].saturating_sub(1);
-            let task = self.queue.remove(0);
             self.dispatch_to_server(server_idx, task).await;
             return;
         }
 
+        let server_idx = pull.server_idx;
         if self.queue.is_empty() {
             self.waiting_servers.push_back(server_idx);
         } else {
@@ -140,5 +181,41 @@ impl LoadBalancer {
 
     pub async fn release(&mut self, server_idx: usize, _cx: &Context<Self>) {
         self.local_inflight[server_idx] = self.local_inflight[server_idx].saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexosim::time::MonotonicTime;
+
+    fn test_lb() -> LoadBalancer {
+        LoadBalancer::new(
+            LoadBalancePolicyKind::Approx.build(),
+            LoadBalancePolicyKind::Approx,
+            2,
+            vec![0, 1],
+            0,
+            false,
+        )
+    }
+
+    fn task_with_id(task_id: u64) -> Task {
+        let mut task = Task::new(MonotonicTime::EPOCH, std::time::Duration::from_secs(1));
+        task.task_id = task_id;
+        task
+    }
+
+    #[test]
+    fn bound_pull_removes_matching_task_not_front() {
+        let mut lb = test_lb();
+        lb.queue.push(task_with_id(1));
+        lb.queue.push(task_with_id(2));
+        lb.queue.push(task_with_id(3));
+        let task = lb.remove_task_for_pull(2).expect("task 2 present");
+        assert_eq!(task.task_id, 2);
+        assert_eq!(lb.queue.len(), 2);
+        assert_eq!(lb.queue[0].task_id, 1);
+        assert_eq!(lb.queue[1].task_id, 3);
     }
 }

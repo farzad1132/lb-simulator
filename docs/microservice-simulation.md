@@ -258,25 +258,9 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 
 ### Approx policy (decentralized outbound pull)
 
-`--lb-policy approx` uses the same per-replica outbound topology as push policies (`ReplicaBalancer` per caller replica), but dispatch is **pull-based** like lb `approx`: outbound calls queue at each caller's `ReplicaBalancer`; on arrival, `--pull-policy` selects a downstream replica using outstanding pull-intent counts; the downstream replica pulls the call when it has spare capacity.
+Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`.
 
-Ingress stays push-based power-of-two on `EdgeBalancer` (same as `centralized` / `cl`).
-
-```
-User → EdgeBalancer(handle) → frontend/0
-                                │
-frontend/0 ──▶ ReplicaBalancer(frontend/0) ──pull-intent──▶ backend1/*
-                                ▲                              │
-                                └──────── pull ────────────────┘
-```
-
-| vs | Difference |
-|----|------------|
-| push policies | Push-on-arrival; `local_outbound_inflight` for server selection |
-| `approx` | Per-caller FIFO queues; `--pull-policy` on `pull_intent_load`; downstream replica pulls when idle |
-| lb `approx` | One queue per client LB; ms uses one queue per caller replica per downstream target |
-
-`--pull-policy` is **required** with `approx` and has no default. `--lb-subset-size` is supported (same as push policies).
+Full documentation: **[approx-policy.md](approx-policy.md)**.
 
 ### Corr policy (experimental)
 

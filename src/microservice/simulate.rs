@@ -23,6 +23,7 @@ use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
 use super::occupancy::OccupancyAccumulator;
 use super::replica::{Replica, ReplicaConfig};
 use super::trace::MsTracer;
+use crate::approx_audit::ApproxPullAudit;
 use crate::policy::{validate_pull_policy, LoadBalancePolicyKind, PullPolicyKind};
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
@@ -59,6 +60,8 @@ pub struct MsArgs {
     pub verbose: u8,
     pub scheduling: SchedulingPolicyKind,
     pub force_fixed_svc: bool,
+    /// When set, records approx pull/intent events for post-run invariant checks (tests).
+    pub pull_audit: Option<Arc<ApproxPullAudit>>,
 }
 
 #[derive(Serialize)]
@@ -545,6 +548,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let use_shared_downstream = args.lb_policy.uses_shared_downstream();
     let is_approx = args.lb_policy.is_approx();
+    let pull_audit = args.pull_audit.clone();
 
     let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
     let mut edge_balancer_inputs: HashMap<String, Output<Hop>> = HashMap::new();
@@ -759,6 +763,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     downstream_indices.clone(),
                     &microservice_server_counts,
                     tracer.clone(),
+                    pull_audit.clone(),
                 );
                 let mailbox = Mailbox::new();
                 let address = mailbox.address();
@@ -882,7 +887,6 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         HashSet::new()
     };
 
-    let total_rb_count = pending_replica_balancers.len();
     let mut approx_pull_targets: HashSet<(String, usize)> = HashSet::new();
     if is_approx {
         for pending in &pending_replica_balancers {
@@ -936,10 +940,12 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     .expect("outbound gateway address");
                 outbound_release.connect(OutboundGateway::release, gw_address);
             } else {
-                let rb_address = replica_balancer_addresses
-                    .get(&(microservice_id.clone(), i))
-                    .expect("replica balancer address");
-                outbound_release.connect(ReplicaBalancer::release_outbound, rb_address);
+                let rb_mailbox = pending_replica_balancers
+                    .iter()
+                    .find(|p| p.microservice_id == *microservice_id && p.server_idx == i)
+                    .map(|p| &p.mailbox)
+                    .expect("replica balancer mailbox");
+                outbound_release.connect(ReplicaBalancer::release_outbound, rb_mailbox);
             }
 
             let mut pull_output = None;
@@ -962,20 +968,17 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 None
             };
 
-            let mut approx_pull_outputs = Vec::new();
+            let mut approx_pull_outputs = HashMap::new();
             if is_approx && approx_pull_targets.contains(&(microservice_id.clone(), i)) {
-                approx_pull_outputs = vec![Output::default(); total_rb_count];
                 for pending in &pending_replica_balancers {
                     if pending
                         .downstream_indices
                         .get(microservice_id)
                         .is_some_and(|indices| indices.contains(&i))
                     {
-                        let rb_address = replica_balancer_addresses
-                            .get(&(pending.microservice_id.clone(), pending.server_idx))
-                            .expect("replica balancer address");
-                        approx_pull_outputs[pending.rb_id]
-                            .connect(ReplicaBalancer::pull, rb_address);
+                        let mut output = Output::default();
+                        output.connect(ReplicaBalancer::pull, &pending.mailbox);
+                        approx_pull_outputs.insert(pending.rb_id, output);
                     }
                 }
             }
@@ -996,6 +999,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 tracer: tracer.clone(),
                 pull_output,
                 approx_pull_outputs,
+                pull_audit: pull_audit.clone(),
                 scheduling: args.scheduling,
             });
             bench = bench.add_model(replica, mb, &format!("{microservice_id}-server-{i}"));
@@ -1139,6 +1143,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         }
     }
 
@@ -1163,6 +1168,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         })
         .unwrap()
         .expect("stats");
@@ -1219,6 +1225,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1262,6 +1269,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         })
         .unwrap()
         .expect("stats");
@@ -1302,6 +1310,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1332,6 +1341,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         })
         .unwrap()
         .expect("stats");
@@ -1354,6 +1364,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         })
         .unwrap()
         .expect("stats");
@@ -1431,6 +1442,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: false,
+            pull_audit: None,
         })
         .unwrap()
         .expect("stats");
@@ -1621,6 +1633,7 @@ mod tests {
             verbose: 0,
             scheduling,
             force_fixed_svc: false,
+            pull_audit: None,
         })
         .unwrap()
         .expect("stats")
@@ -1653,6 +1666,7 @@ mod tests {
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
             force_fixed_svc: true,
+            pull_audit: None,
         })
         .unwrap()
         .expect("stats");

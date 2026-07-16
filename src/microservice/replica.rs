@@ -7,6 +7,8 @@ use super::hop::{
 use super::microservice_stats::MicroserviceVisitTracker;
 use super::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
+use crate::approx::PullIntent;
+use crate::approx_audit::ApproxPullAudit;
 use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
@@ -40,7 +42,8 @@ pub struct ReplicaConfig {
     pub completed: Output<CompletedRequest>,
     pub tracer: Option<Arc<MsTracer>>,
     pub pull_output: Option<Output<usize>>,
-    pub approx_pull_outputs: Vec<Output<ReplicaPull>>,
+    pub approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
+    pub pull_audit: Option<Arc<ApproxPullAudit>>,
     pub scheduling: SchedulingPolicyKind,
 }
 
@@ -55,6 +58,8 @@ pub struct Replica {
     server_idx: usize,
     max_concurrency: u32,
     in_flight: u32,
+    #[serde(skip)]
+    pending_pulls: u32,
     #[serde(skip)]
     queue: VecDeque<ReplicaWork>,
     #[serde(skip)]
@@ -74,9 +79,11 @@ pub struct Replica {
     #[serde(skip)]
     pull_output: Option<Output<usize>>,
     #[serde(skip)]
-    approx_pull_outputs: Vec<Output<ReplicaPull>>,
+    approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
     #[serde(skip)]
-    pull_intent_queue: VecDeque<usize>,
+    pull_intent_queue: VecDeque<PullIntent>,
+    #[serde(skip)]
+    pull_audit: Option<Arc<ApproxPullAudit>>,
     #[serde(skip)]
     scheduling: SchedulingPolicyKind,
 }
@@ -91,6 +98,7 @@ impl Replica {
             server_idx: config.server_idx,
             max_concurrency: config.max_concurrency.max(1),
             in_flight: 0,
+            pending_pulls: 0,
             queue: VecDeque::new(),
             busy_time: config.busy_time,
             replica_occupancy: config.replica_occupancy,
@@ -102,21 +110,44 @@ impl Replica {
             pull_output: config.pull_output,
             approx_pull_outputs: config.approx_pull_outputs,
             pull_intent_queue: VecDeque::new(),
+            pull_audit: config.pull_audit,
             scheduling: config.scheduling,
         }
     }
 
     async fn drain_pull_intents_async(&mut self) {
-        while self.in_flight < self.max_concurrency && !self.pull_intent_queue.is_empty() {
-            let rb_id = self.pull_intent_queue.pop_front().expect("queue non-empty");
-            if let Some(output) = self.approx_pull_outputs.get_mut(rb_id) {
-                output
-                    .send(ReplicaPull {
-                        target_microservice: self.microservice_id.clone(),
-                        server_idx: self.server_idx,
-                    })
-                    .await;
-            }
+        if self.in_flight + self.pending_pulls >= self.max_concurrency {
+            return;
+        }
+        let queue_len_before = self.pull_intent_queue.len();
+        let pending_pulls_before = self.pending_pulls;
+        let in_flight_before = self.in_flight;
+        let Some(intent) = self.pull_intent_queue.pop_front() else {
+            return;
+        };
+        if let Some(audit) = &self.pull_audit {
+            audit.record_intent_drained(
+                &self.microservice_id,
+                self.server_idx,
+                intent.sender_id,
+                intent.request_id,
+                queue_len_before,
+                pending_pulls_before,
+                in_flight_before,
+                self.max_concurrency,
+            );
+        }
+        self.pending_pulls += 1;
+        if let Some(output) = self.approx_pull_outputs.get_mut(&intent.sender_id) {
+            output
+                .send(ReplicaPull {
+                    target_microservice: self.microservice_id.clone(),
+                    server_idx: self.server_idx,
+                    request_id: intent.request_id,
+                })
+                .await;
+        } else {
+            self.pending_pulls = self.pending_pulls.saturating_sub(1);
         }
     }
 
@@ -359,13 +390,16 @@ impl Replica {
                         &hop,
                         cx,
                         &format!(
-                            "Server({}/{}) centralized upstream endpoint={} inflight={}",
+                            "Server({}/{}) approx upstream endpoint={} inflight={}",
                             self.microservice_id,
                             self.server_idx,
                             hop.endpoint,
                             self.in_flight
                         ),
                     );
+                    if !self.approx_pull_outputs.is_empty() {
+                        self.pending_pulls = self.pending_pulls.saturating_sub(1);
+                    }
                     self.in_flight += 1;
                     self.sample_occupancy(cx.time());
                     self.begin_service(hop, cx);
@@ -415,11 +449,21 @@ impl Replica {
         }
     }
 
-    pub async fn receive_pull_intent(&mut self, rb_id: usize, _cx: &Context<Self>) {
+    pub async fn receive_pull_intent(&mut self, intent: PullIntent, _cx: &Context<Self>) {
         if self.approx_pull_outputs.is_empty() {
             return;
         }
-        self.pull_intent_queue.push_back(rb_id);
+        let queue_len_before = self.pull_intent_queue.len();
+        if let Some(audit) = &self.pull_audit {
+            audit.record_intent_queued(
+                &self.microservice_id,
+                self.server_idx,
+                intent.sender_id,
+                intent.request_id,
+                queue_len_before,
+            );
+        }
+        self.pull_intent_queue.push_back(intent);
         self.drain_pull_intents_async().await;
     }
 

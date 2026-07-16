@@ -1,6 +1,8 @@
 use super::hop::{Hop, OutboundCall, OutboundRelease, ReplicaInput};
 use super::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
+use crate::approx::{fatal_pull_abort, PullIntent};
+use crate::approx_audit::ApproxPullAudit;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
@@ -86,6 +88,7 @@ fn select_corr_replica(server_indices: &[usize], local_inflight: &[u32], rank: u
 pub struct ReplicaPull {
     pub target_microservice: String,
     pub server_idx: usize,
+    pub request_id: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -184,7 +187,9 @@ pub struct ReplicaBalancer {
     #[serde(skip)]
     pull_intent_load: HashMap<String, Vec<u32>>,
     pub downstream_outputs: HashMap<String, Vec<Output<ReplicaInput>>>,
-    pub pull_intent_outputs: HashMap<String, Vec<Output<usize>>>,
+    pub pull_intent_outputs: HashMap<String, Vec<Output<PullIntent>>>,
+    #[serde(skip)]
+    pull_audit: Option<Arc<ApproxPullAudit>>,
 }
 
 impl ReplicaBalancer {
@@ -197,6 +202,7 @@ impl ReplicaBalancer {
         downstream_indices: HashMap<String, Vec<usize>>,
         graph_server_counts: &HashMap<String, u32>,
         tracer: Option<Arc<MsTracer>>,
+        pull_audit: Option<Arc<ApproxPullAudit>>,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
         let mut outbound_queues = HashMap::new();
@@ -232,7 +238,73 @@ impl ReplicaBalancer {
             pull_intent_load,
             downstream_outputs,
             pull_intent_outputs,
+            pull_audit,
         }
+    }
+
+    fn release_pull_intent_load(&mut self, target: &str, server_idx: usize) {
+        if let Some(loads) = self.pull_intent_load.get_mut(target) {
+            if server_idx < loads.len() {
+                loads[server_idx] = loads[server_idx].saturating_sub(1);
+            }
+        }
+    }
+
+    async fn send_pull_intent_for_target(&mut self, target: &str, request_id: u64) {
+        let Some(indices) = self.downstream_indices.get(target) else {
+            return;
+        };
+        if indices.is_empty() {
+            return;
+        }
+        let pull_intent_load = self
+            .pull_intent_load
+            .get(target)
+            .expect("missing pull intent load table");
+        self.outbound_scratch.clear();
+        self.outbound_scratch.extend(
+            indices
+                .iter()
+                .map(|&i| pull_intent_load.get(i).copied().unwrap_or(0)),
+        );
+        let local_idx = self
+            .policy
+            .select(&self.outbound_scratch)
+            .min(self.outbound_scratch.len().saturating_sub(1));
+        let global_idx = indices[local_idx];
+        if let Some(loads) = self.pull_intent_load.get_mut(target) {
+            loads[global_idx] += 1;
+        }
+        if let Some(outputs) = self.pull_intent_outputs.get_mut(target) {
+            if global_idx < outputs.len() {
+                if let Some(audit) = &self.pull_audit {
+                    audit.record_intent_sent(
+                        self.rb_id,
+                        &self.microservice_id,
+                        self.server_idx,
+                        target,
+                        global_idx,
+                        request_id,
+                    );
+                }
+                outputs[global_idx]
+                    .send(PullIntent {
+                        sender_id: self.rb_id,
+                        request_id,
+                    })
+                    .await;
+            }
+        }
+    }
+
+    fn remove_call_for_pull(
+        queue: &mut VecDeque<OutboundCall>,
+        request_id: u64,
+    ) -> Option<OutboundCall> {
+        let idx = queue
+            .iter()
+            .position(|call| call.hop.request_id == request_id)?;
+        queue.remove(idx)
     }
 
     async fn dispatch_to_server(&mut self, target: &str, server_idx: usize, mut call: OutboundCall) {
@@ -302,33 +374,12 @@ impl ReplicaBalancer {
                     ),
                 );
             }
+            let request_id = call.hop.request_id;
             self.outbound_queues
                 .entry(target.clone())
                 .or_default()
                 .push_back(call);
-
-            let pull_intent_load = self
-                .pull_intent_load
-                .get(&target)
-                .expect("missing pull intent load table");
-            self.outbound_scratch.clear();
-            self.outbound_scratch.extend(
-                indices
-                    .iter()
-                    .map(|&i| pull_intent_load.get(i).copied().unwrap_or(0)),
-            );
-            let local_idx = self
-                .policy
-                .select(&self.outbound_scratch)
-                .min(self.outbound_scratch.len().saturating_sub(1));
-            let global_idx = indices[local_idx];
-
-            if let Some(loads) = self.pull_intent_load.get_mut(&target) {
-                loads[global_idx] += 1;
-            }
-            if let Some(outputs) = self.pull_intent_outputs.get_mut(&target) {
-                outputs[global_idx].send(self.rb_id).await;
-            }
+            self.send_pull_intent_for_target(&target, request_id).await;
             return;
         }
 
@@ -384,18 +435,43 @@ impl ReplicaBalancer {
         }
         let target = pull.target_microservice;
         let server_idx = pull.server_idx;
+
         let Some(queue) = self.outbound_queues.get_mut(&target) else {
-            return;
+            fatal_pull_abort(
+                "ms",
+                format!(
+                    "unknown outbound queue (rb_id={}, microservice_id={}, server_idx={}, target={}, request_id={})",
+                    self.rb_id, self.microservice_id, server_idx, target, pull.request_id
+                ),
+            );
         };
-        if queue.is_empty() {
-            return;
+        let Some(call) = Self::remove_call_for_pull(queue, pull.request_id) else {
+            let queued_request_ids: Vec<u64> = queue.iter().map(|c| c.hop.request_id).collect();
+            fatal_pull_abort(
+                "ms",
+                format!(
+                    "bound call not found (rb_id={}, microservice_id={}, server_idx={}, target={}, request_id={}, queue_len={}, queued_request_ids={:?})",
+                    self.rb_id,
+                    self.microservice_id,
+                    server_idx,
+                    target,
+                    pull.request_id,
+                    queue.len(),
+                    queued_request_ids,
+                ),
+            );
+        };
+        self.release_pull_intent_load(&target, server_idx);
+        if let Some(audit) = &self.pull_audit {
+            audit.record_pull_matched(
+                self.rb_id,
+                &self.microservice_id,
+                self.server_idx,
+                &target,
+                server_idx,
+                pull.request_id,
+            );
         }
-        if let Some(loads) = self.pull_intent_load.get_mut(&target) {
-            if server_idx < loads.len() {
-                loads[server_idx] = loads[server_idx].saturating_sub(1);
-            }
-        }
-        let call = queue.pop_front().unwrap();
         if let Some(tracer) = &self.tracer {
             tracer.log(
                 call.hop.trace,

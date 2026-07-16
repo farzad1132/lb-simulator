@@ -177,7 +177,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--load-max", type=float, default=0.9)
     parser.add_argument("--load-step", type=float, default=0.1)
     parser.add_argument("--rps-per-load-level", type=float, default=DEFAULT_RPS_PER_LOAD_LEVEL)
-    parser.add_argument("--n", type=int, default=300000)
+    parser.add_argument("--n", type=int, default=100000)
     parser.add_argument("--lb-policy", choices=MS_LB_POLICIES, default="power-of-two")
     parser.add_argument(
         "--pull-policy",

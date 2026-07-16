@@ -1,3 +1,4 @@
+use lb::approx::{PullIntent, PullRequest};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use nexosim::simulation::EventKey;
@@ -11,6 +12,7 @@ pub struct Task {
     pub duration: Duration,
     pub finish: MonotonicTime,
     pub start: MonotonicTime,
+    pub task_id: u64,
     pub lb_id: usize,
     pub origin_server_idx: usize,
     pub served_by_express: bool,
@@ -25,6 +27,7 @@ impl Task {
             duration,
             finish: MonotonicTime::EPOCH,
             start,
+            task_id: 0,
             lb_id: 0,
             origin_server_idx: 0,
             served_by_express: false,
@@ -119,18 +122,19 @@ pub enum DispatchMode {
 pub struct Server {
     pub output: Output<Task>,
     pub express_output: Output<Task>,
-    pub pull_output: Output<usize>,
+    pub pull_output: Output<PullRequest>,
     server_idx: usize,
     release_outputs: Vec<Output<usize>>,
-    pull_outputs: Vec<Output<usize>>,
+    pull_outputs: Vec<Output<PullRequest>>,
     max_concurrency: u32,
     in_flight: u32,
+    pending_pulls: u32,
     dispatch_mode: DispatchMode,
     #[serde(skip)]
     in_flight_services: Vec<InFlightService>,
     queue: Vec<Task>,
     #[serde(skip)]
-    pull_intent_queue: VecDeque<usize>,
+    pull_intent_queue: VecDeque<PullIntent>,
     express_eviction: Option<ExpressEvictionPolicy>,
     work_shedding: Option<Duration>,
     is_express: bool,
@@ -163,6 +167,7 @@ impl Server {
             pull_outputs: Vec::new(),
             max_concurrency: max_concurrency.max(1),
             in_flight: 0,
+            pending_pulls: 0,
             dispatch_mode,
             in_flight_services: Vec::new(),
             queue: Vec::new(),
@@ -177,7 +182,7 @@ impl Server {
         }
     }
 
-    pub fn set_pull_outputs(&mut self, pull_outputs: Vec<Output<usize>>) {
+    pub fn set_pull_outputs(&mut self, pull_outputs: Vec<Output<PullRequest>>) {
         self.pull_outputs = pull_outputs;
     }
 
@@ -381,6 +386,9 @@ impl Server {
             self.dispatch_mode,
             DispatchMode::Centralized | DispatchMode::Approx
         ) {
+            if self.dispatch_mode == DispatchMode::Approx {
+                self.pending_pulls = self.pending_pulls.saturating_sub(1);
+            }
             self.begin_service(task, cx);
             return;
         }
@@ -395,26 +403,42 @@ impl Server {
         }
     }
 
-    pub async fn receive_pull_intent(&mut self, lb_id: usize, _cx: &Context<Self>) {
+    pub async fn receive_pull_intent(&mut self, intent: PullIntent, _cx: &Context<Self>) {
         if self.dispatch_mode != DispatchMode::Approx {
             return;
         }
-        self.pull_intent_queue.push_back(lb_id);
+        self.pull_intent_queue.push_back(intent);
         self.drain_pull_intents_async().await;
     }
 
     pub async fn request_pull(&mut self, _: (), _cx: &Context<Self>) {
         if self.dispatch_mode == DispatchMode::Centralized && self.in_flight < self.max_concurrency {
-            self.pull_output.send(self.server_idx).await;
+            self.pull_output
+                .send(PullRequest {
+                    server_idx: self.server_idx,
+                    request_id: None,
+                })
+                .await;
         }
     }
 
     async fn drain_pull_intents_async(&mut self) {
-        while self.in_flight < self.max_concurrency && !self.pull_intent_queue.is_empty() {
-            let lb_id = self.pull_intent_queue.pop_front().expect("queue non-empty");
-            if let Some(output) = self.pull_outputs.get_mut(lb_id) {
-                output.send(self.server_idx).await;
-            }
+        if self.in_flight + self.pending_pulls >= self.max_concurrency {
+            return;
+        }
+        let Some(intent) = self.pull_intent_queue.pop_front() else {
+            return;
+        };
+        self.pending_pulls += 1;
+        if let Some(output) = self.pull_outputs.get_mut(intent.sender_id) {
+            output
+                .send(PullRequest {
+                    server_idx: self.server_idx,
+                    request_id: Some(intent.request_id),
+                })
+                .await;
+        } else {
+            self.pending_pulls = self.pending_pulls.saturating_sub(1);
         }
     }
 
@@ -462,7 +486,12 @@ impl Server {
         self.in_flight -= 1;
         match self.dispatch_mode {
             DispatchMode::Centralized => {
-                self.pull_output.send(self.server_idx).await;
+                self.pull_output
+                    .send(PullRequest {
+                        server_idx: self.server_idx,
+                        request_id: None,
+                    })
+                    .await;
             }
             DispatchMode::Approx => {
                 self.drain_pull_intents_async().await;

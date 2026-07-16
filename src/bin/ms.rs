@@ -64,6 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scheduling: cli.scheduling,
         force_fixed_svc: cli.force_fixed_svc,
         verbose: cli.verbose,
+        pull_audit: None,
     };
 
     let stats = run(&args)?;

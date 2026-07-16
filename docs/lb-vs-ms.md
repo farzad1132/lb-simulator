@@ -26,7 +26,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **Express lane** | yes | — | lb-only; see [expresslane.md](expresslane.md) |
 | **Work shedding** | yes | — | lb-only; `--shed-delay`; see [work-shedding.md](work-shedding.md) |
 | **Centralized pull dispatch** | yes | yes | lb: one global queue; servers pull on spare capacity. ms: one pull queue per downstream target (outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
-| **Approx decentralized pull** | yes | yes (outbound only) | lb: per-client queues; ms: per-caller-replica `ReplicaBalancer` queues; `--pull-policy` selects pull-intent targets. ms ingress stays push P2C. See [lb-simulation.md](lb-simulation.md#approx-policy-decentralized-pull) and [microservice-simulation.md](microservice-simulation.md#approx-policy-decentralized-outbound-pull). |
+| **Approx decentralized pull** | yes | yes (outbound only) | See [approx-policy.md](approx-policy.md) |
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
 | **CL-LR shared least-request outbound** | — | yes | Same shared topology as `cl`; downstream uses least-request on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-lr-policy-shared-least-request-outbound). |
 | **Corr (experimental)** | — | yes | Same shared topology as `cl`; outbound routing is experimental. See [microservice-simulation.md](microservice-simulation.md#corr-policy-experimental). |

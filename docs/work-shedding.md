@@ -41,7 +41,7 @@ flowchart LR
 |-------------|------------|
 | Push policies (`random`, `power-of-two`, `least-request`, `round-robin`) | Yes |
 | `--lb-policy centralized` | No — servers do not queue locally |
-| `--lb-policy approx` | No — servers do not queue locally |
+| `--lb-policy approx` | No — servers do not queue locally; see [approx-policy.md](approx-policy.md) |
 | `--expresslane` or express flags | No — mutually exclusive at startup |
 
 ## Shedding policy (regular servers only)

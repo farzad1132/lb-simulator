@@ -67,7 +67,7 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("CL-1-LR", "least-request", 1, 10),
     ExperimentConfig("CL-1-P2C", "power-of-two", 1, 10),
     ExperimentConfig("Approx-LR", "approx", 10, 10, pull_policy="least-request"),
-    #ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
+    ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
     ExperimentConfig("P2C-S5", "power-of-two", 10, 10, shed_delay=5),
     #ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
     #ExperimentConfig("P2C-E36-ideal", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, ideal=True),
@@ -103,6 +103,7 @@ def format_run_summary(
     metric_name: str,
     metric_value: float,
     data: dict[str, Any],
+    clients: int,
 ) -> str:
     kind, pct = parse_metric(metric_name)
     parts = [
@@ -111,7 +112,7 @@ def format_run_summary(
         f"k={config.lb_subset_size}",
         f"policy={config.lb_policy}",
         f"servers={config.servers}",
-        f"clients={config.clients}",
+        f"clients={clients}",
     ]
     if uses_pull_policy(config):
         parts.append(f"pull_policy={config.pull_policy}")
@@ -143,6 +144,7 @@ def run_load_sweep(
     base_kwargs: dict[str, Any],
     metric: str,
     slo: float | None,
+    clients_override: int | None = None,
 ) -> list[tuple[str, list[float]]]:
     """Return (label, y metric values) per config; x is shared load_values."""
     series: list[tuple[str, list[float]]] = [
@@ -155,11 +157,12 @@ def run_load_sweep(
         desc="config × load",
         unit="run",
     ):
+        clients = clients_override if clients_override is not None else config.clients
         sim_kwargs = {
             **base_kwargs,
             "load": load,
             "lb_policy": config.lb_policy,
-            "clients": config.clients,
+            "clients": clients,
             "servers": config.servers,
             "concurrency": config.concurrency,
             "lb_subset_size": config.lb_subset_size,
@@ -190,6 +193,7 @@ def run_load_sweep(
                 metric_name=metric,
                 metric_value=metric_value,
                 data=data,
+                clients=clients,
             )
         )
     return series
@@ -382,6 +386,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="RNG seed for reproducible simulation",
     )
+    parser.add_argument(
+        "--clients",
+        type=int,
+        default=None,
+        help="Override number of clients for all configs",
+    )
     return parser.parse_args()
 
 
@@ -418,6 +428,7 @@ def main() -> None:
         base_kwargs=base_kwargs,
         metric=args.metric,
         slo=args.slo,
+        clients_override=args.clients,
     )
 
     output_path = args.output or default_output_path(args.metric)

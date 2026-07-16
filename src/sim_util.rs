@@ -1,5 +1,13 @@
-use nexosim::simulation::{EventId, SchedulingError, Simulation};
+use nexosim::simulation::{EventId, Mailbox, SchedulingError, Simulation};
 use std::time::Duration;
+
+/// Larger than nexosim's default (16) to avoid pull-policy deadlocks under
+/// high approx load in multi-hop topologies.
+pub const MODEL_MAILBOX_CAPACITY: usize = 256;
+
+pub fn model_mailbox<M: nexosim::model::Model>() -> Mailbox<M> {
+    Mailbox::with_capacity(MODEL_MAILBOX_CAPACITY)
+}
 
 const MIN_DURATION_SECS: f32 = 1e-9;
 
