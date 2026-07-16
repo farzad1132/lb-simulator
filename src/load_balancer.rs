@@ -1,12 +1,14 @@
-use lb::approx::{fatal_pull_abort, PullIntent, PullRequest};
-use lb::policy::LoadBalancePolicy;
-use lb::policy::LoadBalancePolicyKind;
-use lb::policy::PowerOfTwoPolicy;
+use crate::approx::{fatal_pull_abort, PullIntent, PullRequest};
+use crate::lb_pull_audit::LbPullAudit;
+use crate::policy::LoadBalancePolicy;
+use crate::policy::LoadBalancePolicyKind;
+use crate::policy::PowerOfTwoPolicy;
 use crate::server::Task;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
     Box::new(PowerOfTwoPolicy)
@@ -33,6 +35,9 @@ pub struct LoadBalancer {
     #[serde(skip)]
     next_task_id: u64,
     preserve_client_metadata: bool,
+    no_bind: bool,
+    #[serde(skip)]
+    pull_audit: Option<Arc<LbPullAudit>>,
     pub outputs: Vec<Output<Task>>,
     pub pull_intent_outputs: Vec<Output<PullIntent>>,
 }
@@ -45,6 +50,8 @@ impl LoadBalancer {
         server_indices: Vec<usize>,
         lb_id: usize,
         preserve_client_metadata: bool,
+        no_bind: bool,
+        pull_audit: Option<Arc<LbPullAudit>>,
     ) -> Self {
         Self {
             policy,
@@ -58,6 +65,8 @@ impl LoadBalancer {
             pull_intent_load: vec![0; n_servers],
             next_task_id: 0,
             preserve_client_metadata,
+            no_bind,
+            pull_audit,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
             pull_intent_outputs: (0..n_servers).map(|_| Output::default()).collect(),
         }
@@ -98,6 +107,9 @@ impl LoadBalancer {
         let local_idx = self.policy.select(&self.load_scratch);
         let global_idx = self.server_indices[local_idx];
         self.pull_intent_load[global_idx] += 1;
+        if let Some(audit) = &self.pull_audit {
+            audit.record_intent_sent(self.lb_id, global_idx, request_id);
+        }
         self.pull_intent_outputs[global_idx]
             .send(PullIntent {
                 sender_id: self.lb_id,
@@ -120,6 +132,10 @@ impl LoadBalancer {
             task.task_id = self.next_task_id;
             self.next_task_id += 1;
             let request_id = task.task_id;
+            let queue_len_before = self.queue.len();
+            if let Some(audit) = &self.pull_audit {
+                audit.record_task_enqueued(self.lb_id, request_id, queue_len_before);
+            }
             self.queue.push(task);
             self.send_pull_intent(request_id).await;
             return;
@@ -141,6 +157,41 @@ impl LoadBalancer {
     pub async fn pull(&mut self, pull: PullRequest, _cx: &Context<Self>) {
         if self.lb_policy.is_approx() {
             let server_idx = pull.server_idx;
+            if self.no_bind {
+                if self.queue.is_empty() {
+                    fatal_pull_abort(
+                        "lb",
+                        format!(
+                            "no queued task for approx pull (lb_id={}, server_idx={}, \
+                             ignored_request_id={:?}, queue_len=0, pull_intent_load={}, \
+                             queued_task_ids=[])",
+                            self.lb_id,
+                            server_idx,
+                            pull.request_id,
+                            self.pull_intent_load[server_idx],
+                        ),
+                    );
+                }
+                let queue_len_before = self.queue.len();
+                let queue_head_task_id = self.queue.first().map(|t| t.task_id);
+                let task = self.queue.remove(0);
+                let pulled_task_id = task.task_id;
+                if let Some(audit) = &self.pull_audit {
+                    audit.record_pull_fulfilled(
+                        self.lb_id,
+                        server_idx,
+                        pull.request_id,
+                        pulled_task_id,
+                        queue_len_before,
+                        queue_head_task_id,
+                    );
+                }
+                self.pull_intent_load[server_idx] =
+                    self.pull_intent_load[server_idx].saturating_sub(1);
+                self.dispatch_to_server(server_idx, task).await;
+                return;
+            }
+
             let Some(request_id) = pull.request_id else {
                 fatal_pull_abort(
                     "lb",
@@ -150,6 +201,8 @@ impl LoadBalancer {
                     ),
                 );
             };
+            let queue_len_before = self.queue.len();
+            let queue_head_task_id = self.queue.first().map(|t| t.task_id);
             let Some(task) = self.remove_task_for_pull(request_id) else {
                 let queued_task_ids: Vec<u64> = self.queue.iter().map(|t| t.task_id).collect();
                 fatal_pull_abort(
@@ -164,6 +217,17 @@ impl LoadBalancer {
                     ),
                 );
             };
+            let pulled_task_id = task.task_id;
+            if let Some(audit) = &self.pull_audit {
+                audit.record_pull_fulfilled(
+                    self.lb_id,
+                    server_idx,
+                    Some(request_id),
+                    pulled_task_id,
+                    queue_len_before,
+                    queue_head_task_id,
+                );
+            }
             self.pull_intent_load[server_idx] =
                 self.pull_intent_load[server_idx].saturating_sub(1);
             self.dispatch_to_server(server_idx, task).await;
@@ -189,7 +253,7 @@ mod tests {
     use super::*;
     use nexosim::time::MonotonicTime;
 
-    fn test_lb() -> LoadBalancer {
+    fn test_lb(no_bind: bool) -> LoadBalancer {
         LoadBalancer::new(
             LoadBalancePolicyKind::Approx.build(),
             LoadBalancePolicyKind::Approx,
@@ -197,6 +261,8 @@ mod tests {
             vec![0, 1],
             0,
             false,
+            no_bind,
+            None,
         )
     }
 
@@ -208,7 +274,7 @@ mod tests {
 
     #[test]
     fn bound_pull_removes_matching_task_not_front() {
-        let mut lb = test_lb();
+        let mut lb = test_lb(false);
         lb.queue.push(task_with_id(1));
         lb.queue.push(task_with_id(2));
         lb.queue.push(task_with_id(3));
@@ -217,5 +283,29 @@ mod tests {
         assert_eq!(lb.queue.len(), 2);
         assert_eq!(lb.queue[0].task_id, 1);
         assert_eq!(lb.queue[1].task_id, 3);
+    }
+
+    #[test]
+    fn no_bind_pull_takes_oldest_not_bound_id() {
+        let mut lb = test_lb(true);
+        lb.queue.push(task_with_id(1));
+        lb.queue.push(task_with_id(2));
+        lb.queue.push(task_with_id(3));
+        let task = lb.queue.remove(0);
+        assert_eq!(task.task_id, 1);
+        assert_eq!(lb.queue.len(), 2);
+        assert_eq!(lb.queue[0].task_id, 2);
+        assert_eq!(lb.queue[1].task_id, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "no queued task")]
+    fn no_bind_empty_queue_panics() {
+        crate::approx::fatal_pull_abort(
+            "lb",
+            "no queued task for approx pull (lb_id=0, server_idx=0, \
+             ignored_request_id=Some(99), queue_len=0, pull_intent_load=0, \
+             queued_task_ids=[])",
+        );
     }
 }

@@ -141,6 +141,7 @@ When adding “many outputs indexed by model id” wiring:
 | Topic | Location |
 |-------|----------|
 | Intent binding invariant | [approx-policy.md § Intent binding invariant](approx-policy.md) |
+| No-bind pull fulfillment (`--no-bind`) | [approx-policy.md § No-bind mode](approx-policy.md#no-bind-mode---no-bind-lb-only) |
 | `fatal_pull_abort` | [`src/approx.rs`](../src/approx.rs) |
 | Pull drain + `pending_pulls` | [`src/microservice/replica.rs`](../src/microservice/replica.rs) |
 | Port wiring | [`src/microservice/simulate.rs`](../src/microservice/simulate.rs) (~966–978) |

@@ -1,8 +1,12 @@
 pub mod approx;
 pub mod approx_audit;
+pub mod lb_pull_audit;
+pub mod lb_simulate;
+pub mod load_balancer;
 pub mod microservice;
 pub mod policy;
 pub mod rng;
 pub mod scheduling;
+pub mod server;
 pub mod sim_util;
 pub mod subset;

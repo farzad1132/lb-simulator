@@ -212,6 +212,16 @@ pub fn validate_pull_policy(
     }
 }
 
+pub fn validate_no_bind(
+    lb_policy: LoadBalancePolicyKind,
+    no_bind: bool,
+) -> Result<(), String> {
+    if no_bind && !lb_policy.is_approx() {
+        return Err("--no-bind is only valid with --lb-policy approx".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

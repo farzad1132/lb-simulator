@@ -20,6 +20,7 @@ class ExperimentConfig:
     express_th: int | None = None
     ideal: bool = False
     shed_delay: float | None = None
+    no_bind: bool = False  # oldest-FCFS approx pulls; only valid when lb_policy == "approx"
 
 
 def uses_pull_policy(config: ExperimentConfig) -> bool:
@@ -51,6 +52,10 @@ def validate_config(config: ExperimentConfig) -> None:
     elif config.pull_policy is not None:
         raise SystemExit(
             f"config {label!r}: pull_policy is only valid when lb_policy is approx"
+        )
+    if config.no_bind and not uses_pull_policy(config):
+        raise SystemExit(
+            f"config {label!r}: no_bind is only valid when lb_policy is approx"
         )
     if uses_work_shedding(config):
         if config.lb_policy in ("centralized", "approx"):

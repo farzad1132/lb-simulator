@@ -1,10 +1,12 @@
-use lb::approx::{PullIntent, PullRequest};
+use crate::approx::{PullIntent, PullRequest};
+use crate::lb_pull_audit::LbPullAudit;
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use nexosim::simulation::EventKey;
 use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Default, Deserialize, Serialize, Clone)]
@@ -135,6 +137,8 @@ pub struct Server {
     queue: Vec<Task>,
     #[serde(skip)]
     pull_intent_queue: VecDeque<PullIntent>,
+    #[serde(skip)]
+    pull_audit: Option<Arc<LbPullAudit>>,
     express_eviction: Option<ExpressEvictionPolicy>,
     work_shedding: Option<Duration>,
     is_express: bool,
@@ -157,6 +161,7 @@ impl Server {
         is_express: bool,
         express_lb_id: Option<usize>,
         dispatch_mode: DispatchMode,
+        pull_audit: Option<Arc<LbPullAudit>>,
     ) -> Self {
         Self {
             output: Output::default(),
@@ -172,6 +177,7 @@ impl Server {
             in_flight_services: Vec::new(),
             queue: Vec::new(),
             pull_intent_queue: VecDeque::new(),
+            pull_audit,
             express_eviction,
             work_shedding,
             is_express,
@@ -407,6 +413,15 @@ impl Server {
         if self.dispatch_mode != DispatchMode::Approx {
             return;
         }
+        let queue_len_before = self.pull_intent_queue.len();
+        if let Some(audit) = &self.pull_audit {
+            audit.record_intent_queued(
+                self.server_idx,
+                intent.sender_id,
+                intent.request_id,
+                queue_len_before,
+            );
+        }
         self.pull_intent_queue.push_back(intent);
         self.drain_pull_intents_async().await;
     }
@@ -429,6 +444,20 @@ impl Server {
         let Some(intent) = self.pull_intent_queue.pop_front() else {
             return;
         };
+        let queue_len_before = self.pull_intent_queue.len() + 1;
+        let pending_pulls_before = self.pending_pulls;
+        let in_flight_before = self.in_flight;
+        if let Some(audit) = &self.pull_audit {
+            audit.record_intent_drained(
+                self.server_idx,
+                intent.sender_id,
+                intent.request_id,
+                queue_len_before,
+                pending_pulls_before,
+                in_flight_before,
+                self.max_concurrency,
+            );
+        }
         self.pending_pulls += 1;
         if let Some(output) = self.pull_outputs.get_mut(intent.sender_id) {
             output

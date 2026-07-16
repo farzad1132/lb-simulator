@@ -1,35 +1,13 @@
-mod load_balancer;
-mod rng {
-    pub use lb::rng::*;
-}
-mod server;
-
 use clap::{Parser, ValueEnum};
-use load_balancer::LoadBalancer;
-use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
-use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
-use nexosim::time::MonotonicTime;
-use lb::policy::{validate_pull_policy, LoadBalancePolicyKind, PullPolicyKind};
-use lb::sim_util;
-use lb::subset::{self, SubsetPolicyKind};
-use rand::Rng;
+use lb::lb_simulate::{LbArrivalDistribution, LbRunArgs, LbServiceDistribution, LbServiceStats};
+use lb::policy::{validate_no_bind, validate_pull_policy, LoadBalancePolicyKind, PullPolicyKind};
+use lb::subset::SubsetPolicyKind;
 use serde::Serialize;
-use server::{DispatchMode, ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task};
 use std::io::{self, Write};
 use std::time::Duration;
 
-const MIN_DURATION_SECS: f32 = 1e-9;
-const SERVICE_MEAN: f32 = 1.0;
-
-fn sample_exp(rng: &mut impl Rng, mean: f32) -> f32 {
-    // u in (0, 1]; avoid ln(0) when the uniform draw is exactly 0.
-    let u = loop {
-        let u = 1.0 - rng.random::<f32>();
-        if u > 0.0 && u.is_finite() {
-            break u;
-        }
-    };
-    (-mean * u.ln()).max(MIN_DURATION_SECS)
+mod rng {
+    pub use lb::rng::*;
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -45,156 +23,13 @@ enum ArrivalDistribution {
     Constant,
 }
 
-struct BimodalConfig {
-    modes: [f32; 2],
-    probs: [f32; 2],
-}
-
 struct ServiceTimeConfig {
     mean: f32,
-    dist: ServiceDistribution,
-    bimodal: Option<BimodalConfig>,
-}
-
-const PROB_SUM_TOLERANCE: f32 = 1e-6;
-
-fn mixture_mean(modes: &[f32; 2], probs: &[f32; 2]) -> f32 {
-    modes[0] * probs[0] + modes[1] * probs[1]
-}
-
-fn select_bimodal_mode(rng: &mut impl Rng, config: &BimodalConfig) -> f32 {
-    if rng.random::<f32>() < config.probs[0] {
-        config.modes[0]
-    } else {
-        config.modes[1]
-    }
-}
-
-fn sample_bimodal(rng: &mut impl Rng, config: &BimodalConfig) -> f32 {
-    let mode_mean = select_bimodal_mode(rng, config);
-    sample_exp(rng, mode_mean)
-}
-
-fn sample_service(rng: &mut impl Rng, service_time: &ServiceTimeConfig) -> f32 {
-    match service_time.dist {
-        ServiceDistribution::Exponential => sample_exp(rng, service_time.mean),
-        ServiceDistribution::Constant => service_time.mean.max(MIN_DURATION_SECS),
-        ServiceDistribution::Bimodal => {
-            sample_bimodal(rng, service_time.bimodal.as_ref().expect("bimodal config"))
-        }
-    }
 }
 
 fn resolve_service_time(args: &Args) -> Result<ServiceTimeConfig, String> {
-    match args.service_dist {
-        ServiceDistribution::Bimodal => {
-            let modes = args
-                .service_modes
-                .as_ref()
-                .ok_or("--service-modes is required with --service-dist bimodal")?;
-            let probs = args
-                .service_mode_probs
-                .as_ref()
-                .ok_or("--service-mode-probs is required with --service-dist bimodal")?;
-            if modes.len() != 2 {
-                return Err(format!(
-                    "--service-modes requires exactly 2 values, got {}",
-                    modes.len()
-                ));
-            }
-            if probs.len() != 2 {
-                return Err(format!(
-                    "--service-mode-probs requires exactly 2 values, got {}",
-                    probs.len()
-                ));
-            }
-            if modes.iter().any(|m| *m <= 0.0 || !m.is_finite()) {
-                return Err("--service-modes values must be positive and finite".into());
-            }
-            if probs.iter().any(|p| *p <= 0.0 || !p.is_finite()) {
-                return Err("--service-mode-probs values must be positive and finite".into());
-            }
-            let prob_sum: f32 = probs.iter().sum();
-            if (prob_sum - 1.0).abs() > PROB_SUM_TOLERANCE {
-                return Err(format!(
-                    "--service-mode-probs must sum to 1, got {prob_sum}"
-                ));
-            }
-            let modes_arr = [modes[0], modes[1]];
-            let probs_arr = [probs[0], probs[1]];
-            let mean = mixture_mean(&modes_arr, &probs_arr);
-            Ok(ServiceTimeConfig {
-                mean,
-                dist: args.service_dist,
-                bimodal: Some(BimodalConfig {
-                    modes: modes_arr,
-                    probs: probs_arr,
-                }),
-            })
-        }
-        _ => {
-            if args.service_modes.is_some() || args.service_mode_probs.is_some() {
-                return Err(
-                    "--service-modes and --service-mode-probs are only valid with --service-dist bimodal"
-                        .into(),
-                );
-            }
-            Ok(ServiceTimeConfig {
-                mean: SERVICE_MEAN,
-                dist: args.service_dist,
-                bimodal: None,
-            })
-        }
-    }
-}
-
-fn sample_inter_arrival(
-    rng: &mut impl Rng,
-    arrival_dist: ArrivalDistribution,
-    per_client_arrival_mean: f32,
-) -> f32 {
-    match arrival_dist {
-        ArrivalDistribution::Exponential => sample_exp(rng, per_client_arrival_mean),
-        ArrivalDistribution::Constant => per_client_arrival_mean.max(MIN_DURATION_SECS),
-    }
-}
-
-fn task_source(
-    sim: &Simulation,
-    input: &EventId<Task>,
-    arrival_mean: f32,
-    per_client_arrival_mean: f32,
-    arrival_dist: ArrivalDistribution,
-    client_index: usize,
-    service_time: &ServiceTimeConfig,
-    n: u32,
-) -> Result<(), SchedulingError> {
-    let scheduler = sim.scheduler();
-    let t0 = sim.time();
-    let mut offset = match arrival_dist {
-        ArrivalDistribution::Exponential => Duration::ZERO,
-        ArrivalDistribution::Constant => {
-            Duration::from_secs_f32((client_index as f32 * arrival_mean).max(MIN_DURATION_SECS))
-        }
-    };
-
-    rng::with_rng(|rng| {
-        for _ in 0..n {
-            if matches!(arrival_dist, ArrivalDistribution::Exponential) {
-                let gap = sample_inter_arrival(rng, arrival_dist, per_client_arrival_mean);
-                offset += Duration::from_secs_f32(gap);
-            }
-            let duration = Duration::from_secs_f32(sample_service(rng, service_time));
-            let task = Task::new(t0 + offset, duration);
-            scheduler.schedule_event(offset, input, task)?;
-            if matches!(arrival_dist, ArrivalDistribution::Constant) {
-                let gap = sample_inter_arrival(rng, arrival_dist, per_client_arrival_mean);
-                offset += Duration::from_secs_f32(gap);
-            }
-        }
-        Ok::<(), SchedulingError>(())
-    })?;
-    Ok(())
+    let cfg = lb::lb_simulate::resolve_service_time(&lb_run_args_from_cli(args, None, None))?;
+    Ok(ServiceTimeConfig { mean: cfg.mean })
 }
 
 struct Rates {
@@ -236,12 +71,6 @@ struct ServiceStats {
     pre_eviction_queueing_delays: Option<Vec<f64>>,
     post_eviction_queueing_delays: Option<Vec<f64>>,
     pct_shed_requests: Option<f64>,
-}
-
-struct ExpressLaneStatsConfig {
-    n_regular: u32,
-    express_size: u32,
-    concurrency: u32,
 }
 
 #[derive(Serialize)]
@@ -296,205 +125,6 @@ fn prob_latency_gt_slo(e2e: &[f64], slo: f64) -> f64 {
         return 0.0;
     }
     e2e.iter().filter(|&&latency| latency > slo).count() as f64 / e2e.len() as f64
-}
-
-fn pool_utilization_pct(busy: Duration, observation: Duration, pool_capacity: u32) -> f64 {
-    if observation.is_zero() || pool_capacity == 0 {
-        0.0
-    } else {
-        busy.as_secs_f64() / (observation.as_secs_f64() * f64::from(pool_capacity)) * 100.0
-    }
-}
-
-fn duration_secs(d: Duration) -> f64 {
-    d.as_secs_f64()
-}
-
-fn time_secs(time: MonotonicTime) -> f64 {
-    duration_secs(time.duration_since(MonotonicTime::EPOCH))
-}
-
-fn consecutive_diffs(times: &[f64]) -> Vec<f64> {
-    if times.len() < 2 {
-        return Vec::new();
-    }
-    let mut sorted = times.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    sorted.windows(2).map(|w| w[1] - w[0]).collect()
-}
-
-fn calculate_stats(
-    output: &mut EventQueueReader<Task>,
-    observation: Duration,
-    total_capacity: u32,
-    express_lane: Option<&ExpressLaneStatsConfig>,
-    work_shedding: bool,
-) -> Option<ServiceStats> {
-    let mut task_samples: Vec<(f64, f64, bool, Option<f64>, Option<f64>)> = Vec::new();
-    let mut arrival_times: Vec<f64> = Vec::new();
-    let mut departure_times: Vec<f64> = Vec::new();
-    let mut busy = Duration::ZERO;
-    let mut regular_busy = Duration::ZERO;
-    let mut express_busy = Duration::ZERO;
-    let mut total_requests = 0usize;
-    let mut shed_requests = 0usize;
-
-    while let Some(task) = output.try_read() {
-        total_requests += 1;
-        if work_shedding && task.shed_at.is_some() {
-            shed_requests += 1;
-        }
-        arrival_times.push(time_secs(task.start));
-        departure_times.push(time_secs(task.finish));
-        busy += task.duration;
-        if task.served_by_express {
-            express_busy += task.duration;
-        } else {
-            regular_busy += task.duration;
-        }
-        let unloaded_ns = task.duration.as_nanos();
-        if unloaded_ns == 0 {
-            continue;
-        }
-        let e2e_ns = task.finish.duration_since(task.start).as_nanos();
-        let (pre_eviction, post_eviction) = if task.served_by_express {
-            let evicted_at = task.evicted_at.expect("express task must have evicted_at");
-            let service_started_at = task
-                .service_started_at
-                .expect("express task must have service_started_at");
-            (
-                Some(duration_secs(evicted_at.duration_since(task.start))),
-                Some(duration_secs(
-                    service_started_at.duration_since(evicted_at),
-                )),
-            )
-        } else {
-            (None, None)
-        };
-        task_samples.push((
-            e2e_ns as f64 / 1e9,
-            unloaded_ns as f64 / 1e9,
-            task.served_by_express,
-            pre_eviction,
-            post_eviction,
-        ));
-    }
-
-    if task_samples.is_empty() {
-        return None;
-    }
-
-    let mut unloaded_samples: Vec<f64> = task_samples
-        .iter()
-        .map(|(_, duration, _, _, _)| *duration)
-        .collect();
-    unloaded_samples.sort_by(f64::total_cmp);
-    let unloaded_latency_p99 = percentile(&unloaded_samples, 99.0);
-    if unloaded_latency_p99 == 0.0 {
-        return None;
-    }
-
-    let e2e: Vec<f64> = task_samples.iter().map(|(e2e, _, _, _, _)| *e2e).collect();
-    let processing_times: Vec<f64> = task_samples
-        .iter()
-        .map(|(_, duration, _, _, _)| *duration)
-        .collect();
-    let queueing_delays: Vec<f64> = task_samples
-        .iter()
-        .map(|(e2e, duration, _, _, _)| e2e - duration)
-        .collect();
-    let inter_arrival = consecutive_diffs(&arrival_times);
-    let inter_departure = consecutive_diffs(&departure_times);
-
-    let utilization_pct = pool_utilization_pct(busy, observation, total_capacity);
-
-    let (
-        regular_utilization_pct,
-        express_utilization_pct,
-        regular_e2e,
-        express_e2e,
-        regular_queueing_delays,
-        express_queueing_delays,
-        pre_eviction_queueing_delays,
-        post_eviction_queueing_delays,
-    ) = match express_lane {
-        Some(cfg) => {
-            let regular_capacity = cfg.n_regular * cfg.concurrency;
-            let express_capacity = cfg.express_size * cfg.concurrency;
-            let regular_e2e: Vec<f64> = task_samples
-                .iter()
-                .filter(|(_, _, express, _, _)| !express)
-                .map(|(e2e, _, _, _, _)| *e2e)
-                .collect();
-            let express_e2e: Vec<f64> = task_samples
-                .iter()
-                .filter(|(_, _, express, _, _)| *express)
-                .map(|(e2e, _, _, _, _)| *e2e)
-                .collect();
-            let regular_q: Vec<f64> = task_samples
-                .iter()
-                .filter(|(_, _, express, _, _)| !express)
-                .map(|(e2e, duration, _, _, _)| e2e - duration)
-                .collect();
-            let express_q: Vec<f64> = task_samples
-                .iter()
-                .filter(|(_, _, express, _, _)| *express)
-                .map(|(e2e, duration, _, _, _)| e2e - duration)
-                .collect();
-            let pre_q: Vec<f64> = task_samples
-                .iter()
-                .filter_map(|(_, _, _, pre, _)| *pre)
-                .collect();
-            let post_q: Vec<f64> = task_samples
-                .iter()
-                .filter_map(|(_, _, _, _, post)| *post)
-                .collect();
-            (
-                Some(pool_utilization_pct(
-                    regular_busy,
-                    observation,
-                    regular_capacity,
-                )),
-                Some(pool_utilization_pct(
-                    express_busy,
-                    observation,
-                    express_capacity,
-                )),
-                Some(regular_e2e),
-                Some(express_e2e),
-                Some(regular_q),
-                Some(express_q),
-                Some(pre_q),
-                Some(post_q),
-            )
-        }
-        None => (None, None, None, None, None, None, None, None),
-    };
-
-    let pct_shed_requests = if work_shedding && total_requests > 0 {
-        Some(shed_requests as f64 / total_requests as f64 * 100.0)
-    } else {
-        None
-    };
-
-    Some(ServiceStats {
-        utilization_pct,
-        regular_utilization_pct,
-        express_utilization_pct,
-        unloaded_latency_p99,
-        inter_arrival,
-        inter_departure,
-        e2e,
-        processing_times,
-        queueing_delays,
-        regular_e2e,
-        express_e2e,
-        regular_queueing_delays,
-        express_queueing_delays,
-        pre_eviction_queueing_delays,
-        post_eviction_queueing_delays,
-        pct_shed_requests,
-    })
 }
 
 const HUMAN_PERCENTILES: [f64; 12] = [
@@ -634,9 +264,11 @@ struct Args {
     ideal: bool,
     #[arg(long)]
     shed_delay: Option<f64>,
+    #[arg(long)]
+    no_bind: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ExpressEvictionConfig {
     QueueDepth(u32),
     QueueDelay {
@@ -649,7 +281,7 @@ enum ExpressEvictionConfig {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ExpressLaneConfig {
     express_size: u32,
     eviction: ExpressEvictionConfig,
@@ -776,371 +408,86 @@ fn validate_work_shedding(args: &Args) -> Result<Option<Duration>, String> {
         .map(Some)
 }
 
-fn split_tasks(n: u32, clients: u32) -> Vec<u32> {
-    let clients = clients.max(1);
-    let base = n / clients;
-    let rem = n % clients;
-    (0..clients).map(|i| base + u32::from(i < rem)).collect()
+fn service_stats_from_lb(stats: LbServiceStats) -> ServiceStats {
+    ServiceStats {
+        utilization_pct: stats.utilization_pct,
+        regular_utilization_pct: stats.regular_utilization_pct,
+        express_utilization_pct: stats.express_utilization_pct,
+        unloaded_latency_p99: stats.unloaded_latency_p99,
+        inter_arrival: stats.inter_arrival,
+        inter_departure: stats.inter_departure,
+        e2e: stats.e2e,
+        processing_times: stats.processing_times,
+        queueing_delays: stats.queueing_delays,
+        regular_e2e: stats.regular_e2e,
+        express_e2e: stats.express_e2e,
+        regular_queueing_delays: stats.regular_queueing_delays,
+        express_queueing_delays: stats.express_queueing_delays,
+        pre_eviction_queueing_delays: stats.pre_eviction_queueing_delays,
+        post_eviction_queueing_delays: stats.post_eviction_queueing_delays,
+        pct_shed_requests: stats.pct_shed_requests,
+    }
+}
+
+fn lb_run_args_from_cli(
+    args: &Args,
+    express_lane: Option<ExpressLaneConfig>,
+    work_shedding: Option<Duration>,
+) -> LbRunArgs {
+    LbRunArgs {
+        load: args.load,
+        n: args.n,
+        service_dist: match args.service_dist {
+            ServiceDistribution::Exponential => LbServiceDistribution::Exponential,
+            ServiceDistribution::Constant => LbServiceDistribution::Constant,
+            ServiceDistribution::Bimodal => LbServiceDistribution::Bimodal,
+        },
+        arrival: match args.arrival {
+            ArrivalDistribution::Exponential => LbArrivalDistribution::Exponential,
+            ArrivalDistribution::Constant => LbArrivalDistribution::Constant,
+        },
+        service_modes: args.service_modes.clone(),
+        service_mode_probs: args.service_mode_probs.clone(),
+        servers: args.servers,
+        concurrency: args.concurrency,
+        lb_policy: args.lb_policy,
+        pull_policy: args.pull_policy,
+        lb_subset_size: args.lb_subset_size,
+        lb_subset_policy: args.lb_subset_policy,
+        clients: args.clients,
+        verbose: args.verbose,
+        no_bind: args.no_bind,
+        pull_audit: None,
+        express_lane: express_lane.map(|cfg| lb::lb_simulate::ExpressLaneConfig {
+            express_size: cfg.express_size,
+            eviction: match cfg.eviction {
+                ExpressEvictionConfig::QueueDepth(th) => {
+                    lb::lb_simulate::ExpressEvictionConfig::QueueDepth(th)
+                }
+                ExpressEvictionConfig::QueueDelay { threshold, ideal } => {
+                    lb::lb_simulate::ExpressEvictionConfig::QueueDelay { threshold, ideal }
+                }
+                ExpressEvictionConfig::Combined {
+                    depth_threshold,
+                    delay_threshold,
+                } => lb::lb_simulate::ExpressEvictionConfig::Combined {
+                    depth_threshold,
+                    delay_threshold,
+                },
+            },
+        }),
+        work_shedding,
+    }
 }
 
 fn run_simulation(
     args: &Args,
-    service_time: &ServiceTimeConfig,
+    _service_time: &ServiceTimeConfig,
     express_lane: Option<&ExpressLaneConfig>,
     work_shedding: Option<Duration>,
-) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
-    if args.lb_policy.is_centralized() {
-        return run_centralized_simulation(args, service_time);
-    }
-    run_push_simulation(args, service_time, express_lane, work_shedding)
-}
-
-fn run_centralized_simulation(
-    args: &Args,
-    service_time: &ServiceTimeConfig,
-) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
-    let n_clients = args.clients.max(1) as usize;
-    let n_servers = args.servers.max(1) as usize;
-    let concurrency = args.concurrency.max(1);
-    let total_capacity = args.servers.max(1) * concurrency;
-
-    let mut bench = SimInit::with_num_threads(1);
-    let (sink, mut output) = event_queue(SinkState::Enabled);
-
-    let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
-
-    let task_counts = split_tasks(args.n, args.clients.max(1));
-    let mut inputs = Vec::with_capacity(n_clients);
-    let mut pull_inputs = Vec::with_capacity(n_servers);
-
-    let server_indices: Vec<usize> = (0..n_servers).collect();
-    let mut load_balancer = LoadBalancer::new(
-        args.lb_policy.build(),
-        args.lb_policy,
-        n_servers,
-        server_indices,
-        0,
-        false,
-    );
-    for j in 0..n_servers {
-        load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
-    }
-    let lb_mailbox = Mailbox::new();
-    let lb_address = lb_mailbox.address();
-
-    for _ in 0..n_clients {
-        let input = EventSource::new()
-            .connect(LoadBalancer::input, &lb_mailbox)
-            .register(&mut bench);
-        inputs.push(input);
-    }
-    bench = bench.add_model(load_balancer, lb_mailbox, "central-load-balancer");
-
-    for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
-        let mut release_outputs = vec![Output::default()];
-        release_outputs[0].connect(LoadBalancer::release, &lb_address);
-
-        let mut server = Server::new(
-            concurrency,
-            i,
-            release_outputs,
-            None,
-            None,
-            false,
-            None,
-            DispatchMode::Centralized,
-        );
-        server
-            .pull_output
-            .connect(LoadBalancer::pull, &lb_address);
-        server.output.connect_sink(sink.clone());
-        let pull_input = EventSource::new()
-            .connect(Server::request_pull, &server_mailbox)
-            .register(&mut bench);
-        pull_inputs.push(pull_input);
-        bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
-    }
-
-    let t0 = MonotonicTime::EPOCH;
-    let mut simu = bench.init(t0)?;
-
-    sim_util::schedule_initial_pulls(&simu, &pull_inputs, concurrency)?;
-
-    let capacity = total_capacity as f32;
-    let arrival_mean = service_time.mean / (args.load * capacity);
-    let per_client_arrival_mean = arrival_mean * n_clients as f32;
-
-    for (client_index, (input, &client_n)) in inputs.iter().zip(task_counts.iter()).enumerate() {
-        if client_n > 0 {
-            task_source(
-                &simu,
-                input,
-                arrival_mean,
-                per_client_arrival_mean,
-                args.arrival,
-                client_index,
-                service_time,
-                client_n,
-            )?;
-        }
-    }
-
-    simu.run()?;
-
-    let observation = simu.time().duration_since(t0);
-    Ok(calculate_stats(
-        &mut output,
-        observation,
-        total_capacity,
-        None,
-        false,
-    ))
-}
-
-fn run_push_simulation(
-    args: &Args,
-    service_time: &ServiceTimeConfig,
-    express_lane: Option<&ExpressLaneConfig>,
-    work_shedding: Option<Duration>,
-) -> Result<Option<ServiceStats>, nexosim::simulation::SimulationError> {
-    let n_clients = args.clients.max(1) as usize;
-    let n_servers = args.servers.max(1) as usize;
-    let concurrency = args.concurrency.max(1);
-    let total_capacity = args.servers.max(1) * concurrency;
-
-    let (n_regular, express_lb_id) = match express_lane {
-        Some(cfg) => {
-            let n_regular = n_servers - cfg.express_size as usize;
-            (n_regular, n_clients)
-        }
-        None => (n_servers, n_clients),
-    };
-
-    let mut bench = SimInit::with_num_threads(1);
-    let (sink, mut output) = event_queue(SinkState::Enabled);
-
-    let server_mailboxes: Vec<Mailbox<Server>> = (0..n_servers).map(|_| Mailbox::new()).collect();
-
-    let task_counts = split_tasks(args.n, args.clients.max(1));
-    let mut inputs = Vec::with_capacity(n_clients);
-    let mut lb_addresses = Vec::with_capacity(n_clients);
-
-    let client_lb_pool = if express_lane.is_some() {
-        n_regular
-    } else {
-        n_servers
-    };
-
-    let is_approx = args.lb_policy.is_approx();
-
-    for i in 0..n_clients {
-        let server_indices = subset::assign_subset(
-            args.lb_subset_policy,
-            client_lb_pool,
-            i,
-            args.lb_subset_size,
-        );
-        if args.verbose >= 1 {
-            eprintln!("client {i} subset: {server_indices:?}");
-        }
-        let (policy, lb_policy) = if is_approx {
-            (
-                args.pull_policy
-                    .expect("pull_policy validated before simulation")
-                    .build(),
-                LoadBalancePolicyKind::Approx,
-            )
-        } else {
-            (args.lb_policy.build(), args.lb_policy)
-        };
-        let mut load_balancer = LoadBalancer::new(
-            policy,
-            lb_policy,
-            client_lb_pool,
-            server_indices,
-            i,
-            false,
-        );
-        for j in 0..client_lb_pool {
-            load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
-            if is_approx {
-                load_balancer.pull_intent_outputs[j]
-                    .connect(Server::receive_pull_intent, &server_mailboxes[j]);
-            }
-        }
-        let lb_mailbox = Mailbox::new();
-        lb_addresses.push(lb_mailbox.address());
-        let input = EventSource::new()
-            .connect(LoadBalancer::input, &lb_mailbox)
-            .register(&mut bench);
-        bench = bench.add_model(load_balancer, lb_mailbox, &format!("load-balancer-{i}"));
-        inputs.push(input);
-    }
-
-    let mut express_lb_address = None;
-    let mut express_pull_inputs = Vec::new();
-    if express_lane.is_some() {
-        let express_indices: Vec<usize> = (n_regular..n_servers).collect();
-        let mut express_lb = LoadBalancer::new(
-            LoadBalancePolicyKind::Centralized.build(),
-            LoadBalancePolicyKind::Centralized,
-            n_servers,
-            express_indices,
-            express_lb_id,
-            true,
-        );
-        for j in n_regular..n_servers {
-            express_lb.outputs[j].connect(Server::input, &server_mailboxes[j]);
-        }
-        let express_lb_mailbox = Mailbox::new();
-        express_lb_address = Some(express_lb_mailbox.address());
-        bench = bench.add_model(express_lb, express_lb_mailbox, "express-load-balancer");
-    }
-
-    let express_eviction = express_lane.map(|cfg| match cfg.eviction {
-        ExpressEvictionConfig::QueueDepth(th) => ExpressEvictionPolicy::QueueDepth(th),
-        ExpressEvictionConfig::QueueDelay { threshold, ideal } => {
-            let mode = if ideal {
-                QueueDelayEvictionMode::ImmediateIdeal
-            } else {
-                QueueDelayEvictionMode::Monitored
-            };
-            ExpressEvictionPolicy::QueueDelay { threshold, mode }
-        }
-        ExpressEvictionConfig::Combined {
-            depth_threshold,
-            delay_threshold,
-        } => ExpressEvictionPolicy::Combined {
-            depth_threshold,
-            delay_threshold,
-        },
-    });
-    for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
-        let is_express = express_lane.is_some() && i >= n_regular;
-        let n_release = if is_express { n_clients + 1 } else { n_clients };
-        let mut release_outputs: Vec<_> = (0..n_release).map(|_| Output::default()).collect();
-        for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
-            release_outputs[lb_id].connect(LoadBalancer::release, lb_address);
-        }
-        if is_express {
-            if let Some(express_addr) = express_lb_address.as_ref() {
-                release_outputs[express_lb_id]
-                    .connect(LoadBalancer::release, express_addr);
-            }
-        }
-
-        let server_express_eviction = if express_lane.is_some() && !is_express {
-            express_eviction
-        } else {
-            None
-        };
-        let server_express_lb_id = if is_express {
-            Some(express_lb_id)
-        } else {
-            None
-        };
-
-        let dispatch_mode = if is_express {
-            DispatchMode::Centralized
-        } else if is_approx {
-            DispatchMode::Approx
-        } else {
-            DispatchMode::Push
-        };
-
-        let server_work_shedding = if !is_express && dispatch_mode == DispatchMode::Push {
-            work_shedding
-        } else {
-            None
-        };
-
-        let mut server = Server::new(
-            concurrency,
-            i,
-            release_outputs,
-            server_express_eviction,
-            server_work_shedding,
-            is_express,
-            server_express_lb_id,
-            dispatch_mode,
-        );
-        if is_approx && !is_express {
-            let mut pull_outputs: Vec<_> = (0..n_clients).map(|_| Output::default()).collect();
-            for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
-                pull_outputs[lb_id].connect(LoadBalancer::pull, lb_address);
-            }
-            server.set_pull_outputs(pull_outputs);
-        }
-        if express_lane.is_some() && !is_express {
-            if let Some(express_addr) = express_lb_address.as_ref() {
-                server
-                    .express_output
-                    .connect(LoadBalancer::input, express_addr);
-            }
-        }
-        if server_work_shedding.is_some() {
-            let mut shed_outputs: Vec<_> = (0..n_clients).map(|_| Output::default()).collect();
-            for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
-                shed_outputs[lb_id].connect(LoadBalancer::input, lb_address);
-            }
-            server.set_shed_outputs(shed_outputs);
-        }
-        if is_express {
-            if let Some(express_addr) = express_lb_address.as_ref() {
-                server
-                    .pull_output
-                    .connect(LoadBalancer::pull, express_addr);
-                let pull_input = EventSource::new()
-                    .connect(Server::request_pull, &server_mailbox)
-                    .register(&mut bench);
-                express_pull_inputs.push(pull_input);
-            }
-        }
-        server.output.connect_sink(sink.clone());
-        bench = bench.add_model(server, server_mailbox, &format!("server-{i}"));
-    }
-
-    let t0 = MonotonicTime::EPOCH;
-    let mut simu = bench.init(t0)?;
-
-    if !express_pull_inputs.is_empty() {
-        sim_util::schedule_initial_pulls(&simu, &express_pull_inputs, concurrency)?;
-    }
-
-    let capacity = total_capacity as f32;
-    let arrival_mean = service_time.mean / (args.load * capacity);
-    let per_client_arrival_mean = arrival_mean * n_clients as f32;
-
-    for (client_index, (input, &client_n)) in inputs.iter().zip(task_counts.iter()).enumerate() {
-        if client_n > 0 {
-            task_source(
-                &simu,
-                input,
-                arrival_mean,
-                per_client_arrival_mean,
-                args.arrival,
-                client_index,
-                service_time,
-                client_n,
-            )?;
-        }
-    }
-
-    simu.run()?;
-
-    let observation = simu.time().duration_since(t0);
-    let stats_config = express_lane.map(|cfg| ExpressLaneStatsConfig {
-        n_regular: (n_servers - cfg.express_size as usize) as u32,
-        express_size: cfg.express_size,
-        concurrency,
-    });
-    Ok(calculate_stats(
-        &mut output,
-        observation,
-        total_capacity,
-        stats_config.as_ref(),
-        work_shedding.is_some(),
-    ))
+) -> Result<Option<ServiceStats>, Box<dyn std::error::Error>> {
+    let lb_args = lb_run_args_from_cli(args, express_lane.cloned(), work_shedding);
+    lb::lb_simulate::run(&lb_args).map(|stats| stats.map(service_stats_from_lb))
 }
 
 fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> RunOutput {
@@ -1218,6 +565,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     validate_pull_policy(args.lb_policy, args.pull_policy).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    validate_no_bind(args.lb_policy, args.no_bind).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;
     let work_shedding = validate_work_shedding(&args)?;
@@ -1247,20 +595,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-
-    fn bimodal_config(m0: f32, m1: f32, p0: f32) -> BimodalConfig {
-        let modes = [m0, m1];
-        let probs = [p0, 1.0 - p0];
-        BimodalConfig { modes, probs }
-    }
-
-    #[test]
-    fn mixture_mean_computes_weighted_average() {
-        assert!((mixture_mean(&[0.1, 1.0], &[0.9, 0.1]) - 0.19).abs() < 1e-6);
-        assert!((mixture_mean(&[0.5, 0.5], &[0.5, 0.5]) - 0.5).abs() < 1e-6);
-    }
+    use lb::subset::assign_subset;
 
     #[test]
     fn resolve_service_time_rejects_invalid_probs() {
@@ -1314,7 +649,7 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("expected validation error"),
         };
-        assert!(err.contains("only valid with --service-dist bimodal"));
+        assert!(err.contains("only valid with bimodal"));
     }
 
     #[test]
@@ -1331,19 +666,6 @@ mod tests {
         .unwrap();
         let cfg = resolve_service_time(&args).unwrap();
         assert!((cfg.mean - 0.19).abs() < 1e-6);
-        assert!(cfg.bimodal.is_some());
-    }
-
-    #[test]
-    fn select_bimodal_mode_respects_probabilities() {
-        let config = bimodal_config(0.1, 1.0, 0.7);
-        let mut rng = StdRng::seed_from_u64(42);
-        let n = 10_000;
-        let mode0_count = (0..n)
-            .filter(|_| select_bimodal_mode(&mut rng, &config) == 0.1)
-            .count();
-        let ratio = mode0_count as f32 / n as f32;
-        assert!((ratio - 0.7).abs() < 0.02);
     }
 
     #[test]
@@ -1440,6 +762,19 @@ mod tests {
         .unwrap();
         let err = validate_pull_policy(args.lb_policy, args.pull_policy).unwrap_err();
         assert!(err.contains("--pull-policy is only valid"));
+    }
+
+    #[test]
+    fn validate_no_bind_rejected_without_approx() {
+        let args = Args::try_parse_from([
+            "lb",
+            "--lb-policy",
+            "power-of-two",
+            "--no-bind",
+        ])
+        .unwrap();
+        let err = validate_no_bind(args.lb_policy, args.no_bind).unwrap_err();
+        assert!(err.contains("--no-bind is only valid with --lb-policy approx"));
     }
 
     #[test]
@@ -1840,7 +1175,7 @@ mod tests {
     #[test]
     fn expresslane_subset_uses_regular_pool_only() {
         let n_regular = 8;
-        let subset = subset::assign_subset(SubsetPolicyKind::Deterministic, n_regular, 0, 0);
+        let subset = assign_subset(SubsetPolicyKind::Deterministic, n_regular, 0, 0);
         assert!(subset.iter().all(|&idx| idx < n_regular));
         assert_eq!(subset.len(), n_regular);
     }

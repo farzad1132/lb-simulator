@@ -112,7 +112,7 @@ A **Task** is the unit of work flowing through the simulation.
 | Field | Set when | Purpose |
 |-------|----------|---------|
 | `start` | Arrival source | E2e latency start time |
-| `task_id` | LoadBalancer on approx arrival | Per-client-LB monotonic id; carried on pull intents when binding is enabled |
+| `task_id` | LoadBalancer on approx arrival | Per-client-LB monotonic id; carried on pull intents; used for bound pull lookup unless `--no-bind` |
 | `duration` | Arrival source | Sampled service time (exponential, constant, or bimodal) |
 | `finish` | `Server::complete` | E2e latency end time |
 | `lb_id` | LoadBalancer before dispatch | Routes release notification back to the correct LB |
@@ -244,6 +244,8 @@ flowchart LR
 ## Approx policy
 
 Decentralized pull with per-client FIFO queues, pull intents, and `--pull-policy` for server selection. Concurrency is enforced via `in_flight` and `pending_pulls` on servers; client-side queue wait is included in e2e latency as `finish - start`.
+
+Optional **`--no-bind`** (`lb` only): pull fulfillment pops the oldest queued task and ignores `pull.request_id`; intents still carry bound ids on the wire. See [approx-policy.md § No-bind mode](approx-policy.md#no-bind-mode---no-bind-lb-only).
 
 Full documentation: **[approx-policy.md](approx-policy.md)** (wire protocol, counter semantics, intent binding, port wiring, `ms` differences, tests).
 

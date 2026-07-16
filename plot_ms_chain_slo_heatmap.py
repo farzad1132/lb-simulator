@@ -93,6 +93,7 @@ def run_chain_sweep(
     lb_subset_size: int,
     scheduling: str,
     seed: int | None,
+    no_bind: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     probs = np.zeros((3, len(loads)), dtype=float)
     slos = np.zeros((3, len(loads)), dtype=float)
@@ -118,6 +119,7 @@ def run_chain_sweep(
                 scheduling=scheduling,
                 seed=seed,
                 rps=rps,
+                no_bind=no_bind,
             )
             stats = api_stats(data, api)
             slo_ms = slo_from_unloaded_latency_ms(stats)
@@ -188,6 +190,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--no-bind",
+        action="store_true",
+        help="Use oldest-FCFS approx pulls (only valid with --lb-policy approx)",
+    )
     return parser.parse_args()
 
 
@@ -197,6 +204,8 @@ def main() -> None:
         raise SystemExit("--pull-policy is required when --lb-policy approx")
     if args.lb_policy != "approx" and args.pull_policy is not None:
         raise SystemExit("--pull-policy is only valid with --lb-policy approx")
+    if args.no_bind and args.lb_policy != "approx":
+        raise SystemExit("--no-bind is only valid with --lb-policy approx")
 
     loads = load_values(args.load_min, args.load_max, args.load_step)
     if not loads:
@@ -221,6 +230,7 @@ def main() -> None:
         lb_subset_size=args.lb_subset_size,
         scheduling=args.scheduling,
         seed=args.seed,
+        no_bind=args.no_bind,
     )
     output_path = output_path_with_comment(args.output, args.comment)
     plot_chain_heatmap(loads, probs, output_path)

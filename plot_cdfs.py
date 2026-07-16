@@ -239,6 +239,7 @@ def run_simulation(
     express_th: int | None = None,
     ideal: bool = False,
     shed_delay: float | None = None,
+    no_bind: bool = False,
 ) -> dict:
     cmd = [
         str(binary),
@@ -283,6 +284,8 @@ def run_simulation(
             cmd.append("--ideal")
     if shed_delay is not None:
         cmd.extend(["--shed-delay", str(shed_delay)])
+    if no_bind:
+        cmd.append("--no-bind")
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
@@ -303,6 +306,7 @@ def run_ms_simulation(
     slo_ms: float | None = None,
     scheduling: str = "fifo",
     force_fixed_svc: bool = False,
+    no_bind: bool = False,
 ) -> dict:
     cmd = [
         str(binary),
@@ -331,6 +335,8 @@ def run_ms_simulation(
         cmd.extend(["--slo-ms", str(slo_ms)])
     if force_fixed_svc:
         cmd.append("--force-fixed-svc")
+    if no_bind:
+        cmd.append("--no-bind")
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
