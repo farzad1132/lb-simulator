@@ -365,7 +365,8 @@ Recorded per visit (one per microservice per request on the request path) and ex
 | **inter_arrival_ms** | Consecutive gaps between visit arrival timestamps (all servers merged) |
 | **inter_departure_ms** | Consecutive gaps between visit departure timestamps |
 | **response_time_ms** | `departure − arrival` (includes queueing, processing, downstream blocking) |
-| **queueing_delay_ms** | `service_start − arrival` |
+| **queueing_delay_ms** | `(response_time − Σ downstream dependency response times) − processing_time`; includes replica server queue and caller outbound-queue wait (pull policies) |
+| **cumulative_queueing_delay_ms** | Running sum of `queueing_delay_ms` along the request path in `microservice_order` through the current hop |
 | **processing_time_ms** | Sum of local hop durations at that microservice only |
 | **slack_d_ms** | `deadline − arrival` at visit arrival (deadline set once at user ingress) |
 | **prob_latency_gt_slo** | Fraction of visits with `departure > deadline` (equivalently `response_time_ms > slack_d_ms`) |

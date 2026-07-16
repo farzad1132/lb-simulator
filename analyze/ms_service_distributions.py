@@ -325,25 +325,33 @@ def plot_per_hop_queueing_stddev_bars(
     style=ACM_COMPACT_HALF,
 ) -> None:
     by_ms = data["by_microservice"]
+    per_hop_mean = [
+        float(np.mean(by_ms[ms]["queueing_delay_ms"]))
+        for ms in microservices
+    ]
     per_hop_std = [
         float(np.std(by_ms[ms]["queueing_delay_ms"], ddof=0))
         for ms in microservices
     ]
     positions = list(range(len(microservices)))
     bar_width = style.bar_width_fraction * style.bar_spacing_fraction
-    for idx, (pos, height) in enumerate(zip(positions, per_hop_std)):
+    for idx, (pos, height, err) in enumerate(zip(positions, per_hop_mean, per_hop_std)):
         color = style.colors[idx % len(style.colors)]
         ax.bar(
             pos,
             height,
             bar_width,
+            yerr=err,
+            capsize=3,
             color=color,
             edgecolor="black",
             linewidth=0.6,
+            error_kw={"elinewidth": 0.8, "ecolor": "black", "capthick": 0.8},
         )
     ax.set_xticks(positions)
     ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
-    finalize_violin_y_axis(ax, np.asarray(per_hop_std, dtype=float), style=style)
+    combined = np.asarray(per_hop_mean, dtype=float) + np.asarray(per_hop_std, dtype=float)
+    finalize_violin_y_axis(ax, combined, style=style)
 
 
 def plot_slo_violation_pct_bars(
@@ -547,7 +555,7 @@ def plot_distributions(
     grid.configure_ax(
         grid.get_ax(2, 1),
         xlabel="Microservice index",
-        ylabel="Queue. std (ms)",
+        ylabel="Queuing (ms)",
         show_xlabel=True,
         show_ylabel=True,
         show_title=True,

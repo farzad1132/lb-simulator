@@ -323,7 +323,7 @@ fn calculate_stats(
     load: &LoadSpec,
     sim_start: MonotonicTime,
     sim_end: MonotonicTime,
-    visit_tracker: &MicroserviceVisitTracker,
+    visit_tracker: &mut MicroserviceVisitTracker,
     lb_policy: LoadBalancePolicyKind,
     downstream_targets: &HashSet<String>,
 ) -> Option<MsStats> {
@@ -416,7 +416,10 @@ fn calculate_stats(
         }
     }
 
-    let by_microservice = visit_tracker.into_stats(&graph.microservice_order);
+    let by_microservice = {
+        visit_tracker.finalize_cumulative_metrics();
+        visit_tracker.into_stats(&graph.microservice_order)
+    };
     let per_request_cumulative_queueing_ms = visit_tracker.per_request_cumulative_queueing_ms();
 
     let mut all_processing: Vec<f64> = Vec::new();
@@ -1066,7 +1069,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let busy = busy_time.lock().unwrap().clone();
     let mut replica_occ = replica_occupancy.lock().unwrap().clone();
     let mut balancer_occ = balancer_queue_occupancy.lock().unwrap().clone();
-    let tracker = visit_tracker.lock().unwrap();
+    let mut tracker = visit_tracker.lock().unwrap();
     Ok(calculate_stats(
         &mut completed,
         &busy,
@@ -1076,7 +1079,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         &load,
         t0,
         sim_end,
-        &tracker,
+        &mut tracker,
         args.lb_policy,
         &downstream_target_set,
     ))
@@ -1595,6 +1598,14 @@ mod tests {
                         <= ms_stats.response_time_ms[i] + 1e-6,
                     "{ms} visit {i}"
                 );
+                if idx == 2 {
+                    let reconstructed = ms_stats.queueing_delay_ms[i]
+                        + ms_stats.processing_time_ms[i];
+                    assert!(
+                        (reconstructed - ms_stats.response_time_ms[i]).abs() < 1e-3,
+                        "{ms} visit {i}: leaf queueing+proc should equal response"
+                    );
+                }
                 assert!(
                     ms_stats.cumulative_queueing_delay_ms[i]
                         >= ms_stats.queueing_delay_ms[i] - 1e-6,

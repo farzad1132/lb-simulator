@@ -214,9 +214,6 @@ impl Replica {
     }
 
     fn begin_service(&mut self, mut hop: Hop, cx: &Context<Self>) {
-        if let Ok(mut tracker) = self.visit_tracker.lock() {
-            tracker.record_server_start(hop.request_id, &self.microservice_id, cx.time());
-        }
         match sample_duration(&self.graph, &hop.endpoint) {
             Ok(duration) => hop.duration = duration,
             Err(e) => {
@@ -262,7 +259,18 @@ impl Replica {
 
     async fn handle_return(&mut self, mut hop: Hop, cx: &Context<Self>) {
         if let Some(release) = hop.outbound_release.take() {
-            self.release_outbound(release).await;
+            if release.response_time_ms > 0 {
+                if let Ok(mut tracker) = self.visit_tracker.lock() {
+                    tracker.add_downstream_response(
+                        hop.request_id,
+                        &self.microservice_id,
+                        release.response_time_ms as f64,
+                    );
+                }
+            }
+            if !release.target_microservice.is_empty() {
+                self.release_outbound(release).await;
+            }
         }
         if let Err(e) = self.advance(hop, cx).await {
             eprintln!("advance on return failed: {}", e);
@@ -329,13 +337,14 @@ impl Replica {
             hop.endpoint = resume_endpoint;
             hop.sibling_index = resume_sibling_index;
             hop.caller = resume_caller.map(|b| *b);
-            if !outbound_target_microservice.is_empty() {
+            let child_response_ms = response_ms
+                .map(|ms| ms.round().max(0.0) as u64)
+                .unwrap_or(0);
+            if child_response_ms > 0 || !outbound_target_microservice.is_empty() {
                 hop.outbound_release = Some(OutboundRelease {
                     target_microservice: outbound_target_microservice,
                     target_server: outbound_target_server,
-                    response_time_ms: response_ms
-                        .map(|ms| ms.round().max(0.0) as u64)
-                        .unwrap_or(0),
+                    response_time_ms: child_response_ms,
                 });
             }
             let key = (microservice, server);

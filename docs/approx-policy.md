@@ -245,12 +245,14 @@ When an approx-dispatched hop arrives at a downstream replica with `slot_release
 
 E2e is **`finish - start`** per completed task/hop. No separate LB-queue timestamp is stored.
 
-Queue wait at the client balancer is included implicitly:
+Queue wait at the client balancer is included implicitly in the flat `lb` simulator:
 
 ```
 queueing_delay = (finish - start) - duration
                ≈ time waiting in client LB queue + any other queueing on the path
 ```
+
+Per-microservice visit metrics in `ms` use the same idea at each hop: subtract downstream dependency response times and local processing from total visit response time. See [microservice-simulation.md](microservice-simulation.md#per-microservice-visit-metrics).
 
 Under correct concurrency enforcement, approx and push policies produce **similar** e2e distributions when routing is a no-op (e.g. `--clients 1 --servers 1`), because both model the same single-server FCFS system with backlog in different locations.
 

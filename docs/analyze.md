@@ -60,7 +60,8 @@ Each user request produces one **visit** per microservice on its path (exactly o
 | **Inter-arrival** | Consecutive gaps between visit **arrival** timestamps (all servers merged, sorted) |
 | **Inter-departure** | Consecutive gaps between visit **departure** timestamps |
 | **Response time** | `departure − arrival` (queueing, local processing, and time blocked waiting for downstream RPCs) |
-| **Queueing delay** | `service_start − arrival` (FIFO wait before local processing begins) |
+| **Queueing delay** | `(response_time − Σ downstream dependency response times) − processing_time`; includes replica server queue and caller outbound-queue wait under pull-based outbound policies |
+| **Cumulative queueing delay** | Running sum of per-hop queueing delays along the request path in `microservice_order` through the current hop |
 | **Processing time** | Sum of sampled local hop durations at that microservice only (excludes queueing) |
 | **Slack-d** | `deadline − arrival` at visit arrival |
 | **prob_latency_gt_slo** | Fraction of visits where the global API deadline was exceeded at departure (`response_time_ms > slack_d_ms`) |
@@ -68,9 +69,8 @@ Each user request produces one **visit** per microservice on its path (exactly o
 ### Visit lifecycle
 
 1. **Arrival** — first `Upstream` enqueue at a microservice's server (not `DownstreamReturn` continuations).
-2. **Server start** — `begin_service()`; queueing delay is recorded.
-3. **Local processing** — accumulated on each `complete()` (`hop.duration`).
-4. **Departure** — when the request returns to its caller or completes at the entry microservice.
+2. **Local processing** — accumulated on each `complete()` (`hop.duration`); downstream dependency response times accumulated on each `DownstreamReturn`.
+3. **Departure** — when the request returns to its caller or completes at the entry microservice; queueing delay is computed from response time, downstream totals, and local processing.
 
 ### `by_microservice` JSON schema
 
