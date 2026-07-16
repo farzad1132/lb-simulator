@@ -25,6 +25,7 @@ fn caller_queue_args(seed: u64, n: u32) -> MsArgs {
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: None,
+        no_bind: false,
     }
 }
 
@@ -71,6 +72,7 @@ fn f1_nested_callgraph_completes() {
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: None,
+        no_bind: false,
     })
     .unwrap()
     .expect("stats");

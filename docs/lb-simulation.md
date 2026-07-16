@@ -245,7 +245,7 @@ flowchart LR
 
 Decentralized pull with per-client FIFO queues, pull intents, and `--pull-policy` for server selection. Concurrency is enforced via `in_flight` and `pending_pulls` on servers; client-side queue wait is included in e2e latency as `finish - start`.
 
-Optional **`--no-bind`** (`lb` only): pull fulfillment pops the oldest queued task and ignores `pull.request_id`; intents still carry bound ids on the wire. See [approx-policy.md § No-bind mode](approx-policy.md#no-bind-mode---no-bind-lb-only).
+Optional **`--no-bind`**: pull fulfillment pops the oldest queued task and ignores `pull.request_id`; intents still carry bound ids on the wire. See [approx-policy.md § No-bind mode](approx-policy.md#no-bind-mode---no-bind).
 
 Full documentation: **[approx-policy.md](approx-policy.md)** (wire protocol, counter semantics, intent binding, port wiring, `ms` differences, tests).
 

@@ -258,7 +258,7 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 
 ### Approx policy (decentralized outbound pull)
 
-Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are always **bound** by `request_id` in `ms`; `--no-bind` (oldest-FCFS fulfillment) is implemented on `lb` only — see [approx-policy.md § No-bind mode](approx-policy.md#no-bind-mode---no-bind-lb-only).
+Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are **bound** by `request_id` by default; optional **`--no-bind`** pops the oldest queued outbound call (FCFS per `(rb_id, target)`) — see [approx-policy.md § No-bind mode](approx-policy.md#no-bind-mode---no-bind).
 
 Full documentation: **[approx-policy.md](approx-policy.md)**.
 

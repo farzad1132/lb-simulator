@@ -190,6 +190,8 @@ pub struct ReplicaBalancer {
     pub pull_intent_outputs: HashMap<String, Vec<Output<PullIntent>>>,
     #[serde(skip)]
     pull_audit: Option<Arc<ApproxPullAudit>>,
+    #[serde(skip)]
+    no_bind: bool,
 }
 
 impl ReplicaBalancer {
@@ -203,6 +205,7 @@ impl ReplicaBalancer {
         graph_server_counts: &HashMap<String, u32>,
         tracer: Option<Arc<MsTracer>>,
         pull_audit: Option<Arc<ApproxPullAudit>>,
+        no_bind: bool,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
         let mut outbound_queues = HashMap::new();
@@ -239,6 +242,7 @@ impl ReplicaBalancer {
             downstream_outputs,
             pull_intent_outputs,
             pull_audit,
+            no_bind,
         }
     }
 
@@ -445,31 +449,56 @@ impl ReplicaBalancer {
                 ),
             );
         };
-        let Some(call) = Self::remove_call_for_pull(queue, pull.request_id) else {
-            let queued_request_ids: Vec<u64> = queue.iter().map(|c| c.hop.request_id).collect();
-            fatal_pull_abort(
-                "ms",
-                format!(
-                    "bound call not found (rb_id={}, microservice_id={}, server_idx={}, target={}, request_id={}, queue_len={}, queued_request_ids={:?})",
-                    self.rb_id,
-                    self.microservice_id,
-                    server_idx,
-                    target,
-                    pull.request_id,
-                    queue.len(),
-                    queued_request_ids,
-                ),
-            );
+
+        let intent_request_id = pull.request_id;
+        let queue_len_before = queue.len();
+        let queue_head_request_id = queue.front().map(|c| c.hop.request_id);
+
+        let call = if self.no_bind {
+            if queue.is_empty() {
+                fatal_pull_abort(
+                    "ms",
+                    format!(
+                        "no queued outbound call for approx pull (rb_id={}, microservice_id={}, \
+                         server_idx={}, target={}, ignored_request_id={}, queue_len=0)",
+                        self.rb_id, self.microservice_id, server_idx, target, intent_request_id,
+                    ),
+                );
+            }
+            queue.pop_front().expect("queue non-empty")
+        } else {
+            let Some(call) = Self::remove_call_for_pull(queue, intent_request_id) else {
+                let queued_request_ids: Vec<u64> = queue.iter().map(|c| c.hop.request_id).collect();
+                fatal_pull_abort(
+                    "ms",
+                    format!(
+                        "bound call not found (rb_id={}, microservice_id={}, server_idx={}, target={}, request_id={}, queue_len={}, queued_request_ids={:?})",
+                        self.rb_id,
+                        self.microservice_id,
+                        server_idx,
+                        target,
+                        intent_request_id,
+                        queue.len(),
+                        queued_request_ids,
+                    ),
+                );
+            };
+            call
         };
+        let pulled_request_id = call.hop.request_id;
+
         self.release_pull_intent_load(&target, server_idx);
         if let Some(audit) = &self.pull_audit {
-            audit.record_pull_matched(
+            audit.record_pull_fulfilled(
                 self.rb_id,
                 &self.microservice_id,
                 self.server_idx,
                 &target,
                 server_idx,
-                pull.request_id,
+                intent_request_id,
+                pulled_request_id,
+                queue_len_before,
+                queue_head_request_id,
             );
         }
         if let Some(tracer) = &self.tracer {
@@ -765,5 +794,78 @@ impl OutboundGateway {
             return;
         };
         output.send(release).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::LoadBalancePolicyKind;
+    use nexosim::time::MonotonicTime;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    fn test_rb(no_bind: bool) -> ReplicaBalancer {
+        let mut downstream_indices = HashMap::new();
+        downstream_indices.insert("backend1".to_string(), vec![0]);
+        let mut graph_server_counts = HashMap::new();
+        graph_server_counts.insert("backend1".to_string(), 1);
+        ReplicaBalancer::new(
+            Box::new(PowerOfTwoPolicy),
+            LoadBalancePolicyKind::Approx,
+            0,
+            "frontend".to_string(),
+            0,
+            downstream_indices,
+            &graph_server_counts,
+            None,
+            None,
+            no_bind,
+        )
+    }
+
+    fn sample_call(request_id: u64) -> OutboundCall {
+        OutboundCall {
+            target_microservice: "backend1".to_string(),
+            hop: Hop {
+                request_id,
+                trace: false,
+                api: "handle".to_string(),
+                endpoint: "handle".to_string(),
+                sibling_index: 0,
+                start: MonotonicTime::EPOCH,
+                deadline: MonotonicTime::EPOCH,
+                duration: Duration::ZERO,
+                processing_time: Duration::ZERO,
+                caller: None,
+                outbound_release: None,
+                slot_release: None,
+            },
+        }
+    }
+
+    #[test]
+    fn no_bind_pull_takes_oldest_not_bound_id() {
+        let mut rb = test_rb(true);
+        rb.outbound_queues
+            .get_mut("backend1")
+            .unwrap()
+            .push_back(sample_call(10));
+        rb.outbound_queues
+            .get_mut("backend1")
+            .unwrap()
+            .push_back(sample_call(20));
+
+        let queue = rb.outbound_queues.get_mut("backend1").unwrap();
+        let call = queue.pop_front().expect("queue non-empty");
+        assert_eq!(call.hop.request_id, 10);
+        assert_eq!(queue.front().unwrap().hop.request_id, 20);
+        assert!(ReplicaBalancer::remove_call_for_pull(queue, 99).is_none());
+    }
+
+    #[test]
+    fn no_bind_empty_queue_aborts() {
+        let rb = test_rb(true);
+        assert!(rb.outbound_queues.get("backend1").unwrap().is_empty());
     }
 }

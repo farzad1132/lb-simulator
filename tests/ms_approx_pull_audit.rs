@@ -25,6 +25,7 @@ fn chain3_approx_args(n: u32, seed: u64, audit: Option<std::sync::Arc<ApproxPull
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: audit,
+        no_bind: false,
     }
 }
 
@@ -47,7 +48,7 @@ fn ms_approx_pull_intent_and_bound_pull_invariants() {
     );
 
     audit
-        .validate()
+        .validate_bound()
         .expect("approx pull audit invariants should hold");
 }
 
@@ -60,7 +61,7 @@ fn ms_approx_pull_invariants_under_heavier_load() {
         .expect("simulation should complete");
 
     assert_eq!(stats.by_api["handle"].e2e_ms.len(), 2000);
-    audit.validate().expect("audit should pass at n=2000");
+    audit.validate_bound().expect("audit should pass at n=2000");
 }
 
 /// Pull policy variant: power-of-two target selection still preserves binding invariants.
@@ -87,10 +88,11 @@ fn ms_approx_pull_invariants_with_power_of_two_pull_policy() {
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: Some(audit.clone()),
+        no_bind: false,
     })
     .unwrap()
     .expect("simulation should complete");
 
     assert_eq!(stats.by_api["handle"].e2e_ms.len(), 800);
-    audit.validate().expect("audit should pass with P2C pull");
+    audit.validate_bound().expect("audit should pass with P2C pull");
 }

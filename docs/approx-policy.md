@@ -25,7 +25,7 @@ Backlog lives at **client-side queues**, not at server task queues. Servers queu
 | Server task queue | Yes | No | No |
 | Load signal for routing | `local_inflight` | N/A (FCFS pull order) | `pull_intent_load` |
 | `--pull-policy` | N/A | N/A | **Required** |
-| Pull fulfillment | Bound by `request_id` | Bound by `request_id` | Bound (default) or oldest FCFS (`--no-bind`, `lb` only) |
+| Pull fulfillment | Bound by `request_id` | Bound by `request_id` | Bound (default) or oldest FCFS (`--no-bind`) |
 | `--lb-subset-size` | Yes | Ignored (`lb`) | Yes |
 
 Ingress in `ms` stays push power-of-two on `EdgeBalancer` (same as `centralized` / `cl`). Approx applies to **outbound** routing only in `ms`.
@@ -185,22 +185,22 @@ When a server pull arrives at the balancer, the bound item **must** be present i
 
 If lookup fails (missing `request_id`, unknown queue, or no matching id), the simulator logs details to stderr and **panics** via `fatal_pull_abort` in [`src/approx.rs`](../src/approx.rs). This should never happen in a correct run; it indicates a simulator bug or miswired ports.
 
-### No-bind mode (`--no-bind`, `lb` only)
+### No-bind mode (`--no-bind`)
 
-With `--no-bind`, pull fulfillment **ignores** `pull.request_id` and always pops the **oldest** queued task (`queue.remove(0)`). Pull intents and `PullRequest` messages still carry `request_id` on the wire — only the balancer's `pull` handler changes.
+With `--no-bind`, pull fulfillment **ignores** `pull.request_id` and always pops the **oldest** queued item. In `lb`, that is the client FIFO task queue (`queue.remove(0)`). In `ms`, that is the per-target outbound queue on each `ReplicaBalancer` (`outbound_queues[target].pop_front()`). Pull intents and pull messages still carry `request_id` on the wire — only the balancer's `pull` handler changes.
 
 | Aspect | Bound (default) | `--no-bind` |
 |--------|-----------------|-------------|
-| Fulfillment | Remove task matching `pull.request_id` | Remove FIFO head |
-| `request_id` on wire | Required; must match a queued task | Still sent; ignored at fulfillment |
-| Empty queue on pull | Panic (`bound task not found` or similar) | Panic (`no queued task for approx pull`) |
-| Simulator support | `lb` and `ms` | **`lb` only** (not yet in `ms`) |
+| Fulfillment | Remove item matching `pull.request_id` | Remove FIFO head |
+| `request_id` on wire | Required; must match a queued item | Still sent; ignored at fulfillment |
+| Empty queue on pull | Panic (`bound task/call not found` or similar) | Panic (`no queued task/call for approx pull`) |
+| Simulator support | `lb` and `ms` | `lb` and `ms` (outbound only in `ms`) |
 
-Use no-bind to model decentralized pull where the server cannot rely on intent ids to identify a specific queued item — fulfillment is FCFS at the client balancer regardless of which intent triggered the pull.
+Use no-bind to model decentralized pull where the server cannot rely on intent ids to identify a specific queued item — fulfillment is FCFS at the client/caller balancer regardless of which intent triggered the pull. In `ms`, FCFS is **per `(rb_id, target_microservice)`** queue.
 
 Validation ([`src/policy.rs`](../src/policy.rs)): `--no-bind` requires `--lb-policy approx`; forbidden with other `--lb-policy` values.
 
-Trace-based tests record pull events via [`LbPullAudit`](../src/lb_pull_audit.rs) and check `validate_no_bind()` invariants (FIFO head popped, intent id may differ from pulled task id). See [`tests/lb_no_bind_audit.rs`](../tests/lb_no_bind_audit.rs).
+Trace-based tests record pull events via [`LbPullAudit`](../src/lb_pull_audit.rs) (`lb`) or [`ApproxPullAudit`](../src/approx_audit.rs) (`ms`) and check `validate_no_bind()` invariants (FIFO head popped, intent id may differ from pulled id). See [`tests/lb_no_bind_audit.rs`](../tests/lb_no_bind_audit.rs) and [`tests/ms_no_bind_audit.rs`](../tests/ms_no_bind_audit.rs).
 
 ## Port wiring (`lb`)
 
@@ -222,7 +222,7 @@ Same protocol at the outbound layer:
 
 | Component | Role |
 |-----------|------|
-| `ReplicaBalancer` | Per-caller-replica outbound queues; pull intents; pull handler |
+| `ReplicaBalancer` | Per-caller-replica outbound queues; pull intents; `pull` handler (bound or `--no-bind` FCFS per target) |
 | `Replica` | Pull-intent queue; `pending_pulls`; `approx_pull_outputs` (map keyed by `rb_id`) back to balancers |
 | `ReplicaPull` | Extended pull message including `target_microservice` |
 
@@ -249,13 +249,13 @@ The regression test `lb_all_policies_similar_with_single_server` in [`tests/lb_p
 |------|----------|-------------|
 | `--lb-policy approx` | — | Enable approx |
 | `--pull-policy` | **Yes** | Server selection for pull intents: `random`, `power-of-two`, `least-request`, `round-robin`. Reuses push policy implementations on the `pull_intent_load` slice. |
-| `--no-bind` | No | **`lb` only.** Oldest-FCFS pull fulfillment: ignore `pull.request_id`, pop FIFO head. Requires `approx`. |
+| `--no-bind` | No | Oldest-FCFS pull fulfillment: ignore `pull.request_id`, pop FIFO head. Requires `approx`. |
 | `--lb-subset-size` | No | Supported (same as push); restricts `--pull-policy` choices |
 
 Validation ([`src/policy.rs`](../src/policy.rs)):
 
 - `--pull-policy` required with `approx`; forbidden with other `--lb-policy` values
-- `--no-bind` only with `approx` (`lb` binary)
+- `--no-bind` only with `approx` (`lb` and `ms` binaries)
 
 ## Incompatibilities
 
@@ -284,7 +284,7 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 |--------|----------|
 | LB topology | One balancer per client (`lb`) / per caller replica (`ms`) |
 | Server choice | `--pull-policy` at arrival/intent time |
-| Intent binding | On by default (`request_id` on intent and pull); violations panic. Optional `--no-bind` (`lb`): fulfill oldest queued item, ignore pull id |
+| Intent binding | On by default (`request_id` on intent and pull); violations panic. Optional `--no-bind`: fulfill oldest queued item, ignore pull id |
 | Server task queue | Disabled under approx |
 | Server intent queue | FIFO per server/replica |
 | Load for routing | `pull_intent_load`, not `local_inflight` |
@@ -299,10 +299,12 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 | [`src/load_balancer.rs`](../src/load_balancer.rs) | Client queue, pull intents, pull handler (bound and `--no-bind`) |
 | [`src/server.rs`](../src/server.rs) | Intent queue, `pending_pulls`, drain, approx `input` |
 | [`src/lb_pull_audit.rs`](../src/lb_pull_audit.rs) | Trace recorder for approx pull events; `validate_bound()` / `validate_no_bind()` |
-| [`src/microservice/balancer.rs`](../src/microservice/balancer.rs) | `ReplicaBalancer` approx outbound |
+| [`src/microservice/balancer.rs`](../src/microservice/balancer.rs) | `ReplicaBalancer` approx outbound (bound and `--no-bind`) |
 | [`src/microservice/replica.rs`](../src/microservice/replica.rs) | Replica-side pull drain and `pending_pulls` |
+| [`src/approx_audit.rs`](../src/approx_audit.rs) | Trace recorder for `ms` approx pulls; `validate_bound()` / `validate_no_bind()` |
 | [`tests/lb_approx.rs`](../tests/lb_approx.rs) | Approx CLI validation and completion tests |
-| [`tests/lb_no_bind_audit.rs`](../tests/lb_no_bind_audit.rs) | Trace-based `--no-bind` invariant tests |
+| [`tests/lb_no_bind_audit.rs`](../tests/lb_no_bind_audit.rs) | Trace-based `--no-bind` invariant tests (`lb`) |
+| [`tests/ms_no_bind_audit.rs`](../tests/ms_no_bind_audit.rs) | Trace-based `--no-bind` invariant tests (`ms`) |
 | [`tests/lb_policy_equivalence.rs`](../tests/lb_policy_equivalence.rs) | Cross-policy latency equivalence (1 client / 1 server) |
 | [`tests/ms_approx.rs`](../tests/ms_approx.rs) | `ms` approx integration tests |
 
@@ -311,6 +313,7 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 ```bash
 cargo test lb_approx --release
 cargo test lb_no_bind_audit --release
+cargo test ms_no_bind_audit --release
 cargo test lb_all_policies_similar_with_single_server --release
 cargo test ms_approx --release
 ```
@@ -327,4 +330,9 @@ Compare bound vs no-bind approx (same topology; no-bind may diverge under multi-
 ```bash
 ./target/release/lb --lb-policy approx --pull-policy least-request --format human --n 10000
 ./target/release/lb --lb-policy approx --pull-policy least-request --no-bind --format human --n 10000
+
+./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
+  --lb-policy approx --pull-policy least-request --format human --n 10000
+./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
+  --lb-policy approx --pull-policy least-request --no-bind --format human --n 10000
 ```
