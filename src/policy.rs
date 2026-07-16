@@ -2,6 +2,7 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::rng;
+use crate::scheduling::SchedulingPolicyKind;
 
 pub trait LoadBalancePolicy: Send {
     fn select(&mut self, loads: &[u32]) -> usize;
@@ -222,6 +223,23 @@ pub fn validate_no_bind(
     Ok(())
 }
 
+pub fn validate_approx_sched(
+    lb_policy: LoadBalancePolicyKind,
+    no_bind: bool,
+    approx_sched: SchedulingPolicyKind,
+) -> Result<(), String> {
+    if approx_sched != SchedulingPolicyKind::Edf {
+        return Ok(());
+    }
+    if !lb_policy.is_approx() {
+        return Err("--approx-sched edf is only valid with --lb-policy approx".into());
+    }
+    if !no_bind {
+        return Err("--approx-sched edf requires --no-bind".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +343,37 @@ mod tests {
         let mut policy = LoadBalancePolicyKind::ClLr.downstream_push_policy();
         let loads = [5u32, 1, 3];
         assert_eq!(policy.select(&loads), 1);
+    }
+
+    #[test]
+    fn validate_approx_sched_edf_requires_approx_and_no_bind() {
+        use crate::scheduling::SchedulingPolicyKind;
+
+        assert!(validate_approx_sched(
+            LoadBalancePolicyKind::Approx,
+            true,
+            SchedulingPolicyKind::Edf
+        )
+        .is_ok());
+        assert!(validate_approx_sched(
+            LoadBalancePolicyKind::Approx,
+            false,
+            SchedulingPolicyKind::Fifo
+        )
+        .is_ok());
+        let err = validate_approx_sched(
+            LoadBalancePolicyKind::Approx,
+            false,
+            SchedulingPolicyKind::Edf,
+        )
+        .unwrap_err();
+        assert!(err.contains("--no-bind"));
+        let err = validate_approx_sched(
+            LoadBalancePolicyKind::PowerOfTwo,
+            true,
+            SchedulingPolicyKind::Edf,
+        )
+        .unwrap_err();
+        assert!(err.contains("approx"));
     }
 }

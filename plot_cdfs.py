@@ -33,6 +33,7 @@ LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centra
 PULL_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
 MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx", "cl", "cl-lr", "corr")
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
+MS_APPROX_SCHED_POLICIES = MS_SCHEDULING_POLICIES
 SIMULATORS = ("lb", "ms")
 
 
@@ -307,6 +308,7 @@ def run_ms_simulation(
     scheduling: str = "fifo",
     force_fixed_svc: bool = False,
     no_bind: bool = False,
+    approx_sched: str = "fifo",
 ) -> dict:
     cmd = [
         str(binary),
@@ -337,6 +339,8 @@ def run_ms_simulation(
         cmd.append("--force-fixed-svc")
     if no_bind:
         cmd.append("--no-bind")
+    if approx_sched != "fifo":
+        cmd.extend(["--approx-sched", approx_sched])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")

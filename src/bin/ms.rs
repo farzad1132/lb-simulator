@@ -42,6 +42,8 @@ struct Args {
     force_fixed_svc: bool,
     #[arg(long, default_value_t = false)]
     no_bind: bool,
+    #[arg(long, value_enum, default_value_t = SchedulingPolicyKind::Fifo)]
+    approx_sched: SchedulingPolicyKind,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
     verbose: u8,
 }
@@ -68,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         verbose: cli.verbose,
         pull_audit: None,
         no_bind: cli.no_bind,
+        approx_sched: cli.approx_sched,
     };
 
     let stats = run(&args)?;
@@ -232,6 +235,25 @@ mod tests {
             "--force-fixed-svc",
         ]);
         assert!(cli.force_fixed_svc);
+    }
+
+    #[test]
+    fn parses_approx_sched_edf() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "approx",
+            "--pull-policy",
+            "least-request",
+            "--no-bind",
+            "--approx-sched",
+            "edf",
+        ]);
+        assert_eq!(cli.approx_sched, SchedulingPolicyKind::Edf);
     }
 
     #[test]

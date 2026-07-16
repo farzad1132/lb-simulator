@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from plot_cdfs import (  # noqa: E402
+    MS_APPROX_SCHED_POLICIES,
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
     PULL_POLICIES,
@@ -652,6 +653,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument(
+        "--no-bind",
+        action="store_true",
+        help="Use oldest-FCFS approx pulls (only valid with --lb-policy approx)",
+    )
+    parser.add_argument(
+        "--approx-sched",
+        choices=MS_APPROX_SCHED_POLICIES,
+        default="fifo",
+        help="Outbound approx queue discipline with --no-bind (fifo or edf)",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -683,6 +695,15 @@ def main() -> None:
         raise SystemExit("--pull-policy is required when --lb-policy approx")
     if args.lb_policy != "approx" and args.pull_policy is not None:
         raise SystemExit("--pull-policy is only valid with --lb-policy approx")
+    if args.no_bind and args.lb_policy != "approx":
+        raise SystemExit("--no-bind is only valid with --lb-policy approx")
+    if args.approx_sched == "edf":
+        if args.lb_policy != "approx":
+            raise SystemExit(
+                "--approx-sched edf is only valid with --lb-policy approx"
+            )
+        if not args.no_bind:
+            raise SystemExit("--approx-sched edf requires --no-bind")
 
     binary = args.ms_binary
     if binary is None and not args.no_build:
@@ -703,6 +724,8 @@ def main() -> None:
         slo_ms=args.slo,
         scheduling=args.scheduling,
         force_fixed_svc=args.force_fixed_svc,
+        no_bind=args.no_bind,
+        approx_sched=args.approx_sched,
     )
     if "by_microservice" not in data:
         raise SystemExit("ms JSON missing by_microservice; rebuild the ms binary")

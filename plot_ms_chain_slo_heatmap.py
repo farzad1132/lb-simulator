@@ -94,6 +94,7 @@ def run_chain_sweep(
     scheduling: str,
     seed: int | None,
     no_bind: bool = False,
+    approx_sched: str = "fifo",
 ) -> tuple[np.ndarray, np.ndarray]:
     probs = np.zeros((3, len(loads)), dtype=float)
     slos = np.zeros((3, len(loads)), dtype=float)
@@ -120,6 +121,7 @@ def run_chain_sweep(
                 seed=seed,
                 rps=rps,
                 no_bind=no_bind,
+                approx_sched=approx_sched,
             )
             stats = api_stats(data, api)
             slo_ms = slo_from_unloaded_latency_ms(stats)
@@ -195,6 +197,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use oldest-FCFS approx pulls (only valid with --lb-policy approx)",
     )
+    parser.add_argument(
+        "--approx-sched",
+        choices=MS_SCHEDULING_POLICIES,
+        default="fifo",
+        help="Outbound approx queue discipline with --no-bind (fifo or edf)",
+    )
     return parser.parse_args()
 
 
@@ -206,6 +214,13 @@ def main() -> None:
         raise SystemExit("--pull-policy is only valid with --lb-policy approx")
     if args.no_bind and args.lb_policy != "approx":
         raise SystemExit("--no-bind is only valid with --lb-policy approx")
+    if args.approx_sched == "edf":
+        if args.lb_policy != "approx":
+            raise SystemExit(
+                "--approx-sched edf is only valid with --lb-policy approx"
+            )
+        if not args.no_bind:
+            raise SystemExit("--approx-sched edf requires --no-bind")
 
     loads = load_values(args.load_min, args.load_max, args.load_step)
     if not loads:
@@ -231,6 +246,7 @@ def main() -> None:
         scheduling=args.scheduling,
         seed=args.seed,
         no_bind=args.no_bind,
+        approx_sched=args.approx_sched,
     )
     output_path = output_path_with_comment(args.output, args.comment)
     plot_chain_heatmap(loads, probs, output_path)

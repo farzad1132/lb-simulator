@@ -109,7 +109,7 @@ cargo build --release --bin ms
 .venv/bin/python analyze/ms_service_distributions.py --n 100000 --seed 42
 ```
 
-Custom fixtures:
+Custom fixtures and policy variants:
 
 ```bash
 .venv/bin/python analyze/ms_service_distributions.py \
@@ -117,6 +117,14 @@ Custom fixtures:
   --load-file tests/chain/3/load.json \
   --n 50000 --seed 7 \
   --output output/ms_service_distributions_chain3.pdf
+
+# approx no-bind with outbound EDF queue scheduling
+.venv/bin/python analyze/ms_service_distributions.py \
+  --callgraph tests/chain/3/callgraph.json \
+  --load-file tests/chain/3/load.json \
+  --lb-policy approx --pull-policy least-request \
+  --no-bind --approx-sched edf \
+  --comment approx-lr-nb-edf
 ```
 
 ## Output artifacts

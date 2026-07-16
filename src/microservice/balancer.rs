@@ -7,6 +7,7 @@ use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
 use crate::rng;
+use crate::scheduling::{edf_insert_index, SchedulingPolicyKind};
 use hdrhistogram::Histogram;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
@@ -192,6 +193,8 @@ pub struct ReplicaBalancer {
     pull_audit: Option<Arc<ApproxPullAudit>>,
     #[serde(skip)]
     no_bind: bool,
+    #[serde(skip)]
+    approx_sched: SchedulingPolicyKind,
 }
 
 impl ReplicaBalancer {
@@ -206,6 +209,7 @@ impl ReplicaBalancer {
         tracer: Option<Arc<MsTracer>>,
         pull_audit: Option<Arc<ApproxPullAudit>>,
         no_bind: bool,
+        approx_sched: SchedulingPolicyKind,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
         let mut outbound_queues = HashMap::new();
@@ -243,6 +247,21 @@ impl ReplicaBalancer {
             pull_intent_outputs,
             pull_audit,
             no_bind,
+            approx_sched,
+        }
+    }
+
+    fn enqueue_outbound_call(queue: &mut VecDeque<OutboundCall>, call: OutboundCall, approx_sched: SchedulingPolicyKind) {
+        match approx_sched {
+            SchedulingPolicyKind::Fifo => queue.push_back(call),
+            SchedulingPolicyKind::Edf => {
+                let deadline = call.hop.deadline;
+                let insert_at = edf_insert_index(
+                    queue.iter().map(|c| c.hop.deadline),
+                    deadline,
+                );
+                queue.insert(insert_at, call);
+            }
         }
     }
 
@@ -254,7 +273,12 @@ impl ReplicaBalancer {
         }
     }
 
-    async fn send_pull_intent_for_target(&mut self, target: &str, request_id: u64) {
+    async fn send_pull_intent_for_target(
+        &mut self,
+        target: &str,
+        request_id: u64,
+        deadline: MonotonicTime,
+    ) {
         let Some(indices) = self.downstream_indices.get(target) else {
             return;
         };
@@ -289,6 +313,7 @@ impl ReplicaBalancer {
                         target,
                         global_idx,
                         request_id,
+                        deadline,
                     );
                 }
                 outputs[global_idx]
@@ -379,11 +404,13 @@ impl ReplicaBalancer {
                 );
             }
             let request_id = call.hop.request_id;
-            self.outbound_queues
+            let deadline = call.hop.deadline;
+            let queue = self
+                .outbound_queues
                 .entry(target.clone())
-                .or_default()
-                .push_back(call);
-            self.send_pull_intent_for_target(&target, request_id).await;
+                .or_default();
+            Self::enqueue_outbound_call(queue, call, self.approx_sched);
+            self.send_pull_intent_for_target(&target, request_id, deadline).await;
             return;
         }
 
@@ -821,6 +848,7 @@ mod tests {
             None,
             None,
             no_bind,
+            SchedulingPolicyKind::Fifo,
         )
     }
 

@@ -187,20 +187,33 @@ If lookup fails (missing `request_id`, unknown queue, or no matching id), the si
 
 ### No-bind mode (`--no-bind`)
 
-With `--no-bind`, pull fulfillment **ignores** `pull.request_id` and always pops the **oldest** queued item. In `lb`, that is the client FIFO task queue (`queue.remove(0)`). In `ms`, that is the per-target outbound queue on each `ReplicaBalancer` (`outbound_queues[target].pop_front()`). Pull intents and pull messages still carry `request_id` on the wire — only the balancer's `pull` handler changes.
+With `--no-bind`, pull fulfillment **ignores** `pull.request_id` and always pops the **head** of the outbound queue. By default that head is the **oldest** enqueued item (FCFS). With **`--approx-sched edf`** (`ms` only), outbound queues are ordered by hop deadline and the head is the **earliest-deadline** item.
 
-| Aspect | Bound (default) | `--no-bind` |
-|--------|-----------------|-------------|
-| Fulfillment | Remove item matching `pull.request_id` | Remove FIFO head |
-| `request_id` on wire | Required; must match a queued item | Still sent; ignored at fulfillment |
-| Empty queue on pull | Panic (`bound task/call not found` or similar) | Panic (`no queued task/call for approx pull`) |
-| Simulator support | `lb` and `ms` | `lb` and `ms` (outbound only in `ms`) |
+In `lb`, no-bind always uses FCFS on the client task queue (`queue.remove(0)`). In `ms`, no-bind uses the per-target outbound queue on each `ReplicaBalancer` (`outbound_queues[target].pop_front()`). Pull intents and pull messages still carry `request_id` on the wire — only the balancer's `pull` handler changes.
 
-Use no-bind to model decentralized pull where the server cannot rely on intent ids to identify a specific queued item — fulfillment is FCFS at the client/caller balancer regardless of which intent triggered the pull. In `ms`, FCFS is **per `(rb_id, target_microservice)`** queue.
+| Aspect | Bound (default) | `--no-bind` (FCFS) | `--no-bind` + `--approx-sched edf` (`ms`) |
+|--------|-----------------|--------------------|---------------------------------------------|
+| Fulfillment | Remove item matching `pull.request_id` | Remove FIFO head | Remove earliest-deadline head |
+| `request_id` on wire | Required; must match a queued item | Still sent; ignored at fulfillment | Still sent; ignored at fulfillment |
+| Empty queue on pull | Panic (`bound task/call not found` or similar) | Panic (`no queued task/call for approx pull`) | Same |
+| Simulator support | `lb` and `ms` | `lb` and `ms` (outbound only in `ms`) | **`ms` only** |
 
-Validation ([`src/policy.rs`](../src/policy.rs)): `--no-bind` requires `--lb-policy approx`; forbidden with other `--lb-policy` values.
+Use no-bind to model decentralized pull where the server cannot rely on intent ids to identify a specific queued item — fulfillment is driven by queue discipline at the client/caller balancer regardless of which intent triggered the pull. In `ms`, queue ordering is **per `(rb_id, target_microservice)`** queue.
 
-Trace-based tests record pull events via [`LbPullAudit`](../src/lb_pull_audit.rs) (`lb`) or [`ApproxPullAudit`](../src/approx_audit.rs) (`ms`) and check `validate_no_bind()` invariants (FIFO head popped, intent id may differ from pulled id). See [`tests/lb_no_bind_audit.rs`](../tests/lb_no_bind_audit.rs) and [`tests/ms_no_bind_audit.rs`](../tests/ms_no_bind_audit.rs).
+### Outbound queue scheduling (`--approx-sched`, `ms` only)
+
+Independent of server-side [`--scheduling`](scheduling.md). Applies only with **`--no-bind`** and **`--lb-policy approx`**.
+
+| Flag | Default | Values | Description |
+|------|---------|--------|-------------|
+| `--approx-sched` | `fifo` | `fifo`, `edf` | Outbound approx queue discipline on each `ReplicaBalancer` |
+
+- **`fifo`**: append on enqueue (`push_back`); no-bind pulls `pop_front` (FCFS).
+- **`edf`**: insert by `hop.deadline` on enqueue (same tie-breaking as server EDF); no-bind pulls `pop_front` (earliest deadline at head).
+
+Validation ([`src/policy.rs`](../src/policy.rs)): `--approx-sched edf` requires `--lb-policy approx` and `--no-bind`.
+
+Trace-based tests record pull events via [`LbPullAudit`](../src/lb_pull_audit.rs) (`lb`) or [`ApproxPullAudit`](../src/approx_audit.rs) (`ms`) and check `validate_no_bind()` (FCFS) or `validate_no_bind_edf()` (EDF) invariants (queue head popped, intent id may differ from pulled id). See [`tests/lb_no_bind_audit.rs`](../tests/lb_no_bind_audit.rs), [`tests/ms_no_bind_audit.rs`](../tests/ms_no_bind_audit.rs), and [`tests/ms_no_bind_edf_audit.rs`](../tests/ms_no_bind_edf_audit.rs).
 
 ## Port wiring (`lb`)
 
@@ -250,12 +263,14 @@ The regression test `lb_all_policies_similar_with_single_server` in [`tests/lb_p
 | `--lb-policy approx` | — | Enable approx |
 | `--pull-policy` | **Yes** | Server selection for pull intents: `random`, `power-of-two`, `least-request`, `round-robin`. Reuses push policy implementations on the `pull_intent_load` slice. |
 | `--no-bind` | No | Oldest-FCFS pull fulfillment: ignore `pull.request_id`, pop FIFO head. Requires `approx`. |
+| `--approx-sched` | No | **`ms` only.** Outbound approx queue discipline with `--no-bind`: `fifo` (default) or `edf`. Requires `approx` + `--no-bind` for `edf`. Independent of `--scheduling`. |
 | `--lb-subset-size` | No | Supported (same as push); restricts `--pull-policy` choices |
 
 Validation ([`src/policy.rs`](../src/policy.rs)):
 
 - `--pull-policy` required with `approx`; forbidden with other `--lb-policy` values
 - `--no-bind` only with `approx` (`lb` and `ms` binaries)
+- `--approx-sched edf` only with `approx` + `--no-bind` (`ms` binary only)
 
 ## Incompatibilities
 
@@ -301,10 +316,11 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 | [`src/lb_pull_audit.rs`](../src/lb_pull_audit.rs) | Trace recorder for approx pull events; `validate_bound()` / `validate_no_bind()` |
 | [`src/microservice/balancer.rs`](../src/microservice/balancer.rs) | `ReplicaBalancer` approx outbound (bound and `--no-bind`) |
 | [`src/microservice/replica.rs`](../src/microservice/replica.rs) | Replica-side pull drain and `pending_pulls` |
-| [`src/approx_audit.rs`](../src/approx_audit.rs) | Trace recorder for `ms` approx pulls; `validate_bound()` / `validate_no_bind()` |
+| [`src/approx_audit.rs`](../src/approx_audit.rs) | Trace recorder for `ms` approx pulls; `validate_bound()` / `validate_no_bind()` / `validate_no_bind_edf()` |
 | [`tests/lb_approx.rs`](../tests/lb_approx.rs) | Approx CLI validation and completion tests |
 | [`tests/lb_no_bind_audit.rs`](../tests/lb_no_bind_audit.rs) | Trace-based `--no-bind` invariant tests (`lb`) |
-| [`tests/ms_no_bind_audit.rs`](../tests/ms_no_bind_audit.rs) | Trace-based `--no-bind` invariant tests (`ms`) |
+| [`tests/ms_no_bind_audit.rs`](../tests/ms_no_bind_audit.rs) | Trace-based `--no-bind` FCFS invariant tests (`ms`) |
+| [`tests/ms_no_bind_edf_audit.rs`](../tests/ms_no_bind_edf_audit.rs) | Trace-based `--no-bind` + `--approx-sched edf` invariant tests (`ms`) |
 | [`tests/lb_policy_equivalence.rs`](../tests/lb_policy_equivalence.rs) | Cross-policy latency equivalence (1 client / 1 server) |
 | [`tests/ms_approx.rs`](../tests/ms_approx.rs) | `ms` approx integration tests |
 
@@ -314,6 +330,7 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 cargo test lb_approx --release
 cargo test lb_no_bind_audit --release
 cargo test ms_no_bind_audit --release
+cargo test ms_no_bind_edf_audit --release
 cargo test lb_all_policies_similar_with_single_server --release
 cargo test ms_approx --release
 ```
@@ -334,5 +351,5 @@ Compare bound vs no-bind approx (same topology; no-bind may diverge under multi-
 ./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
   --lb-policy approx --pull-policy least-request --format human --n 10000
 ./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
-  --lb-policy approx --pull-policy least-request --no-bind --format human --n 10000
+  --lb-policy approx --pull-policy least-request --no-bind --approx-sched edf --format human --n 10000
 ```

@@ -9,8 +9,7 @@ fn approx_args(
     load_file: PathBuf,
     n: u32,
     seed: u64,
-    no_bind: bool,
-    pull_policy: PullPolicyKind,
+    approx_sched: SchedulingPolicyKind,
     audit: Option<std::sync::Arc<ApproxPullAudit>>,
 ) -> MsArgs {
     MsArgs {
@@ -18,7 +17,7 @@ fn approx_args(
         load_file,
         n,
         lb_policy: LoadBalancePolicyKind::Approx,
-        pull_policy: Some(pull_policy),
+        pull_policy: Some(PullPolicyKind::LeastRequest),
         lb_subset_size: 0,
         lb_subset_policy: SubsetPolicyKind::Deterministic,
         seed: Some(seed),
@@ -32,8 +31,8 @@ fn approx_args(
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: audit,
-        no_bind,
-        approx_sched: SchedulingPolicyKind::Fifo,
+        no_bind: true,
+        approx_sched,
     }
 }
 
@@ -44,7 +43,7 @@ fn run_with_audit(args: &MsArgs) -> lb::microservice::MsStats {
 }
 
 #[test]
-fn ms_no_bind_trace_invariants() {
+fn ms_no_bind_edf_trace_invariants() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let audit = ApproxPullAudit::new();
     let args = approx_args(
@@ -52,18 +51,17 @@ fn ms_no_bind_trace_invariants() {
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        true,
-        PullPolicyKind::LeastRequest,
+        SchedulingPolicyKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
     assert_eq!(stats.by_api["handle"].e2e_ms.len(), 500);
     audit.validate_common().expect("common invariants");
-    audit.validate_no_bind().expect("no-bind invariants");
+    audit.validate_no_bind_edf().expect("no-bind edf invariants");
 }
 
 #[test]
-fn ms_no_bind_pulls_oldest_not_intent_id() {
+fn ms_no_bind_edf_pulls_earliest_deadline_not_intent_id() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let audit = ApproxPullAudit::new();
     let args = approx_args(
@@ -71,14 +69,13 @@ fn ms_no_bind_pulls_oldest_not_intent_id() {
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        true,
-        PullPolicyKind::LeastRequest,
+        SchedulingPolicyKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
     assert_eq!(stats.by_api["handle"].e2e_ms.len(), 500);
     audit.validate_common().expect("common invariants");
-    audit.validate_no_bind().expect("no-bind invariants");
+    audit.validate_no_bind_edf().expect("no-bind edf invariants");
 
     let mismatches: Vec<_> = audit
         .pull_fulfilled_events()
@@ -100,7 +97,7 @@ fn ms_no_bind_pulls_oldest_not_intent_id() {
 }
 
 #[test]
-fn ms_no_bind_multi_caller_independent_fcfs() {
+fn ms_no_bind_edf_multi_caller_independent() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let audit = ApproxPullAudit::new();
     let args = approx_args(
@@ -108,31 +105,50 @@ fn ms_no_bind_multi_caller_independent_fcfs() {
         root.join("tests/fanin/multi/load.json"),
         400,
         7,
-        true,
-        PullPolicyKind::LeastRequest,
+        SchedulingPolicyKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
     assert_eq!(stats.by_api["f1"].e2e_ms.len(), 400);
     audit.validate_common().expect("common invariants");
-    audit.validate_no_bind().expect("no-bind invariants");
+    audit.validate_no_bind_edf().expect("no-bind edf invariants");
 }
 
 #[test]
-fn ms_bound_pull_trace_regression() {
+fn ms_no_bind_edf_differs_from_fcfs() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let audit = ApproxPullAudit::new();
-    let args = approx_args(
-        root.join("tests/chain/3/callgraph.json"),
-        root.join("tests/chain/3/load.json"),
-        200,
-        42,
-        false,
-        PullPolicyKind::LeastRequest,
-        Some(audit.clone()),
+    let callgraph = root.join("tests/chain/3/callgraph.json");
+    let load_file = root.join("tests/chain/3/load.json");
+
+    let fcfs_audit = ApproxPullAudit::new();
+    let fcfs_args = approx_args(
+        callgraph.clone(),
+        load_file.clone(),
+        500,
+        99,
+        SchedulingPolicyKind::Fifo,
+        Some(fcfs_audit.clone()),
     );
-    let stats = run_with_audit(&args);
-    assert_eq!(stats.by_api["handle"].e2e_ms.len(), 200);
-    audit.validate_common().expect("common invariants");
-    audit.validate_bound().expect("bound pull invariants");
+    run_with_audit(&fcfs_args);
+    fcfs_audit.validate_no_bind().expect("fcfs invariants");
+
+    let edf_audit = ApproxPullAudit::new();
+    let edf_args = approx_args(
+        callgraph,
+        load_file,
+        500,
+        99,
+        SchedulingPolicyKind::Edf,
+        Some(edf_audit.clone()),
+    );
+    run_with_audit(&edf_args);
+    edf_audit.validate_no_bind_edf().expect("edf invariants");
+
+    let fcfs_order = fcfs_audit.pull_fulfilled_request_ids();
+    let edf_order = edf_audit.pull_fulfilled_request_ids();
+    assert_eq!(fcfs_order.len(), edf_order.len());
+    assert!(
+        fcfs_order != edf_order,
+        "expected EDF to change at least one pull fulfillment order under backlog"
+    );
 }

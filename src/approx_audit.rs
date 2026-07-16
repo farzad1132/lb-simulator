@@ -2,7 +2,12 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use nexosim::time::MonotonicTime;
+
+use crate::scheduling::edf_insert_index;
+
 type OutboundQueueKey = (usize, String);
+type OutboundReplayItem = (u64, MonotonicTime);
 
 /// Records approx pull/intent events during a simulation run for post-hoc invariant checks.
 #[derive(Default)]
@@ -27,6 +32,7 @@ pub enum ApproxPullEventKind {
         target_ms: String,
         target_server: usize,
         request_id: u64,
+        deadline: MonotonicTime,
     },
     /// Downstream replica received a pull intent and pushed it onto the intent queue.
     IntentQueued {
@@ -79,6 +85,7 @@ impl ApproxPullAudit {
         target_ms: &str,
         target_server: usize,
         request_id: u64,
+        deadline: MonotonicTime,
     ) {
         self.record(ApproxPullEventKind::IntentSent {
             sender_rb_id,
@@ -87,6 +94,7 @@ impl ApproxPullAudit {
             target_ms: target_ms.to_string(),
             target_server,
             request_id,
+            deadline,
         });
     }
 
@@ -171,6 +179,21 @@ impl ApproxPullAudit {
                     *pulled_request_id,
                     *queue_head_request_id,
                 )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn pull_fulfilled_request_ids(&self) -> Vec<u64> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ApproxPullEventKind::PullFulfilled {
+                    pulled_request_id,
+                    ..
+                } => Some(*pulled_request_id),
                 _ => None,
             })
             .collect()
@@ -561,6 +584,109 @@ impl ApproxPullAudit {
         Ok(())
     }
 
+    fn edf_insert_replay_item(
+        queue: &mut VecDeque<OutboundReplayItem>,
+        request_id: u64,
+        deadline: MonotonicTime,
+    ) {
+        let insert_at = edf_insert_index(queue.iter().map(|(_, d)| *d), deadline);
+        queue.insert(insert_at, (request_id, deadline));
+    }
+
+    pub fn validate_no_bind_edf(&self) -> Result<(), String> {
+        self.validate_common()?;
+        let events = self.events.lock().unwrap();
+        let mut outbound_replay_queues: HashMap<OutboundQueueKey, VecDeque<OutboundReplayItem>> =
+            HashMap::new();
+        let mut saw_mismatch = false;
+
+        for recorded in events.iter() {
+            match &recorded.kind {
+                ApproxPullEventKind::IntentSent {
+                    sender_rb_id,
+                    target_ms,
+                    request_id,
+                    deadline,
+                    ..
+                } => {
+                    let key = (*sender_rb_id, target_ms.clone());
+                    let replay = outbound_replay_queues.entry(key).or_default();
+                    Self::edf_insert_replay_item(replay, *request_id, *deadline);
+                }
+                ApproxPullEventKind::PullFulfilled {
+                    handler_rb_id,
+                    target_ms,
+                    intent_request_id,
+                    pulled_request_id,
+                    queue_head_request_id,
+                    ..
+                } => {
+                    let head = queue_head_request_id.ok_or_else(|| {
+                        format!(
+                            "PullFulfilled missing queue_head_request_id \
+                             (rb_id={handler_rb_id}, target={target_ms}) (seq={})",
+                            recorded.seq
+                        )
+                    })?;
+                    if head != *pulled_request_id {
+                        return Err(format!(
+                            "pulled request is not queue head (rb_id={handler_rb_id}, \
+                             target={target_ms}): head={head}, pulled={pulled_request_id} \
+                             (seq={})",
+                            recorded.seq
+                        ));
+                    }
+                    let key = (*handler_rb_id, target_ms.clone());
+                    let replay = outbound_replay_queues.get_mut(&key).ok_or_else(|| {
+                        format!(
+                            "no-bind edf pull with no replay queue (rb_id={handler_rb_id}, \
+                             target={target_ms}) (seq={})",
+                            recorded.seq
+                        )
+                    })?;
+                    let front = replay.pop_front().ok_or_else(|| {
+                        format!(
+                            "no-bind edf pull with empty replay queue (rb_id={handler_rb_id}, \
+                             target={target_ms}) (seq={})",
+                            recorded.seq
+                        )
+                    })?;
+                    if front.0 != *pulled_request_id {
+                        return Err(format!(
+                            "outbound queue pop was not EDF (rb_id={handler_rb_id}, \
+                             target={target_ms}): expected {}, got {pulled_request_id} \
+                             (seq={})",
+                            front.0, recorded.seq
+                        ));
+                    }
+                    if intent_request_id != pulled_request_id {
+                        saw_mismatch = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for ((handler_rb_id, target_ms), replay) in &outbound_replay_queues {
+            if !replay.is_empty() {
+                return Err(format!(
+                    "non-empty outbound replay queue after no-bind edf validation \
+                     (rb_id={handler_rb_id}, target={target_ms})"
+                ));
+            }
+        }
+
+        if !saw_mismatch {
+            return Err(
+                "no-bind edf trace never exercised intent_request_id != pulled_request_id; \
+                 no-bind semantics may not be active"
+                    .into(),
+            );
+        }
+
+        Ok(())
+    }
+
     /// Check delivery, queue accounting, FIFO pops, and bound pull routing.
     pub fn validate(&self) -> Result<(), String> {
         self.validate_bound()
@@ -570,11 +696,16 @@ impl ApproxPullAudit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn t(ms: u64) -> MonotonicTime {
+        MonotonicTime::EPOCH + Duration::from_millis(ms)
+    }
 
     #[test]
     fn validate_bound_accepts_well_formed_sequence() {
         let audit = ApproxPullAudit::new();
-        audit.record_intent_sent(3, "frontend", 3, "backend1", 4, 10);
+        audit.record_intent_sent(3, "frontend", 3, "backend1", 4, 10, t(100));
         audit.record_intent_queued("backend1", 4, 3, 10, 0);
         audit.record_intent_drained("backend1", 4, 3, 10, 1, 0, 0, 1);
         audit.record_pull_fulfilled(3, "frontend", 3, "backend1", 4, 10, 10, 1, Some(10));
@@ -584,8 +715,8 @@ mod tests {
     #[test]
     fn validate_rejects_fifo_violation() {
         let audit = ApproxPullAudit::new();
-        audit.record_intent_sent(1, "frontend", 1, "backend1", 0, 1);
-        audit.record_intent_sent(2, "frontend", 2, "backend1", 0, 2);
+        audit.record_intent_sent(1, "frontend", 1, "backend1", 0, 1, t(100));
+        audit.record_intent_sent(2, "frontend", 2, "backend1", 0, 2, t(120));
         audit.record_intent_queued("backend1", 0, 1, 1, 0);
         audit.record_intent_queued("backend1", 0, 2, 2, 1);
         audit.record_intent_drained("backend1", 0, 2, 2, 2, 0, 0, 2);
@@ -596,8 +727,8 @@ mod tests {
     #[test]
     fn validate_no_bind_accepts_intent_mismatch() {
         let audit = ApproxPullAudit::new();
-        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3);
-        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5);
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(120));
         audit.record_intent_queued("backend1", 1, 0, 5, 0);
         audit.record_intent_drained("backend1", 1, 0, 5, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 5, 3, 2, Some(3));
@@ -610,13 +741,41 @@ mod tests {
     #[test]
     fn validate_no_bind_rejects_wrong_queue_head() {
         let audit = ApproxPullAudit::new();
-        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3);
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
         audit.record_intent_queued("backend1", 1, 0, 3, 0);
         audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 99, 1, Some(3));
         let err = audit.validate_no_bind().unwrap_err();
         assert!(
             err.contains("queue head") || err.contains("not FCFS"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_no_bind_edf_accepts_intent_mismatch() {
+        let audit = ApproxPullAudit::new();
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(200));
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(100));
+        audit.record_intent_queued("backend1", 1, 0, 3, 0);
+        audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
+        audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 5, 2, Some(5));
+        audit.record_intent_queued("backend1", 1, 0, 5, 0);
+        audit.record_intent_drained("backend1", 1, 0, 5, 1, 0, 0, 1);
+        audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 5, 3, 1, Some(3));
+        audit.validate_no_bind_edf().expect("valid no-bind edf sequence");
+    }
+
+    #[test]
+    fn validate_no_bind_edf_rejects_wrong_queue_head() {
+        let audit = ApproxPullAudit::new();
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
+        audit.record_intent_queued("backend1", 1, 0, 3, 0);
+        audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
+        audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 99, 1, Some(3));
+        let err = audit.validate_no_bind_edf().unwrap_err();
+        assert!(
+            err.contains("queue head") || err.contains("not EDF"),
             "unexpected error: {err}"
         );
     }

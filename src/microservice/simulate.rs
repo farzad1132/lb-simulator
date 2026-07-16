@@ -24,7 +24,10 @@ use super::occupancy::OccupancyAccumulator;
 use super::replica::{Replica, ReplicaConfig};
 use super::trace::MsTracer;
 use crate::approx_audit::ApproxPullAudit;
-use crate::policy::{validate_no_bind, validate_pull_policy, LoadBalancePolicyKind, PullPolicyKind};
+use crate::policy::{
+    validate_approx_sched, validate_no_bind, validate_pull_policy, LoadBalancePolicyKind,
+    PullPolicyKind,
+};
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
 use crate::sim_util;
@@ -64,6 +67,8 @@ pub struct MsArgs {
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
     /// Oldest-FCFS approx pull fulfillment: ignore pull request_id, pop FIFO head.
     pub no_bind: bool,
+    /// Outbound approx queue discipline when `--no-bind` is active (`fifo` or `edf`).
+    pub approx_sched: SchedulingPolicyKind,
 }
 
 #[derive(Serialize)]
@@ -436,6 +441,7 @@ fn calculate_stats(
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     validate_pull_policy(args.lb_policy, args.pull_policy)?;
     validate_no_bind(args.lb_policy, args.no_bind)?;
+    validate_approx_sched(args.lb_policy, args.no_bind, args.approx_sched)?;
     if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
         return Err(
             "--lb-subset-size is not supported with --lb-policy cl, cl-lr, centralized, or corr".into(),
@@ -768,6 +774,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     tracer.clone(),
                     pull_audit.clone(),
                     args.no_bind,
+                    args.approx_sched,
                 );
                 let mailbox = Mailbox::new();
                 let address = mailbox.address();
@@ -1149,6 +1156,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         }
     }
 
@@ -1175,6 +1183,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");
@@ -1233,6 +1242,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1278,6 +1288,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");
@@ -1320,6 +1331,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1352,6 +1364,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");
@@ -1376,6 +1389,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");
@@ -1455,6 +1469,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");
@@ -1647,6 +1662,7 @@ mod tests {
             force_fixed_svc: false,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats")
@@ -1681,6 +1697,7 @@ mod tests {
             force_fixed_svc: true,
             pull_audit: None,
             no_bind: false,
+            approx_sched: SchedulingPolicyKind::Fifo,
         })
         .unwrap()
         .expect("stats");

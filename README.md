@@ -132,6 +132,7 @@ cargo build --release
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--no-bind` | (off) | With `approx`: fulfill outbound pulls by popping the oldest queued call (ignore `pull.request_id`) |
+| `--approx-sched` | `fifo` | With `approx` + `--no-bind`: outbound queue discipline (`fifo` or deadline-ordered `edf`); see [docs/approx-policy.md](docs/approx-policy.md) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `cl`, `cl-lr`, `centralized`, or `corr`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
@@ -566,6 +567,7 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (required with `--lb-policy approx`) |
 | `--no-bind` | (off) | With `--lb-policy approx`: oldest-FCFS pull fulfillment |
+| `--approx-sched` | `fifo` | With `approx` + `--no-bind`: outbound queue discipline (`fifo` or `edf`) |
 | `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas) |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`) |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |
