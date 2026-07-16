@@ -318,14 +318,12 @@ fn calculate_stats(
     completed: &mut EventQueueReader<CompletedRequest>,
     busy_time: &HashMap<String, HashMap<usize, Duration>>,
     replica_occupancy: &mut HashMap<String, HashMap<usize, OccupancyAccumulator>>,
-    balancer_queue_occupancy: &mut HashMap<String, OccupancyAccumulator>,
+    caller_lb_queue_occupancy: &mut HashMap<(String, usize), OccupancyAccumulator>,
     graph: &CallGraph,
     load: &LoadSpec,
     sim_start: MonotonicTime,
     sim_end: MonotonicTime,
     visit_tracker: &mut MicroserviceVisitTracker,
-    lb_policy: LoadBalancePolicyKind,
-    downstream_targets: &HashSet<String>,
 ) -> Option<MsStats> {
     let mut by_api: HashMap<String, ApiStats> = HashMap::new();
 
@@ -395,24 +393,18 @@ fn calculate_stats(
         server_avg_queue_inflight.insert(microservice_id.clone(), by_server);
     }
 
-    if lb_policy.is_centralized() {
-        let mut sorted_targets: Vec<_> = downstream_targets.iter().cloned().collect();
-        sorted_targets.sort();
-        for target in sorted_targets {
-            let n = graph.microservices[&target].replicas as f64;
-            if n <= 0.0 {
-                continue;
+    for ((ms, server), acc) in caller_lb_queue_occupancy {
+        let lb_avg = acc.finalize(sim_end, sim_start);
+        if let Some(servers) = server_avg_queue_inflight.get_mut(ms) {
+            if let Some(avg) = servers.get_mut(server) {
+                *avg += lb_avg;
+            } else {
+                servers.insert(*server, lb_avg);
             }
-            let q_avg = balancer_queue_occupancy
-                .get_mut(&target)
-                .map(|acc| acc.finalize(sim_end, sim_start))
-                .unwrap_or(0.0);
-            let fair_share = q_avg / n;
-            if let Some(servers) = server_avg_queue_inflight.get_mut(&target) {
-                for avg in servers.values_mut() {
-                    *avg += fair_share;
-                }
-            }
+        } else {
+            let mut by_server = HashMap::new();
+            by_server.insert(*server, lb_avg);
+            server_avg_queue_inflight.insert(ms.clone(), by_server);
         }
     }
 
@@ -500,7 +492,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             .insert(microservice_id.clone(), by_server);
     }
 
-    let balancer_queue_occupancy: Arc<Mutex<HashMap<String, OccupancyAccumulator>>> =
+    let caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     let tracer = if args.trace {
@@ -660,7 +652,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 server_indices.clone(),
                 args.lb_policy,
                 tracer.clone(),
-                balancer_queue_occupancy.clone(),
+                caller_lb_queue_occupancy.clone(),
             );
             let mailbox = Mailbox::new();
             let address = mailbox.address();
@@ -778,6 +770,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     pull_audit.clone(),
                     args.no_bind,
                     args.approx_sched,
+                    caller_lb_queue_occupancy.clone(),
                 );
                 let mailbox = Mailbox::new();
                 let address = mailbox.address();
@@ -1068,20 +1061,18 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let sim_end = simu.time();
     let busy = busy_time.lock().unwrap().clone();
     let mut replica_occ = replica_occupancy.lock().unwrap().clone();
-    let mut balancer_occ = balancer_queue_occupancy.lock().unwrap().clone();
+    let mut caller_lb_occ = caller_lb_queue_occupancy.lock().unwrap().clone();
     let mut tracker = visit_tracker.lock().unwrap();
     Ok(calculate_stats(
         &mut completed,
         &busy,
         &mut replica_occ,
-        &mut balancer_occ,
+        &mut caller_lb_occ,
         graph.as_ref(),
         &load,
         t0,
         sim_end,
         &mut tracker,
-        args.lb_policy,
-        &downstream_target_set,
     ))
 }
 
@@ -1345,13 +1336,13 @@ mod tests {
     }
 
     #[test]
-    fn centralized_fair_share_adds_balancer_queue_to_downstream_replicas() {
+    fn centralized_credits_balancer_queue_to_caller_replicas() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let stats = run(&MsArgs {
+        let chain_args = |lb_policy: LoadBalancePolicyKind| MsArgs {
             callgraph: root.join("tests/chain/3/callgraph.json"),
             load_file: root.join("tests/chain/3/load.json"),
             n: 5000,
-            lb_policy: LoadBalancePolicyKind::Centralized,
+            lb_policy,
             pull_policy: None,
             lb_subset_size: 0,
             lb_subset_policy: SubsetPolicyKind::Deterministic,
@@ -1368,65 +1359,42 @@ mod tests {
             pull_audit: None,
             no_bind: false,
             approx_sched: SchedulingPolicyKind::Fifo,
-        })
-        .unwrap()
-        .expect("stats");
+        };
 
-        let cl_stats = run(&MsArgs {
-            callgraph: root.join("tests/chain/3/callgraph.json"),
-            load_file: root.join("tests/chain/3/load.json"),
-            n: 5000,
-            lb_policy: LoadBalancePolicyKind::Cl,
-            pull_policy: None,
-            lb_subset_size: 0,
-            lb_subset_policy: SubsetPolicyKind::Deterministic,
-            seed: Some(42),
-            rps: Some(500.0),
-            slo_ms: None,
-            format: OutputFormat::Json,
-            trace: false,
-            trace_limit: 5,
-            scale: 0,
-            verbose: 0,
-            scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
-            pull_audit: None,
-            no_bind: false,
-            approx_sched: SchedulingPolicyKind::Fifo,
-        })
-        .unwrap()
-        .expect("stats");
+        let stats = run(&chain_args(LoadBalancePolicyKind::Centralized))
+            .unwrap()
+            .expect("stats");
+        let cl_stats = run(&chain_args(LoadBalancePolicyKind::Cl))
+            .unwrap()
+            .expect("stats");
 
+        let caller = "backend1";
         let downstream = "backend2";
-        let centralized_vals: Vec<f64> = stats.server_avg_queue_inflight[downstream]
+        let caller_centralized_mean = stats.server_avg_queue_inflight[caller]
             .values()
-            .copied()
-            .collect();
-        let cl_vals: Vec<f64> = cl_stats.server_avg_queue_inflight[downstream]
+            .sum::<f64>()
+            / stats.server_avg_queue_inflight[caller].len() as f64;
+        assert!(
+            caller_centralized_mean > 0.0,
+            "centralized caller avg occupancy should be positive under load"
+        );
+
+        let centralized_downstream_mean = stats.server_avg_queue_inflight[downstream]
             .values()
-            .copied()
-            .collect();
-        let centralized_mean =
-            centralized_vals.iter().sum::<f64>() / centralized_vals.len() as f64;
-        let cl_mean = cl_vals.iter().sum::<f64>() / cl_vals.len() as f64;
+            .sum::<f64>()
+            / stats.server_avg_queue_inflight[downstream].len() as f64;
+        let cl_downstream_mean = cl_stats.server_avg_queue_inflight[downstream]
+            .values()
+            .sum::<f64>()
+            / cl_stats.server_avg_queue_inflight[downstream].len() as f64;
         assert!(
-            centralized_mean > 0.0,
-            "centralized downstream avg occupancy should be positive under load"
-        );
-        let centralized_sum: f64 = centralized_vals.iter().sum();
-        let cl_sum: f64 = cl_vals.iter().sum();
-        assert!(
-            centralized_sum > 0.0 && cl_sum > 0.0,
-            "centralized sum={centralized_sum}, cl sum={cl_sum}"
-        );
-        assert!(
-            (centralized_mean - cl_mean).abs() < 50.0,
-            "centralized mean={centralized_mean}, cl mean={cl_mean}"
+            (centralized_downstream_mean - cl_downstream_mean).abs() < 50.0,
+            "downstream should not receive LB fair-share inflation: centralized mean={centralized_downstream_mean}, cl mean={cl_downstream_mean}"
         );
     }
 
     #[test]
-    fn fair_share_finalize_adds_queue_average_over_replicas() {
+    fn caller_lb_queue_finalize_merges_into_server_avg_occupancy() {
         use super::super::occupancy::OccupancyAccumulator;
 
         let sim_start = MonotonicTime::EPOCH;
@@ -1437,16 +1405,15 @@ mod tests {
         replica.record(sim_end, 1);
         let replica_avg = replica.finalize(sim_end, sim_start);
 
-        let mut balancer = OccupancyAccumulator::default();
-        balancer.record(sim_start, 6);
-        balancer.record(sim_end, 6);
-        let q_avg = balancer.finalize(sim_end, sim_start);
+        let mut caller_lb = OccupancyAccumulator::default();
+        caller_lb.record(sim_start, 4);
+        caller_lb.record(sim_end, 4);
+        let lb_avg = caller_lb.finalize(sim_end, sim_start);
 
-        let n = 3.0;
-        let combined = replica_avg + q_avg / n;
+        let combined = replica_avg + lb_avg;
         assert!((replica_avg - 1.0).abs() < 1e-9);
-        assert!((q_avg - 6.0).abs() < 1e-9);
-        assert!((combined - 3.0).abs() < 1e-9);
+        assert!((lb_avg - 4.0).abs() < 1e-9);
+        assert!((combined - 5.0).abs() < 1e-9);
     }
 
     #[test]

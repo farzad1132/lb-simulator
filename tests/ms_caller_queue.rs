@@ -103,6 +103,23 @@ fn approx_caller_queueing_excludes_downstream_blocking() {
 }
 
 #[test]
+fn approx_caller_lb_queue_increases_server_avg_occupancy() {
+    let stats = run(&caller_queue_args(42, 500, LoadBalancePolicyKind::Approx))
+        .unwrap()
+        .expect("stats");
+    let lr_stats = run(&caller_queue_args(42, 500, LoadBalancePolicyKind::LeastRequest))
+        .unwrap()
+        .expect("stats");
+
+    let approx_occ = stats.server_avg_queue_inflight["frontend"][&0];
+    let lr_occ = lr_stats.server_avg_queue_inflight["frontend"][&0];
+    assert!(
+        approx_occ > lr_occ,
+        "approx caller LB queue should increase frontend avg occupancy (approx={approx_occ}, lr={lr_occ})"
+    );
+}
+
+#[test]
 fn f1_nested_callgraph_completes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let stats = run(&MsArgs {

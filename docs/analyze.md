@@ -35,7 +35,7 @@ flowchart LR
 |-------|-------------|
 | `microservice_utilization_pct` | Per-microservice utilization (%) |
 | `server_utilization_pct` | Per-server utilization nested under each microservice |
-| `server_avg_queue_inflight` | Per-server time-weighted average occupancy (`queue + in_flight`; under centralized, includes fair-share of downstream pull-queue depth) |
+| `server_avg_queue_inflight` | Per-server time-weighted average occupancy (`queue + in_flight`, plus caller outbound LB queue under centralized/approx) |
 | `by_api` | Per-API request metrics (`e2e_ms`, `processing_time_ms`, SLO fields) |
 | `by_microservice` | Per-microservice visit sample arrays (see below) |
 | `total_processing_p99_ms` | p99 of per-request total local processing time across the call tree |

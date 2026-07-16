@@ -352,7 +352,7 @@ Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a p
 | Metric | Definition |
 |--------|------------|
 | **server_utilization_pct** | `busy_time[ms][s] / (observation_time × (cpu[ms] / replicas[ms])) × 100` |
-| **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server. Under `--lb-policy centralized`, downstream pull targets also add `DownstreamBalancer.queue.len() / replicas[ms]` as an equal fair-share per server (work waiting at the shared pull queue before dispatch). |
+| **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server, plus caller-side outbound LB queue depth under pull policies. Under `--lb-policy centralized`, each caller replica is credited with its own items waiting in the shared `DownstreamBalancer.queue` (identified via `hop.caller`). Under `--lb-policy approx`, each caller replica adds the sum of its `ReplicaBalancer.outbound_queues` depths. |
 
 `busy_time[ms][s]` is the sum of local hop durations executed on server `s` of microservice `ms`. Per-server utilization uses that server's concurrency slots (`cpu / replicas`) as capacity. When all servers have equal capacity, the microservice-level overall utilization equals the average of per-server utilizations.
 

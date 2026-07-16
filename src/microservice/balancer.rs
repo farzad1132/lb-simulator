@@ -1,4 +1,4 @@
-use super::hop::{Hop, OutboundCall, OutboundRelease, ReplicaInput};
+use super::hop::{CallerRef, Hop, OutboundCall, OutboundRelease, ReplicaInput};
 use super::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::{fatal_pull_abort, PullIntent};
@@ -195,6 +195,8 @@ pub struct ReplicaBalancer {
     no_bind: bool,
     #[serde(skip)]
     approx_sched: SchedulingPolicyKind,
+    #[serde(skip)]
+    caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
 }
 
 impl ReplicaBalancer {
@@ -210,6 +212,7 @@ impl ReplicaBalancer {
         pull_audit: Option<Arc<ApproxPullAudit>>,
         no_bind: bool,
         approx_sched: SchedulingPolicyKind,
+        caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
         let mut outbound_queues = HashMap::new();
@@ -248,6 +251,25 @@ impl ReplicaBalancer {
             pull_audit,
             no_bind,
             approx_sched,
+            caller_lb_queue_occupancy,
+        }
+    }
+
+    fn outbound_queue_level(&self) -> u32 {
+        self.outbound_queues
+            .values()
+            .map(|q| q.len())
+            .sum::<usize>() as u32
+    }
+
+    fn sample_outbound_queue_occupancy(&self, now: MonotonicTime) {
+        if !self.lb_policy.is_approx() {
+            return;
+        }
+        let key = (self.microservice_id.clone(), self.server_idx);
+        let level = self.outbound_queue_level();
+        if let Ok(mut occ) = self.caller_lb_queue_occupancy.lock() {
+            occ.entry(key).or_default().record(now, level);
         }
     }
 
@@ -410,6 +432,7 @@ impl ReplicaBalancer {
                 .entry(target.clone())
                 .or_default();
             Self::enqueue_outbound_call(queue, call, self.approx_sched);
+            self.sample_outbound_queue_occupancy(cx.time());
             self.send_pull_intent_for_target(&target, request_id, deadline).await;
             return;
         }
@@ -514,6 +537,7 @@ impl ReplicaBalancer {
         };
         let pulled_request_id = call.hop.request_id;
 
+        self.sample_outbound_queue_occupancy(cx.time());
         self.release_pull_intent_load(&target, server_idx);
         if let Some(audit) = &self.pull_audit {
             audit.record_pull_fulfilled(
@@ -582,7 +606,9 @@ pub struct DownstreamBalancer {
     #[serde(skip)]
     waiting_servers: VecDeque<usize>,
     #[serde(skip)]
-    balancer_queue_occupancy: Arc<Mutex<HashMap<String, OccupancyAccumulator>>>,
+    caller_queue_counts: HashMap<(String, usize), u32>,
+    #[serde(skip)]
+    caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
     pub outputs: Vec<Output<ReplicaInput>>,
 }
 
@@ -593,7 +619,7 @@ impl DownstreamBalancer {
         server_indices: Vec<usize>,
         lb_policy: LoadBalancePolicyKind,
         tracer: Option<Arc<MsTracer>>,
-        balancer_queue_occupancy: Arc<Mutex<HashMap<String, OccupancyAccumulator>>>,
+        caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
     ) -> Self {
         debug_assert!(
             server_indices.iter().all(|&i| i < n_servers),
@@ -611,17 +637,50 @@ impl DownstreamBalancer {
             response_time_histogram: new_corr_histogram(),
             queue: VecDeque::new(),
             waiting_servers: VecDeque::new(),
-            balancer_queue_occupancy,
+            caller_queue_counts: HashMap::new(),
+            caller_lb_queue_occupancy,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
         }
     }
 
-    fn sample_queue_occupancy(&self, now: MonotonicTime) {
-        if let Ok(mut occ) = self.balancer_queue_occupancy.lock() {
-            occ.entry(self.target_microservice.clone())
-                .or_default()
-                .record(now, self.queue.len() as u32);
+    fn caller_key(call: &OutboundCall) -> Option<(String, usize)> {
+        call.hop
+            .caller
+            .as_ref()
+            .map(|CallerRef { microservice, server, .. }| (microservice.clone(), *server))
+    }
+
+    fn record_caller_level(&self, caller: &(String, usize), now: MonotonicTime, level: u32) {
+        if let Ok(mut occ) = self.caller_lb_queue_occupancy.lock() {
+            occ.entry(caller.clone()).or_default().record(now, level);
         }
+    }
+
+    fn increment_caller_queue_count(&mut self, call: &OutboundCall, now: MonotonicTime) {
+        let Some(key) = Self::caller_key(call) else {
+            return;
+        };
+        let level = {
+            let count = self.caller_queue_counts.entry(key.clone()).or_insert(0);
+            *count += 1;
+            *count
+        };
+        self.record_caller_level(&key, now, level);
+    }
+
+    fn decrement_caller_queue_count(&mut self, call: &OutboundCall, now: MonotonicTime) {
+        let Some(key) = Self::caller_key(call) else {
+            return;
+        };
+        let level = {
+            let count = self.caller_queue_counts.entry(key.clone()).or_insert(0);
+            *count = count.saturating_sub(1);
+            *count
+        };
+        if level == 0 {
+            self.caller_queue_counts.remove(&key);
+        }
+        self.record_caller_level(&key, now, level);
     }
 
     async fn dispatch_to_server(&mut self, server_idx: usize, mut call: OutboundCall) {
@@ -649,9 +708,8 @@ impl DownstreamBalancer {
                 self.waiting_servers.push_front(server_idx);
                 break;
             }
-            self.sample_queue_occupancy(now);
             let call = self.queue.pop_front().unwrap();
-            self.sample_queue_occupancy(now);
+            self.decrement_caller_queue_count(&call, now);
             self.dispatch_to_server(server_idx, call).await;
         }
     }
@@ -689,9 +747,8 @@ impl DownstreamBalancer {
                     ),
                 );
             }
-            self.sample_queue_occupancy(cx.time());
+            self.increment_caller_queue_count(&call, cx.time());
             self.queue.push_back(call);
-            self.sample_queue_occupancy(cx.time());
             self.dispatch_waiting(cx.time()).await;
             return;
         }
@@ -749,9 +806,8 @@ impl DownstreamBalancer {
         if self.queue.is_empty() {
             self.waiting_servers.push_back(server_idx);
         } else {
-            self.sample_queue_occupancy(cx.time());
             let call = self.queue.pop_front().unwrap();
-            self.sample_queue_occupancy(cx.time());
+            self.decrement_caller_queue_count(&call, cx.time());
             if let Some(tracer) = &self.tracer {
                 tracer.log(
                     call.hop.trace,
@@ -849,6 +905,7 @@ mod tests {
             None,
             no_bind,
             SchedulingPolicyKind::Fifo,
+            Arc::new(Mutex::new(HashMap::new())),
         )
     }
 
