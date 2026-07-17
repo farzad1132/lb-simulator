@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::rng;
 
-/// Probes issued per request (async, off the critical path).
-pub const R_PROBE: usize = 2;
+/// Fractional probes issued per request (async, off the critical path).
+pub const R_PROBE: f64 = 1.5;
 /// Max times a candidate may be selected before removal from the pool.
 pub const B_REUSE: u32 = 1;
 /// Fractional worst-candidate removal rate per request.
@@ -144,6 +144,17 @@ pub fn apply_r_remove(pool: &mut CandidatePool, accum: &mut f64, r_remove: f64) 
     }
 }
 
+/// Apply fractional `r_probe`: accumulate and return how many probes to issue.
+pub fn apply_r_probe(accum: &mut f64, r_probe: f64) -> usize {
+    *accum += r_probe;
+    let mut n = 0;
+    while *accum >= 1.0 {
+        n += 1;
+        *accum -= 1.0;
+    }
+    n
+}
+
 /// Sample up to `r_probe` servers uniformly without replacement from those not in the pool.
 pub fn sample_probe_targets(n_servers: usize, pool: &CandidatePool, r_probe: usize) -> Vec<usize> {
     if n_servers == 0 || r_probe == 0 {
@@ -249,6 +260,18 @@ mod tests {
         // 1.2 >= 1 → one removal
         assert_eq!(pool.len(), 1);
         assert!(!pool.contains(1));
+        assert!((accum - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_r_probe_fractional() {
+        let mut accum = 0.0;
+        assert_eq!(apply_r_probe(&mut accum, 0.3), 0);
+        assert!((accum - 0.3).abs() < 1e-9);
+        assert_eq!(apply_r_probe(&mut accum, 0.3), 0);
+        assert_eq!(apply_r_probe(&mut accum, 0.3), 0);
+        assert_eq!(apply_r_probe(&mut accum, 0.3), 1);
+        // 1.2 >= 1 → one probe
         assert!((accum - 0.2).abs() < 1e-9);
     }
 

@@ -16,7 +16,7 @@ See also:
 |--------|---------------------------------------------------|--------|
 | Dispatch trigger | Arrival | Arrival |
 | Load signal | `local_inflight` (this LB’s outstanding sends) | Probed server RIF (`queue.len + in_flight`) |
-| Probing | None | `r_probe` probes per request (async, off critical path) |
+| Probing | None | Fractional `r_probe` probes per request (async, off critical path) |
 | Candidate memory | Subset / samples only | Reusable probe pool |
 | `--lb-subset-size` | Supported | **Rejected** if `> 0` |
 | `ms` simulator | Supported (shared policies) | Outbound `ReplicaBalancer` only (ingress stays P2C) |
@@ -27,7 +27,7 @@ Probe RPCs use zero-delay nexosim messages (same delivery model as `release`). T
 
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
-| `r_probe` | `2` | Probes issued per request |
+| `r_probe` | `1.5` | Fractional probes issued per request |
 | `b_reuse` | `1` | Max selections of a candidate before removal |
 | `r_remove` | `0.3` | Fractional worst-candidate removals per request |
 | `pool_cap` | `ceil(0.25 × N)` | Max candidates (`N` = server count visible to the LB) |
@@ -35,7 +35,7 @@ Probe RPCs use zero-delay nexosim messages (same delivery model as `release`). T
 ## Pseudocode
 
 ```text
-constants: R_PROBE=2, B_REUSE=1, R_REMOVE=0.3, POOL_CAP=ceil(0.25*N)
+constants: R_PROBE=1.5, B_REUSE=1, R_REMOVE=0.3, POOL_CAP=ceil(0.25*N)
 
 on_request(task):
   remove_accum += R_REMOVE
@@ -56,7 +56,12 @@ on_request(task):
     entry.uses += 1
     if entry.uses >= B_REUSE: remove entry
 
-  targets = sample R_PROBE servers from {0..N-1} \ pool  # without replacement
+  probe_accum += R_PROBE
+  n_probes = 0
+  while probe_accum >= 1:
+    n_probes += 1
+    probe_accum -= 1
+  targets = sample n_probes servers from {0..N-1} \ pool  # without replacement
   for t in targets: send Probe(lb_id) to t
 
 on_probe_reply(server, rif):
@@ -132,7 +137,7 @@ flowchart LR
 2. **Select** — least RIF in pool, else uniform random among all servers.
 3. **Dispatch** — send task; update `local_inflight` (release accounting unchanged).
 4. **Optimistic pool update** — if the chosen server is in the pool, `rif += 1` and `uses += 1`; remove at `b_reuse`.
-5. **Probe** — sample up to `r_probe` servers not currently in the pool; send probes.
+5. **Probe** — accumulate `r_probe`; while debt `≥ 1`, count one probe; sample that many servers not currently in the pool; send probes.
 6. **Probe replies** (async) — insert or refresh pool entries; at capacity, evict oldest before insert.
 
 ## Incompatibilities

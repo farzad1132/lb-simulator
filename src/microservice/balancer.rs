@@ -8,7 +8,8 @@ use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
 use crate::prequal::{
-    apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe, B_REUSE, R_PROBE,
+    apply_r_probe, apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe, B_REUSE,
+    R_PROBE,
     R_REMOVE,
 };
 use crate::rng;
@@ -208,6 +209,8 @@ pub struct ReplicaBalancer {
     #[serde(skip)]
     r_remove_accum: HashMap<String, f64>,
     #[serde(skip)]
+    r_probe_accum: HashMap<String, f64>,
+    #[serde(skip)]
     pull_audit: Option<Arc<ApproxPullAudit>>,
     #[serde(skip)]
     approx_sched: Option<ApproxSchedKind>,
@@ -236,6 +239,7 @@ impl ReplicaBalancer {
         let mut probe_outputs = HashMap::new();
         let mut candidate_pools = HashMap::new();
         let mut r_remove_accum = HashMap::new();
+        let mut r_probe_accum = HashMap::new();
         for (target, indices) in &downstream_indices {
             let n = graph_server_counts.get(target).copied().unwrap_or(0) as usize;
             debug_assert!(
@@ -249,6 +253,7 @@ impl ReplicaBalancer {
             probe_outputs.insert(target.clone(), (0..n).map(|_| Output::default()).collect());
             candidate_pools.insert(target.clone(), CandidatePool::new(pool_cap(n)));
             r_remove_accum.insert(target.clone(), 0.0);
+            r_probe_accum.insert(target.clone(), 0.0);
         }
         let downstream_outputs = downstream_indices
             .keys()
@@ -272,6 +277,7 @@ impl ReplicaBalancer {
             probe_outputs,
             candidate_pools,
             r_remove_accum,
+            r_probe_accum,
             pull_audit,
             approx_sched,
             caller_lb_queue_occupancy,
@@ -410,11 +416,19 @@ impl ReplicaBalancer {
     }
 
     async fn issue_probes(&mut self, target: &str, n_servers: usize) {
+        if !self.candidate_pools.contains_key(target) {
+            return;
+        }
+        let n = {
+            let accum = self.r_probe_accum.entry(target.to_string()).or_insert(0.0);
+            apply_r_probe(accum, R_PROBE)
+        };
         let targets = {
-            let Some(pool) = self.candidate_pools.get(target) else {
-                return;
-            };
-            sample_probe_targets(n_servers, pool, R_PROBE)
+            let pool = self
+                .candidate_pools
+                .get(target)
+                .expect("candidate pool checked above");
+            sample_probe_targets(n_servers, pool, n)
         };
         let Some(outputs) = self.probe_outputs.get_mut(target) else {
             return;

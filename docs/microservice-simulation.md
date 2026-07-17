@@ -268,7 +268,7 @@ Full documentation: **[approx-policy.md](approx-policy.md)**.
 
 ### Prequal policy (decentralized outbound probe pool)
 
-`--lb-policy prequal` uses the same per-caller-replica `ReplicaBalancer` topology as default push policies (no shared `DownstreamBalancer`). Ingress stays push-based power-of-two on `EdgeBalancer`. Outbound routing uses an async RIF probe pool per downstream target, with the same hardcoded parameters as `lb` prequal (`r_probe=2`, `b_reuse=1`, `r_remove=0.3`, `pool_cap=ceil(0.25N)`). Replica RIF is `queue.len() + in_flight`. `--lb-subset-size > 0` is rejected.
+`--lb-policy prequal` uses the same per-caller-replica `ReplicaBalancer` topology as default push policies (no shared `DownstreamBalancer`). Ingress stays push-based power-of-two on `EdgeBalancer`. Outbound routing uses an async RIF probe pool per downstream target, with the same hardcoded parameters as `lb` prequal (`r_probe=1.5`, `b_reuse=1`, `r_remove=0.3`, `pool_cap=ceil(0.25N)`). Replica RIF is `queue.len() + in_flight`. `--lb-subset-size > 0` is rejected.
 
 Full documentation: **[prequal-policy.md](prequal-policy.md)**.
 

@@ -5,8 +5,8 @@ use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
 use crate::prequal::{
-    apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe, ProbeReply, B_REUSE,
-    R_PROBE, R_REMOVE,
+    apply_r_probe, apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe,
+    ProbeReply, B_REUSE, R_PROBE, R_REMOVE,
 };
 use crate::rng;
 use crate::server::Task;
@@ -48,6 +48,8 @@ pub struct LoadBalancer {
     candidate_pool: CandidatePool,
     #[serde(skip)]
     r_remove_accum: f64,
+    #[serde(skip)]
+    r_probe_accum: f64,
     n_servers: usize,
     pub outputs: Vec<Output<Task>>,
     pub pull_intent_outputs: Vec<Output<PullIntent>>,
@@ -81,6 +83,7 @@ impl LoadBalancer {
             pull_audit,
             candidate_pool: CandidatePool::new(pool_cap(n_servers)),
             r_remove_accum: 0.0,
+            r_probe_accum: 0.0,
             n_servers,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
             pull_intent_outputs: (0..n_servers).map(|_| Output::default()).collect(),
@@ -89,7 +92,8 @@ impl LoadBalancer {
     }
 
     async fn issue_probes(&mut self) {
-        let targets = sample_probe_targets(self.n_servers, &self.candidate_pool, R_PROBE);
+        let n = apply_r_probe(&mut self.r_probe_accum, R_PROBE);
+        let targets = sample_probe_targets(self.n_servers, &self.candidate_pool, n);
         for server_idx in targets {
             self.probe_outputs[server_idx]
                 .send(Probe {
