@@ -1,4 +1,4 @@
-use lb::microservice::{ApproxPullAudit, MsArgs, OutputFormat, run};
+use lb::microservice::{ApproxPullAudit, MsArgs, MsServiceDistribution, OutputFormat, run};
 use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -30,7 +30,7 @@ fn approx_args(
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
-        force_fixed_svc: false,
+        service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
         approx_sched,
     }

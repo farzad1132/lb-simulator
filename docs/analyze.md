@@ -118,6 +118,10 @@ Custom fixtures and policy variants:
   --n 50000 --seed 7 \
   --output output/ms_service_distributions_chain3.pdf
 
+# fixed or bimodal service times (ms --service-dist)
+.venv/bin/python analyze/ms_service_distributions.py \
+  --service-dist bimodal --n 100000 --seed 42
+
 # approx unbound with outbound EDF queue scheduling
 .venv/bin/python analyze/ms_service_distributions.py \
   --callgraph tests/chain/3/callgraph.json \

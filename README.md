@@ -224,7 +224,7 @@ Python plotting scripts live in the repo root. Each runs the simulator (or compa
 | [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) | total arrival rate (task/s) | configurable metric (default p99) | Compare centralized vs power-of-two at equal offered load with different server counts |
 | [`plot_lb_express_heatmap.py`](plot_lb_express_heatmap.py) | express pool size | express delay threshold | Heatmap of a metric across express-size vs express-del-th |
 | [`optimize_express_lane.py`](optimize_express_lane.py) | — | — | Grid-search express_size × express_del_th × express_th; human-readable log only (no plots) |
-| [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6) | Heatmap of SLO violation rate (%) across load for chain topologies |
+| [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6 / chain10) | Heatmap of SLO violation rate (%) across load for chain topologies |
 | [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
 
 Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script. Use [`plot_lb_load_compare.py`](plot_lb_load_compare.py) when comparing named configs (different policies, server counts, or subset sizes) at the same load levels.
@@ -552,7 +552,9 @@ python optimize_express_lane.py --resume optimizer_logs/express_lane_20250702_15
 
 ## Plot microservice chain SLO heatmap
 
-`plot_ms_chain_slo_heatmap.py` runs the ms simulator on chain3 and chain6 fixtures at each load level and writes a heatmap of SLO violation rate (%) to `output/ms_chain_slo_heatmap.pdf`. Cell color encodes the violation percentage; rows are chain depth, columns are load.
+`plot_ms_chain_slo_heatmap.py` runs the ms simulator on chain3, chain6, and chain10 fixtures at each load level and writes a heatmap of SLO violation rate (%) to `output/ms_chain_slo_heatmap.pdf`. Cell color encodes the violation percentage; rows are chain depth, columns are load.
+
+Before the load sweep, each topology is calibrated once: a probe run with `n=300000` (fixture `load.json` RPS) measures processing-time p99 (`unloaded_latency_p99_ms`), and SLO is set to `2 ×` that value. The calibrated SLO is passed to every subsequent run via `--slo-ms`, so the threshold is fixed per topology (and adapts to `--service-dist` and other configs) rather than taken from fixture `load.json`.
 
 ```bash
 python plot_ms_chain_slo_heatmap.py --n 100000
@@ -563,12 +565,13 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--output` | `output/ms_chain_slo_heatmap.pdf` | Output PDF path |
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range |
-| `--n` | `100000` | Requests per run |
+| `--n` | `100000` | Requests per load-sweep run (calibration always uses `n=300000`) |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `prequal`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (required with `--lb-policy approx`) |
 | `--approx-sched` | (omit) | With `--lb-policy approx`: omit for bound pulls; `fcfs` or `edf` (ms only) for unbound queue-head fulfillment |
 | `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas; not supported with `prequal`) |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`) |
+| `--service-dist` | `exp` | Service-time distribution (`exp`, `fixed`, `bimodal`); affects calibrated SLO |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |
 
 ## Compare lb and ms simulators

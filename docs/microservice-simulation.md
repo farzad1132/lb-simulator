@@ -51,7 +51,11 @@ Each **interface** (endpoint) on a microservice has a mean local processing time
 - `"avg_rt": 0.2` — mean 0.2 ms, or
 - `"exponential": { "mean": 0.8 }` — mean 0.8 ms
 
-Both forms define the mean of an **exponential** random variable sampled when that endpoint processes a hop (converted to seconds internally for simulation).
+Both forms define the per-endpoint mean (converted to seconds internally). How that mean is turned into a service duration is controlled by `--service-dist` (default `exp`):
+
+- `exp` — sample `Exp(mean)` (historical default)
+- `fixed` — use the mean as a constant duration
+- `bimodal` — mixture of exponentials with unit-mean shape modes `0.5` / `5.5` at probabilities `0.9` / `0.1`, scaled by the endpoint mean so \(E[S]=\text{mean}\)
 
 **`cpu`** is the total concurrency of the microservice (shared across all interfaces). **`replicas`** is the number of server instances. Each server gets `cpu / replicas` concurrent processing slots.
 
@@ -156,7 +160,7 @@ See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic alg
 | `endpoint` | Arrival / return | Current endpoint for local work or continuation |
 | `sibling_index` | After local work or child return | Next child edge to dispatch at this endpoint |
 | `start` | User arrival | Never — used for e2e latency |
-| `duration` | Each local processing step | Re-sampled exponential for current endpoint |
+| `duration` | Each local processing step | Re-sampled per `--service-dist` for current endpoint mean |
 | `processing_time` | Each local completion | Running sum of local durations |
 | `caller` | Outbound dispatch | `CallerRef` for return routing |
 
@@ -342,8 +346,10 @@ Queueing delay per request = `e2e_ms − processing_time_ms` (derivable, not a p
 | Metric | Definition |
 |--------|------------|
 | **unloaded_latency_p99_ms** | p99 of that API's `processing_time_ms` samples |
-| **slo_latency_ms** | `slo_ms` from `load.json` for that API |
+| **slo_latency_ms** | `slo_ms` from `load.json` for that API (overridable via `--slo-ms`) |
 | **prob_latency_gt_slo** | Fraction of requests with `e2e_ms > slo_latency_ms` |
+
+The chain SLO heatmap (`plot_ms_chain_slo_heatmap.py`) does **not** use fixture `load.json` SLO values. For each topology it first runs a calibration with `n=300000`, sets `slo_ms = 2 × unloaded_latency_p99_ms`, then passes that threshold via `--slo-ms` for the load sweep.
 
 ### Per microservice
 
@@ -388,7 +394,7 @@ A single-hop callgraph (`USER → server:handle`) is equivalent to the flat `lb`
 | Total capacity | `cpu` | `servers × concurrency` |
 | Per-replica concurrency | `cpu / replicas` | `concurrency` |
 | Server count | `replicas` | `servers` |
-| Service mean | `avg_rt` in ms (exponential) | default 1.0 s |
+| Service mean | `avg_rt` in ms; sampling via `--service-dist` | default 1.0 s (`--service-dist`) |
 | Arrival rate | `load.json` `rps` | derived from `--load` |
 
 Load equivalence (with service mean 1 s):
@@ -430,7 +436,7 @@ cargo build --release
 | `--pull-policy` | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | Omit for bound 1:1 pulls; `fcfs` or `edf` for unbound queue-head fulfillment; independent of `--scheduling` |
 | `--scheduling` | Server queue discipline at each replica: `fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
-| `--force-fixed-svc` | Use fixed service times from callgraph instead of sampling |
+| `--service-dist` | Service-time distribution: `exp` (default), `fixed`, or `bimodal` (hardcoded modes scaled to each endpoint mean) |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr`. |
 | `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
 | `--seed` | Optional RNG seed for reproducible runs |

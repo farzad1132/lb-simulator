@@ -1,5 +1,7 @@
 use clap::Parser;
-use lb::microservice::{MsArgs, MsStats, OutputFormat, print_human_stats, run};
+use lb::microservice::{
+    MsArgs, MsServiceDistribution, MsStats, OutputFormat, print_human_stats, run,
+};
 use lb::policy::{
     validate_prequal_subset, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind,
 };
@@ -40,8 +42,8 @@ struct Args {
     scale: u32,
     #[arg(long, value_enum, default_value_t = SchedulingPolicyKind::Fifo)]
     scheduling: SchedulingPolicyKind,
-    #[arg(long)]
-    force_fixed_svc: bool,
+    #[arg(long, value_enum, default_value_t = MsServiceDistribution::Exp)]
+    service_dist: MsServiceDistribution,
     #[arg(long, value_enum)]
     approx_sched: Option<ApproxSchedKind>,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
@@ -67,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trace_limit: cli.trace_limit,
         scale: cli.scale,
         scheduling: cli.scheduling,
-        force_fixed_svc: cli.force_fixed_svc,
+        service_dist: cli.service_dist,
         verbose: cli.verbose,
         pull_audit: None,
         approx_sched: cli.approx_sched,
@@ -225,16 +227,43 @@ mod tests {
     }
 
     #[test]
-    fn parses_force_fixed_svc() {
+    fn default_service_dist_is_exp() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
             "tests/fanin/callgraph.json",
             "--load-file",
             "tests/fanin/load.json",
-            "--force-fixed-svc",
         ]);
-        assert!(cli.force_fixed_svc);
+        assert_eq!(cli.service_dist, MsServiceDistribution::Exp);
+    }
+
+    #[test]
+    fn parses_service_dist_fixed() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--service-dist",
+            "fixed",
+        ]);
+        assert_eq!(cli.service_dist, MsServiceDistribution::Fixed);
+    }
+
+    #[test]
+    fn parses_service_dist_bimodal() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--service-dist",
+            "bimodal",
+        ]);
+        assert_eq!(cli.service_dist, MsServiceDistribution::Bimodal);
     }
 
     #[test]

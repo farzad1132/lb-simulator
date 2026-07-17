@@ -1,7 +1,16 @@
+use clap::ValueEnum;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum MsServiceDistribution {
+    #[default]
+    Exp,
+    Fixed,
+    Bimodal,
+}
 
 #[derive(Debug, Clone)]
 pub struct MicroserviceSpec {
@@ -17,7 +26,7 @@ pub struct CallGraph {
     pub entrypoints: HashMap<String, String>,
     pub endpoint_microservice: HashMap<String, String>,
     pub microservice_order: Vec<String>,
-    pub force_fixed_svc: bool,
+    pub service_dist: MsServiceDistribution,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -144,7 +153,7 @@ impl CallGraph {
             entrypoints,
             endpoint_microservice,
             microservice_order,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
         })
     }
 

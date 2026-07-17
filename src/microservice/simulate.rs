@@ -15,7 +15,7 @@ use std::time::Duration;
 use super::balancer::{DownstreamBalancer, EdgeBalancer, OutboundGateway, ReplicaBalancer};
 #[cfg(test)]
 use super::callgraph::ApiLoad;
-use super::callgraph::{CallGraph, LoadSpec, load_spec_from_file};
+use super::callgraph::{CallGraph, LoadSpec, MsServiceDistribution, load_spec_from_file};
 use super::hop::{
     CompletedRequest, Hop, OutboundCall, ReplicaInput, microservice_for_endpoint, sample_exp,
 };
@@ -62,7 +62,7 @@ pub struct MsArgs {
     pub scale: u32,
     pub verbose: u8,
     pub scheduling: SchedulingPolicyKind,
-    pub force_fixed_svc: bool,
+    pub service_dist: MsServiceDistribution,
     /// When set, records approx pull/intent events for post-run invariant checks (tests).
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
     /// Approx outbound pull scheduling: None = bound 1:1; Some(Fcfs|Edf) = unbound queue head.
@@ -449,7 +449,7 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
 fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     let mut graph = CallGraph::from_file(&args.callgraph)?;
     graph.apply_scale(args.scale)?;
-    graph.force_fixed_svc = args.force_fixed_svc;
+    graph.service_dist = args.service_dist;
     let graph = Arc::new(graph);
     let mut load = load_spec_from_file(&args.load_file)?;
     apply_load_overrides(&mut load, args.rps, args.slo_ms);
@@ -1193,7 +1193,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         }
@@ -1219,7 +1219,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         })
@@ -1277,7 +1277,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         };
@@ -1322,7 +1322,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         })
@@ -1364,7 +1364,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         };
@@ -1396,7 +1396,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         };
@@ -1476,7 +1476,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         })
@@ -1676,7 +1676,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling,
-            force_fixed_svc: false,
+            service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             approx_sched: None,
         })
@@ -1691,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn force_fixed_svc_uses_constant_processing_times() {
+    fn service_dist_fixed_uses_constant_processing_times() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let stats = run(&MsArgs {
             callgraph: root.join("tests/chain/3/callgraph.json"),
@@ -1710,7 +1710,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
-            force_fixed_svc: true,
+            service_dist: MsServiceDistribution::Fixed,
             pull_audit: None,
             approx_sched: None,
         })
@@ -1727,6 +1727,46 @@ mod tests {
                     "{ms}: expected constant {expected} ms, got {sample}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn service_dist_bimodal_preserves_mean_processing_time() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let stats = run(&MsArgs {
+            callgraph: root.join("tests/chain/3/callgraph.json"),
+            load_file: root.join("tests/chain/3/load.json"),
+            n: 20_000,
+            lb_policy: LoadBalancePolicyKind::LeastRequest,
+            pull_policy: None,
+            lb_subset_size: 0,
+            lb_subset_policy: SubsetPolicyKind::Deterministic,
+            seed: Some(7),
+            rps: None,
+            slo_ms: None,
+            format: OutputFormat::Json,
+            trace: false,
+            trace_limit: 5,
+            scale: 0,
+            verbose: 0,
+            scheduling: SchedulingPolicyKind::Fifo,
+            service_dist: MsServiceDistribution::Bimodal,
+            pull_audit: None,
+            approx_sched: None,
+        })
+        .unwrap()
+        .expect("stats");
+
+        // Callgraph means are 1 ms; bimodal modes are scaled to keep E[S] = mean.
+        let expected_ms = 1.0;
+        for ms in ["frontend", "backend1", "backend2"] {
+            let samples = &stats.by_microservice[ms].processing_time_ms;
+            assert!(samples.len() > 100, "{ms}");
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            assert!(
+                (mean - expected_ms).abs() < 0.08,
+                "{ms}: expected mean ~{expected_ms} ms, got {mean}"
+            );
         }
     }
 

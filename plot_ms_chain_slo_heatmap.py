@@ -31,6 +31,7 @@ from plot_cdfs import (
     MS_APPROX_SCHED_POLICIES,
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
+    MS_SERVICE_DISTS,
     PULL_POLICIES,
     REPO_ROOT,
     ensure_release_binary,
@@ -48,6 +49,7 @@ DEFAULT_CHAIN10_CALLGRAPH = REPO_ROOT / "tests" / "chain" / "10" / "callgraph.js
 DEFAULT_CHAIN10_LOAD = REPO_ROOT / "tests" / "chain" / "10" / "load.json"
 DEFAULT_OUTPUT = REPO_ROOT / "output" / "ms_chain_slo_heatmap.pdf"
 DEFAULT_RPS_PER_LOAD_LEVEL = 10_000.0
+CALIBRATION_N = 300_000
 SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
 
 
@@ -66,15 +68,47 @@ def slo_from_unloaded_latency_ms(stats: dict) -> float:
     return SLO_UNLOADED_LATENCY_MULTIPLIER * stats["unloaded_latency_p99_ms"]
 
 
-def prob_latency_gt_slo(stats: dict, slo_ms: float) -> float:
-    samples = stats["e2e_ms"]
-    violations = sum(1 for latency in samples if latency > slo_ms)
-    return violations / len(samples)
-
-
 def load_values(load_min: float, load_max: float, load_step: float) -> list[float]:
     values = np.arange(load_min, load_max + load_step / 2, load_step, dtype=float)
     return [round(float(v), 10) for v in values]
+
+
+def _log(message: str) -> None:
+    write = getattr(tqdm, "write", None)
+    if write is None:
+        print(message, file=sys.stderr)
+    else:
+        write(message)
+
+
+def calibrate_topology_slo(
+    binary: Path,
+    *,
+    callgraph: Path,
+    load_file: Path,
+    api: str,
+    lb_policy: str,
+    pull_policy: str | None,
+    lb_subset_size: int,
+    scheduling: str,
+    seed: int | None,
+    service_dist: str,
+    approx_sched: str | None,
+) -> float:
+    data = run_ms_simulation(
+        binary,
+        callgraph=callgraph,
+        load_file=load_file,
+        n=CALIBRATION_N,
+        lb_policy=lb_policy,
+        pull_policy=pull_policy,
+        lb_subset_size=lb_subset_size,
+        scheduling=scheduling,
+        seed=seed,
+        service_dist=service_dist,
+        approx_sched=approx_sched,
+    )
+    return slo_from_unloaded_latency_ms(api_stats(data, api))
 
 
 def run_chain_sweep(
@@ -95,20 +129,43 @@ def run_chain_sweep(
     lb_subset_size: int,
     scheduling: str,
     seed: int | None,
+    service_dist: str = "exp",
     approx_sched: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    topologies = [
+        (chain3_callgraph, chain3_load, "chain3"),
+        (chain6_callgraph, chain6_load, "chain6"),
+        (chain10_callgraph, chain10_load, "chain10"),
+    ]
+    topology_slos: list[float] = []
+    for callgraph, load_file, label in topologies:
+        slo_ms = calibrate_topology_slo(
+            binary,
+            callgraph=callgraph,
+            load_file=load_file,
+            api=api,
+            lb_policy=lb_policy,
+            pull_policy=pull_policy,
+            lb_subset_size=lb_subset_size,
+            scheduling=scheduling,
+            seed=seed,
+            service_dist=service_dist,
+            approx_sched=approx_sched,
+        )
+        topology_slos.append(slo_ms)
+        _log(
+            f"{label} SLO={slo_ms:.4f}ms "
+            f"(from n={CALIBRATION_N} processing p99 × {SLO_UNLOADED_LATENCY_MULTIPLIER:g})"
+        )
+
     probs = np.zeros((3, len(loads)), dtype=float)
     slos = np.zeros((3, len(loads)), dtype=float)
 
     for col, load in enumerate(tqdm(loads, desc="chain SLO sweep", unit="load")):
         rps = load * rps_per_load_level
         print(f"load={load:g} rps={rps:g}", file=sys.stderr)
-        for row, (callgraph, load_file, label) in enumerate(
-            [
-                (chain3_callgraph, chain3_load, "chain3"),
-                (chain6_callgraph, chain6_load, "chain6"),
-                (chain10_callgraph, chain10_load, "chain10"),
-            ]
+        for row, ((callgraph, load_file, label), slo_ms) in enumerate(
+            zip(topologies, topology_slos)
         ):
             data = run_ms_simulation(
                 binary,
@@ -121,21 +178,17 @@ def run_chain_sweep(
                 scheduling=scheduling,
                 seed=seed,
                 rps=rps,
+                slo_ms=slo_ms,
+                service_dist=service_dist,
                 approx_sched=approx_sched,
             )
             stats = api_stats(data, api)
-            slo_ms = slo_from_unloaded_latency_ms(stats)
             slos[row, col] = slo_ms
-            probs[row, col] = prob_latency_gt_slo(stats, slo_ms) * 100.0
-            message = (
+            probs[row, col] = stats["prob_latency_gt_slo"] * 100.0
+            _log(
                 f"{label} load={load:g} rps={rps:g} SLO={slo_ms:.4f}ms "
                 f"violations={probs[row, col]:.2f}%"
             )
-            write = getattr(tqdm, "write", None)
-            if write is None:
-                print(message, file=sys.stderr)
-            else:
-                write(message)
 
     return probs, slos
 
@@ -191,6 +244,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
+    parser.add_argument(
+        "--service-dist",
+        choices=MS_SERVICE_DISTS,
+        default="exp",
+        help="Service-time distribution (default: exp)",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--approx-sched",
@@ -234,6 +293,7 @@ def main() -> None:
         lb_subset_size=args.lb_subset_size,
         scheduling=args.scheduling,
         seed=args.seed,
+        service_dist=args.service_dist,
         approx_sched=args.approx_sched,
     )
     output_path = output_path_with_comment(args.output, args.comment)

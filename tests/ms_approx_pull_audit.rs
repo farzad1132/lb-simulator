@@ -1,4 +1,4 @@
-use lb::microservice::{ApproxPullAudit, MsArgs, OutputFormat, run};
+use lb::microservice::{ApproxPullAudit, MsArgs, MsServiceDistribution, OutputFormat, run};
 use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -23,7 +23,7 @@ fn chain3_approx_args(n: u32, seed: u64, audit: Option<std::sync::Arc<ApproxPull
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
-        force_fixed_svc: false,
+        service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
         approx_sched: None,
     }
@@ -86,7 +86,7 @@ fn ms_approx_pull_invariants_with_power_of_two_pull_policy() {
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
-        force_fixed_svc: false,
+        service_dist: MsServiceDistribution::Exp,
         pull_audit: Some(audit.clone()),
         approx_sched: None,
     })

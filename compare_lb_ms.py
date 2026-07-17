@@ -115,6 +115,7 @@ def run_ms(
     n: int,
     scenario: Scenario,
     lb_policy: str,
+    service_dist: str = "exp",
 ) -> dict:
     cmd = [
         str(binary),
@@ -128,6 +129,8 @@ def run_ms(
         str(scenario.load_file),
         "--lb-policy",
         lb_policy,
+        "--service-dist",
+        service_dist,
     ]
     result = run_subprocess(cmd, label="ms simulator")
     return _parse_ms_json(cmd, result.stdout)

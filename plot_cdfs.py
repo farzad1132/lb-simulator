@@ -53,6 +53,8 @@ MS_LB_POLICIES = (
 )
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
 MS_APPROX_SCHED_POLICIES = ("fcfs", "edf")
+MS_SERVICE_DISTS = ("exp", "fixed", "bimodal")
+LB_SERVICE_DISTS = ("exponential", "constant", "bimodal")
 SIMULATORS = ("lb", "ms")
 
 
@@ -325,7 +327,7 @@ def run_ms_simulation(
     rps: float | None = None,
     slo_ms: float | None = None,
     scheduling: str = "fifo",
-    force_fixed_svc: bool = False,
+    service_dist: str = "exp",
     approx_sched: str | None = None,
 ) -> dict:
     cmd = [
@@ -344,6 +346,8 @@ def run_ms_simulation(
         str(lb_subset_size),
         "--scheduling",
         scheduling,
+        "--service-dist",
+        service_dist,
     ]
     if pull_policy is not None:
         cmd.extend(["--pull-policy", pull_policy])
@@ -353,8 +357,6 @@ def run_ms_simulation(
         cmd.extend(["--rps", str(rps)])
     if slo_ms is not None:
         cmd.extend(["--slo-ms", str(slo_ms)])
-    if force_fixed_svc:
-        cmd.append("--force-fixed-svc")
     if approx_sched is not None:
         cmd.extend(["--approx-sched", approx_sched])
     result = run_subprocess(cmd, label="simulator")
@@ -489,6 +491,11 @@ def validate_lb_args(args: argparse.Namespace) -> None:
         raise SystemExit("--api is only valid with --simulator ms")
     if args.slo is not None:
         raise SystemExit("--slo is only valid with --simulator lb")
+    if args.service_dist not in LB_SERVICE_DISTS:
+        raise SystemExit(
+            f"--service-dist {args.service_dist!r} is invalid for --simulator lb "
+            f"(choices: {', '.join(LB_SERVICE_DISTS)})"
+        )
 
 
 def validate_prequal_subset(lb_policy: str, lb_subset_size: int) -> None:
@@ -501,6 +508,15 @@ def validate_ms_args(args: argparse.Namespace) -> None:
         raise SystemExit("--callgraph is required with --simulator ms")
     if args.load_file is None:
         raise SystemExit("--load-file is required with --simulator ms")
+    if args.service_dist not in MS_SERVICE_DISTS:
+        raise SystemExit(
+            f"--service-dist {args.service_dist!r} is invalid for --simulator ms "
+            f"(choices: {', '.join(MS_SERVICE_DISTS)})"
+        )
+    if args.service_modes is not None or args.service_mode_probs is not None:
+        raise SystemExit(
+            "--service-modes / --service-mode-probs are only valid with --simulator lb"
+        )
 
 
 def resolve_output_path(args: argparse.Namespace) -> Path:
@@ -537,15 +553,22 @@ def parse_args() -> argparse.Namespace:
                         help="Plot only this API (ms mode); omit to plot all APIs from load file")
     parser.add_argument("--load", type=float, default=0.8)
     parser.add_argument("--n", type=int, default=1_000_000)
-    parser.add_argument("--service-dist", choices=["exponential", "constant", "bimodal"],
-                        default="exponential")
+    parser.add_argument(
+        "--service-dist",
+        default=None,
+        help=(
+            "Service-time distribution. "
+            f"lb: {', '.join(LB_SERVICE_DISTS)} (default: exponential). "
+            f"ms: {', '.join(MS_SERVICE_DISTS)} (default: exp)."
+        ),
+    )
     parser.add_argument(
         "--service-modes", type=float, nargs=2, metavar=("M0", "M1"),
-        help="Exponential means for bimodal modes (required with --service-dist bimodal)",
+        help="Exponential means for bimodal modes (lb only; required with --service-dist bimodal)",
     )
     parser.add_argument(
         "--service-mode-probs", type=float, nargs=2, metavar=("P0", "P1"),
-        help="Mode selection probabilities (required with --service-dist bimodal)",
+        help="Mode selection probabilities (lb only; required with --service-dist bimodal)",
     )
     parser.add_argument("--servers", type=int, default=1,
                         help="Number of servers (passed to lb simulator)")
@@ -577,6 +600,8 @@ def main() -> None:
     args = parse_args()
     output_path = output_path_with_comment(resolve_output_path(args), args.comment)
     lb_policy = resolve_lb_policy(args.simulator, args.lb_policy)
+    if args.service_dist is None:
+        args.service_dist = "exponential" if args.simulator == "lb" else "exp"
 
     if args.simulator == "lb":
         validate_lb_args(args)
@@ -629,6 +654,7 @@ def main() -> None:
         lb_policy=lb_policy,
         lb_subset_size=args.lb_subset_size,
         seed=args.seed,
+        service_dist=args.service_dist,
     )
     panels = select_ms_panels(data, api=args.api, load_file=args.load_file)
     for panel in panels:

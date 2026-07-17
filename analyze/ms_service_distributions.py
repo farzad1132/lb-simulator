@@ -28,6 +28,7 @@ from plot_cdfs import (  # noqa: E402
     MS_APPROX_SCHED_POLICIES,
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
+    MS_SERVICE_DISTS,
     PULL_POLICIES,
     ensure_release_binary,
     output_path_with_comment,
@@ -680,9 +681,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ms-binary", type=Path, default=None)
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument(
-        "--force-fixed-svc",
-        action="store_true",
-        help="Force constant service times using callgraph means (no exponential sampling)",
+        "--service-dist",
+        choices=MS_SERVICE_DISTS,
+        default="exp",
+        help="Service-time distribution (default: exp)",
     )
     return parser.parse_args()
 
@@ -721,7 +723,7 @@ def main() -> None:
         rps=args.rps,
         slo_ms=args.slo,
         scheduling=args.scheduling,
-        force_fixed_svc=args.force_fixed_svc,
+        service_dist=args.service_dist,
         approx_sched=args.approx_sched,
     )
     if "by_microservice" not in data:

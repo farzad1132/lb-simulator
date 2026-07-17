@@ -39,8 +39,8 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl`, `cl-lr`, `centralized`, or `corr`) |
 | Flat topology CLI | yes | — | `--servers`, `--concurrency`, `--load` |
 | Callgraph topology | — | yes | `--callgraph`, `--load-file` |
-| Service distributions | yes | — | `exponential`, `constant`, `bimodal` via `--service-dist` |
-| Per-endpoint exponential service times | — | yes | Means from callgraph (`avg_rt` or `exponential.mean`, in ms) |
+| Service distributions | yes | yes | lb: `exponential`, `constant`, `bimodal` (+ CLI modes); ms: `exp`, `fixed`, `bimodal` via `--service-dist` |
+| Per-endpoint service-time means | — | yes | Means from callgraph (`avg_rt` or `exponential.mean`, in ms); ms `bimodal` scales fixed mode shape to each mean |
 | Nested synchronous RPCs | — | yes | Multi-hop call trees; siblings dispatched sequentially |
 | Direct return routing | — | yes | Callee → caller replica via `CallerRef` (not load-balanced) |
 | Request tracing | — | yes | `--trace`, `--trace-limit` (timeline on stderr) |
@@ -165,7 +165,7 @@ With `--arrival exponential` (default), each client starts at `t=0` and samples 
 
 Configure pool size and load directly: `--servers`, `--concurrency`, `--load`.
 
-Service time sampling: `--service-dist exponential|constant|bimodal` with optional `--service-modes` / `--service-mode-probs`. Default exponential/constant mean is 1 second.
+Service time sampling: `--service-dist exponential|constant|bimodal` with optional `--service-modes` / `--service-mode-probs`. Default exponential/constant mean is 1 second. On `ms`, use `--service-dist exp|fixed|bimodal` with per-endpoint means from the callgraph; `bimodal` uses a hardcoded unit-mean shape (`0.5`/`5.5` at `0.9`/`0.1`) scaled to each endpoint mean (no `--service-modes`).
 
 Inter-arrival sampling: `--arrival exponential|constant` (default `exponential`). See [lb-simulation.md](lb-simulation.md#inter-arrival-distribution) for constant-mode multi-client phase offsetting.
 

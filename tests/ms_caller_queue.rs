@@ -1,4 +1,4 @@
-use lb::microservice::{MsArgs, OutputFormat, run};
+use lb::microservice::{MsArgs, MsServiceDistribution, OutputFormat, run};
 use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -28,7 +28,7 @@ fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsA
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
-        force_fixed_svc: false,
+        service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         approx_sched: None,
     }
@@ -138,7 +138,7 @@ fn f1_nested_callgraph_completes() {
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
-        force_fixed_svc: false,
+        service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         approx_sched: None,
     })
