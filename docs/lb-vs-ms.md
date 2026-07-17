@@ -13,9 +13,9 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
-| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Prequal** (`prequal`): lb-only async RIF probe pool. **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
-| Local inflight load view | yes | yes | Typical push policies use each balancer's **local inflight** counters; **prequal** additionally probes server `queue.len + in_flight` |
-| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal` in lb, or with `cl`, `cl-lr`, `centralized`, or `corr` in ms. |
+| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
+| Local inflight load view | yes | yes | Typical push policies use each balancer's **local inflight** counters; **prequal** additionally probes server/replica `queue.len + in_flight` |
+| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, or with `cl`, `cl-lr`, `centralized`, or `corr` in ms. |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
@@ -27,7 +27,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **Work shedding** | yes | — | lb-only; `--shed-delay`; see [work-shedding.md](work-shedding.md) |
 | **Centralized pull dispatch** | yes | yes | lb: one global queue; servers pull on spare capacity. ms: one pull queue per downstream target (outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Approx decentralized pull** | yes | yes (outbound only) | See [approx-policy.md](approx-policy.md) |
-| **Prequal async probe pool** | yes | — | See [prequal-policy.md](prequal-policy.md); `ms` rejects `--lb-policy prequal` |
+| **Prequal async probe pool** | yes | yes (outbound only) | See [prequal-policy.md](prequal-policy.md); ms ingress stays P2C |
 | **`--approx-sched fcfs` (unbound approx pulls)** | yes | yes | Outbound approx only in `ms`; see [approx-policy.md](approx-policy.md) |
 | **`--approx-sched edf` (outbound approx queue)** | — | yes | `ms` only; see [approx-policy.md](approx-policy.md) |
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |

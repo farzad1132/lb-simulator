@@ -1,4 +1,4 @@
-use super::balancer::ReplicaPull;
+use super::balancer::{ReplicaProbeReply, ReplicaPull};
 use super::callgraph::CallGraph;
 use super::hop::{
     CallerRef, CompletedRequest, Hop, OutboundCall, OutboundRelease, ReplicaInput,
@@ -9,6 +9,7 @@ use super::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::PullIntent;
 use crate::approx_audit::ApproxPullAudit;
+use crate::prequal::Probe;
 use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
@@ -43,6 +44,7 @@ pub struct ReplicaConfig {
     pub tracer: Option<Arc<MsTracer>>,
     pub pull_output: Option<Output<usize>>,
     pub approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
+    pub probe_reply_outputs: HashMap<usize, Output<ReplicaProbeReply>>,
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
     pub scheduling: SchedulingPolicyKind,
 }
@@ -81,6 +83,8 @@ pub struct Replica {
     #[serde(skip)]
     approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
     #[serde(skip)]
+    probe_reply_outputs: HashMap<usize, Output<ReplicaProbeReply>>,
+    #[serde(skip)]
     pull_intent_queue: VecDeque<PullIntent>,
     #[serde(skip)]
     pull_audit: Option<Arc<ApproxPullAudit>>,
@@ -109,6 +113,7 @@ impl Replica {
             tracer: config.tracer,
             pull_output: config.pull_output,
             approx_pull_outputs: config.approx_pull_outputs,
+            probe_reply_outputs: config.probe_reply_outputs,
             pull_intent_queue: VecDeque::new(),
             pull_audit: config.pull_audit,
             scheduling: config.scheduling,
@@ -474,6 +479,19 @@ impl Replica {
         }
         self.pull_intent_queue.push_back(intent);
         self.drain_pull_intents_async().await;
+    }
+
+    pub async fn probe(&mut self, probe: Probe, _cx: &Context<Self>) {
+        let rif = self.occupancy_level();
+        let reply = ReplicaProbeReply {
+            microservice_id: self.microservice_id.clone(),
+            server_idx: self.server_idx,
+            rif,
+        };
+        let Some(output) = self.probe_reply_outputs.get_mut(&probe.sender_id) else {
+            return;
+        };
+        output.send(reply).await;
     }
 
     #[nexosim(schedulable)]

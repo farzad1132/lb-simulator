@@ -28,6 +28,7 @@ except ModuleNotFoundError:
         return iterable
 
 from plot_cdfs import (
+    MS_APPROX_SCHED_POLICIES,
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
     PULL_POLICIES,
@@ -35,6 +36,7 @@ from plot_cdfs import (
     ensure_release_binary,
     output_path_with_comment,
     run_ms_simulation,
+    validate_prequal_subset,
 )
 from plotting_primitive import ACM_COMPACT_HALF, SubplotGrid, plot_heatmap
 
@@ -207,6 +209,7 @@ def main() -> None:
         raise SystemExit("--pull-policy is only valid with --lb-policy approx")
     if args.approx_sched is not None and args.lb_policy != "approx":
         raise SystemExit("--approx-sched is only valid with --lb-policy approx")
+    validate_prequal_subset(args.lb_policy, args.lb_subset_size)
 
     loads = load_values(args.load_min, args.load_max, args.load_step)
     if not loads:

@@ -31,12 +31,12 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 - **centralized** — pull-based: one global queue at a single dispatcher; servers request work when they have spare capacity (`lb`: flat pool; ignores `--lb-subset-size`; incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target); see [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer).
 - **approx** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); optional **`--approx-sched fcfs`** or **`--approx-sched edf`** (`ms`) for unbound queue-head pulls; see [docs/approx-policy.md](docs/approx-policy.md)
-- **prequal** — decentralized push with async RIF probe pool (`lb` only; `--lb-subset-size > 0` rejected); see [docs/prequal-policy.md](docs/prequal-policy.md)
+- **prequal** — decentralized push with async RIF probe pool (`lb` and `ms` outbound; `--lb-subset-size > 0` rejected); see [docs/prequal-policy.md](docs/prequal-policy.md)
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **cl-lr** — shared push least-request outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **corr** — experimental shared push outbound layer (`ms` only; same topology as `cl`; ingress stays P2C; `--lb-subset-size > 0` rejected)
 
-Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only; not supported with `prequal` in `lb`, or with `cl`, `cl-lr`, `centralized`, or `corr` in `ms`). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
+Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only; not supported with `prequal`, or with `cl`, `cl-lr`, `centralized`, or `corr` in `ms`). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
 
 ## Metrics
 
@@ -130,10 +130,10 @@ cargo build --release
 | `--callgraph` | (required) | Path to callgraph JSON |
 | `--load-file` | (required) | Path to per-API load JSON (`rps` + `slo_ms`) |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `corr`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `prequal`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs` or `edf` (ms only) for unbound queue-head fulfillment; see [docs/approx-policy.md](docs/approx-policy.md) |
-| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `cl`, `cl-lr`, `centralized`, or `corr`) |
+| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`); see [docs/scheduling.md](docs/scheduling.md) |
@@ -564,10 +564,10 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range |
 | `--n` | `100000` | Requests per run |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `corr`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `prequal`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (required with `--lb-policy approx`) |
 | `--approx-sched` | (omit) | With `--lb-policy approx`: omit for bound pulls; `fcfs` or `edf` (ms only) for unbound queue-head fulfillment |
-| `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas) |
+| `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas; not supported with `prequal`) |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`) |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |
 

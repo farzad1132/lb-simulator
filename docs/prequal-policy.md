@@ -1,11 +1,12 @@
 # Prequal policy (async probe pool)
 
-This document describes the **prequal** load-balancing policy: a simplified async probe-pool push policy for the `lb` simulator. It is inspired by [Prequal (NSDI’24)](https://www.usenix.org/conference/nsdi24/presentation/wydrowski) but implements only the RIF-based async pool path described below.
+This document describes the **prequal** load-balancing policy: a simplified async probe-pool push policy for the `lb` and `ms` simulators. It is inspired by [Prequal (NSDI’24)](https://www.usenix.org/conference/nsdi24/presentation/wydrowski) but implements only the RIF-based async pool path described below.
 
 See also:
 
 - [lb-simulation.md](lb-simulation.md) — general `lb` simulator
-- [lb-vs-ms.md](lb-vs-ms.md) — feature comparison (`prequal` is `lb`-only)
+- [microservice-simulation.md](microservice-simulation.md) — general `ms` simulator
+- [lb-vs-ms.md](lb-vs-ms.md) — feature comparison
 
 ## Overview
 
@@ -18,7 +19,7 @@ See also:
 | Probing | None | `r_probe` probes per request (async, off critical path) |
 | Candidate memory | Subset / samples only | Reusable probe pool |
 | `--lb-subset-size` | Supported | **Rejected** if `> 0` |
-| `ms` simulator | Supported (shared policies) | **Not supported** |
+| `ms` simulator | Supported (shared policies) | Outbound `ReplicaBalancer` only (ingress stays P2C) |
 
 Probe RPCs use zero-delay nexosim messages (same delivery model as `release`). The current request never waits for probe replies; it uses the pool built from prior probes.
 
@@ -71,14 +72,16 @@ on_probe_at_server(lb_id):
 
 ## Wire protocol
 
-Types live in [`src/prequal.rs`](../src/prequal.rs):
+Shared types live in [`src/prequal.rs`](../src/prequal.rs):
 
 ```rust
-Probe { sender_id }                 // LB → server
-ProbeReply { server_idx, rif }      // server → LB
+Probe { sender_id }                 // LB → server / replica
+ProbeReply { server_idx, rif }      // server → LB (lb simulator)
 ```
 
-Server RIF is `queue.len() + in_flight`. Probes themselves do not count toward RIF.
+In `ms`, replicas reply with `ReplicaProbeReply { microservice_id, server_idx, rif }` so the caller `ReplicaBalancer` can update the correct per-target pool.
+
+Server/replica RIF is `queue.len() + in_flight`. Probes themselves do not count toward RIF.
 
 ## Architecture (`lb`)
 
@@ -106,6 +109,23 @@ flowchart LR
 
 Each client LB owns an independent candidate pool. Servers reply to the probing LB identified by `Probe.sender_id`.
 
+## Architecture (`ms`)
+
+In `ms`, prequal is **outbound-only** and decentralized (no shared `DownstreamBalancer`):
+
+- **EdgeBalancer** (user ingress): always **power-of-two**
+- **ReplicaBalancer** (per caller replica): one candidate pool **per downstream target microservice**; probes sibling replicas of that target
+
+```mermaid
+flowchart LR
+  User --> Edge["EdgeBalancer P2C"]
+  Edge --> R0["Entry replica"]
+  R0 --> RB["ReplicaBalancer prequal pool"]
+  RB -->|"Task"| D0["Downstream replica"]
+  RB -->|"Probe"| D1["Downstream replica"]
+  D1 -->|"ReplicaProbeReply RIF"| RB
+```
+
 ## Per-request lifecycle
 
 1. **`r_remove`** — accumulate `0.3`; while debt `≥ 1`, drop highest-RIF candidate (oldest on ties).
@@ -117,16 +137,21 @@ Each client LB owns an independent candidate pool. Servers reply to the probing 
 
 ## Incompatibilities
 
-- `--lb-subset-size > 0` — rejected
+- `--lb-subset-size > 0` — rejected (both `lb` and `ms`)
 - `--pull-policy` / `--approx-sched` — rejected (approx-only flags)
-- `ms` binary — `--lb-policy prequal` rejected at startup
 
-Express lane and work shedding remain allowed (push path), same as other push policies.
+Express lane and work shedding remain allowed on the `lb` push path, same as other push policies.
 
 ## CLI
 
 ```bash
 ./target/release/lb --lb-policy prequal --servers 100 --clients 10 --n 100000
+
+./target/release/ms \
+  --lb-policy prequal \
+  --callgraph tests/chain/3/callgraph.json \
+  --load-file tests/chain/3/load.json \
+  --n 100000
 ```
 
 ## Source map
@@ -135,14 +160,18 @@ Express lane and work shedding remain allowed (push path), same as other push po
 |------|------|
 | [`src/prequal.rs`](../src/prequal.rs) | Wire types, constants, `CandidatePool` |
 | [`src/policy.rs`](../src/policy.rs) | `LoadBalancePolicyKind::Prequal`, validation |
-| [`src/load_balancer.rs`](../src/load_balancer.rs) | Request path, probe replies |
-| [`src/server.rs`](../src/server.rs) | Probe handler / RIF reply |
-| [`src/lb_simulate.rs`](../src/lb_simulate.rs) | Probe port wiring |
+| [`src/load_balancer.rs`](../src/load_balancer.rs) | `lb` request path, probe replies |
+| [`src/server.rs`](../src/server.rs) | `lb` probe handler / RIF reply |
+| [`src/lb_simulate.rs`](../src/lb_simulate.rs) | `lb` probe port wiring |
+| [`src/microservice/balancer.rs`](../src/microservice/balancer.rs) | `ms` outbound prequal dispatch / probe replies |
+| [`src/microservice/replica.rs`](../src/microservice/replica.rs) | `ms` probe handler / RIF reply |
+| [`src/microservice/simulate.rs`](../src/microservice/simulate.rs) | `ms` probe port wiring |
 
 ## Tests
 
 ```bash
 cargo test --test lb_prequal
+cargo test --test ms_prequal
 cargo test --lib prequal
 ```
 
@@ -155,4 +184,3 @@ Full Prequal features intentionally omitted for this simulator version; document
 - **Alternating `r_remove`** — alternate removing oldest vs worst (this version always removes highest RIF)
 - **Idle background probing** — probe after max idle time when no requests arrive
 - **CLI-tunable parameters** — `r_probe`, `b_reuse`, `r_remove`, pool fraction (currently hardcoded)
-- **`ms` support** — outbound probe pools on replica balancers

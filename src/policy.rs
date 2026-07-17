@@ -182,10 +182,6 @@ impl LoadBalancePolicyKind {
         matches!(self, Self::Centralized | Self::Approx)
     }
 
-    pub fn is_lb_only(self) -> bool {
-        matches!(self, Self::Prequal)
-    }
-
     pub fn is_cl(self) -> bool {
         matches!(self, Self::Cl)
     }
@@ -275,16 +271,26 @@ mod tests {
     fn approx_policy_kind_is_approx() {
         assert!(LoadBalancePolicyKind::Approx.is_approx());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_approx());
-        assert!(!LoadBalancePolicyKind::Approx.is_lb_only());
-        assert!(!LoadBalancePolicyKind::Centralized.is_lb_only());
     }
 
     #[test]
-    fn prequal_policy_kind_is_lb_only() {
+    fn prequal_policy_kind_flags() {
         assert!(LoadBalancePolicyKind::Prequal.is_prequal());
-        assert!(LoadBalancePolicyKind::Prequal.is_lb_only());
         assert!(!LoadBalancePolicyKind::Prequal.is_pull_based());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_prequal());
+    }
+
+    #[test]
+    fn prequal_ingress_is_power_of_two() {
+        crate::rng::enter_run(Some(42));
+        let mut prequal = LoadBalancePolicyKind::Prequal.ingress_policy();
+        let loads = [3u32, 0, 7, 2];
+        let prequal_pick = prequal.select(&loads);
+
+        crate::rng::enter_run(Some(42));
+        let mut p2c = PowerOfTwoPolicy;
+        assert_eq!(p2c.select(&loads), prequal_pick);
+        crate::rng::exit_run();
     }
 
     #[test]

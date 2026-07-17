@@ -95,30 +95,3 @@ fn lb_rejects_pull_policy_with_prequal() {
     );
 }
 
-#[test]
-fn ms_rejects_prequal() {
-    let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");
-
-    let output = Command::new(&ms_binary)
-        .args([
-            "--format",
-            "json",
-            "--n",
-            "10",
-            "--callgraph",
-            "tests/chain/3/callgraph.json",
-            "--load-file",
-            "tests/chain/3/load.json",
-            "--lb-policy",
-            "prequal",
-        ])
-        .output()
-        .expect("failed to spawn ms");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("prequal is not supported by the ms simulator"),
-        "unexpected stderr: {stderr}"
-    );
-}

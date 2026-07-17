@@ -25,8 +25,8 @@ use super::replica::{Replica, ReplicaConfig};
 use super::trace::MsTracer;
 use crate::approx_audit::ApproxPullAudit;
 use crate::policy::{
-    validate_approx_sched, validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind,
-    PullPolicyKind,
+    validate_approx_sched, validate_prequal_subset, validate_pull_policy, ApproxSchedKind,
+    LoadBalancePolicyKind, PullPolicyKind,
 };
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
@@ -434,6 +434,7 @@ fn calculate_stats(
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     validate_pull_policy(args.lb_policy, args.pull_policy)?;
     validate_approx_sched(args.lb_policy, args.approx_sched, true)?;
+    validate_prequal_subset(args.lb_policy, args.lb_subset_size)?;
     if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
         return Err(
             "--lb-subset-size is not supported with --lb-policy cl, cl-lr, centralized, or corr".into(),
@@ -549,6 +550,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let use_shared_downstream = args.lb_policy.uses_shared_downstream();
     let is_approx = args.lb_policy.is_approx();
+    let is_prequal = args.lb_policy.is_prequal();
     let pull_audit = args.pull_audit.clone();
 
     let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
@@ -832,6 +834,27 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 }
             }
         }
+
+        if is_prequal {
+            for pending in &mut pending_replica_balancers {
+                for (target_microservice, indices) in &pending.downstream_indices {
+                    let probe_outputs = pending
+                        .balancer
+                        .probe_outputs
+                        .get_mut(target_microservice)
+                        .unwrap_or_else(|| {
+                            panic!("missing probe outputs for {target_microservice}")
+                        });
+                    for &server_idx in indices {
+                        if let Some(mb) =
+                            server_mailboxes.get(&(target_microservice.clone(), server_idx))
+                        {
+                            probe_outputs[server_idx].connect(Replica::probe, mb);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let mut return_outputs: HashMap<(String, usize), Output<ReplicaInput>> = HashMap::new();
@@ -896,6 +919,17 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             for (target, indices) in &pending.downstream_indices {
                 for &server_idx in indices {
                     approx_pull_targets.insert((target.clone(), server_idx));
+                }
+            }
+        }
+    }
+
+    let mut prequal_probe_targets: HashSet<(String, usize)> = HashSet::new();
+    if is_prequal {
+        for pending in &pending_replica_balancers {
+            for (target, indices) in &pending.downstream_indices {
+                for &server_idx in indices {
+                    prequal_probe_targets.insert((target.clone(), server_idx));
                 }
             }
         }
@@ -986,6 +1020,21 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 }
             }
 
+            let mut probe_reply_outputs = HashMap::new();
+            if is_prequal && prequal_probe_targets.contains(&(microservice_id.clone(), i)) {
+                for pending in &pending_replica_balancers {
+                    if pending
+                        .downstream_indices
+                        .get(microservice_id)
+                        .is_some_and(|indices| indices.contains(&i))
+                    {
+                        let mut output = Output::default();
+                        output.connect(ReplicaBalancer::probe_reply, &pending.mailbox);
+                        probe_reply_outputs.insert(pending.rb_id, output);
+                    }
+                }
+            }
+
             let replica = Replica::new(ReplicaConfig {
                 graph: graph.clone(),
                 microservice_id: microservice_id.clone(),
@@ -1002,6 +1051,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 tracer: tracer.clone(),
                 pull_output,
                 approx_pull_outputs,
+                probe_reply_outputs,
                 pull_audit: pull_audit.clone(),
                 scheduling: args.scheduling,
             });

@@ -1,6 +1,8 @@
 use clap::Parser;
 use lb::microservice::{MsArgs, MsStats, OutputFormat, print_human_stats, run};
-use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{
+    validate_prequal_subset, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::io::{self, Write};
@@ -48,11 +50,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
-    if cli.lb_policy.is_lb_only() {
-        return Err(
-            "--lb-policy prequal is not supported by the ms simulator".into(),
-        );
-    }
+    validate_prequal_subset(cli.lb_policy, cli.lb_subset_size)?;
     let args = MsArgs {
         callgraph: cli.callgraph,
         load_file: cli.load_file,

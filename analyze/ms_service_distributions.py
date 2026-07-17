@@ -32,6 +32,7 @@ from plot_cdfs import (  # noqa: E402
     ensure_release_binary,
     output_path_with_comment,
     run_ms_simulation,
+    validate_prequal_subset,
 )
 from plotting_primitive import (  # noqa: E402
     ACM_COMPACT_HALF,
@@ -700,6 +701,7 @@ def main() -> None:
         raise SystemExit("--pull-policy is only valid with --lb-policy approx")
     if args.approx_sched is not None and args.lb_policy != "approx":
         raise SystemExit("--approx-sched is only valid with --lb-policy approx")
+    validate_prequal_subset(args.lb_policy, args.lb_subset_size)
 
     binary = args.ms_binary
     if binary is None and not args.no_build:

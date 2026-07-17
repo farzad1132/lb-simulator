@@ -7,6 +7,10 @@ use crate::policy::ApproxSchedKind;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
+use crate::prequal::{
+    apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe, B_REUSE, R_PROBE,
+    R_REMOVE,
+};
 use crate::rng;
 use crate::scheduling::edf_insert_index;
 use hdrhistogram::Histogram;
@@ -91,6 +95,14 @@ pub struct ReplicaPull {
     pub target_microservice: String,
     pub server_idx: usize,
     pub request_id: u64,
+}
+
+/// Probe reply from a replica to a caller `ReplicaBalancer` (includes target id).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReplicaProbeReply {
+    pub microservice_id: String,
+    pub server_idx: usize,
+    pub rif: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -190,6 +202,11 @@ pub struct ReplicaBalancer {
     pull_intent_load: HashMap<String, Vec<u32>>,
     pub downstream_outputs: HashMap<String, Vec<Output<ReplicaInput>>>,
     pub pull_intent_outputs: HashMap<String, Vec<Output<PullIntent>>>,
+    pub probe_outputs: HashMap<String, Vec<Output<Probe>>>,
+    #[serde(skip)]
+    candidate_pools: HashMap<String, CandidatePool>,
+    #[serde(skip)]
+    r_remove_accum: HashMap<String, f64>,
     #[serde(skip)]
     pull_audit: Option<Arc<ApproxPullAudit>>,
     #[serde(skip)]
@@ -216,6 +233,9 @@ impl ReplicaBalancer {
         let mut outbound_queues = HashMap::new();
         let mut pull_intent_load = HashMap::new();
         let mut pull_intent_outputs = HashMap::new();
+        let mut probe_outputs = HashMap::new();
+        let mut candidate_pools = HashMap::new();
+        let mut r_remove_accum = HashMap::new();
         for (target, indices) in &downstream_indices {
             let n = graph_server_counts.get(target).copied().unwrap_or(0) as usize;
             debug_assert!(
@@ -226,6 +246,9 @@ impl ReplicaBalancer {
             outbound_queues.insert(target.clone(), VecDeque::new());
             pull_intent_load.insert(target.clone(), vec![0; n]);
             pull_intent_outputs.insert(target.clone(), (0..n).map(|_| Output::default()).collect());
+            probe_outputs.insert(target.clone(), (0..n).map(|_| Output::default()).collect());
+            candidate_pools.insert(target.clone(), CandidatePool::new(pool_cap(n)));
+            r_remove_accum.insert(target.clone(), 0.0);
         }
         let downstream_outputs = downstream_indices
             .keys()
@@ -246,6 +269,9 @@ impl ReplicaBalancer {
             pull_intent_load,
             downstream_outputs,
             pull_intent_outputs,
+            probe_outputs,
+            candidate_pools,
+            r_remove_accum,
             pull_audit,
             approx_sched,
             caller_lb_queue_occupancy,
@@ -382,6 +408,89 @@ impl ReplicaBalancer {
             .send(ReplicaInput::Upstream(call.hop))
             .await;
     }
+
+    async fn issue_probes(&mut self, target: &str, n_servers: usize) {
+        let targets = {
+            let Some(pool) = self.candidate_pools.get(target) else {
+                return;
+            };
+            sample_probe_targets(n_servers, pool, R_PROBE)
+        };
+        let Some(outputs) = self.probe_outputs.get_mut(target) else {
+            return;
+        };
+        let sender_id = self.rb_id;
+        for server_idx in targets {
+            if server_idx < outputs.len() {
+                outputs[server_idx]
+                    .send(Probe { sender_id })
+                    .await;
+            }
+        }
+    }
+
+    async fn dispatch_prequal(
+        &mut self,
+        mut call: OutboundCall,
+        target: &str,
+        cx: &Context<Self>,
+    ) {
+        let n_servers = self
+            .local_outbound_inflight
+            .get(target)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if n_servers == 0 {
+            return;
+        }
+
+        let global_idx = {
+            let accum = self.r_remove_accum.entry(target.to_string()).or_insert(0.0);
+            let pool = self
+                .candidate_pools
+                .get_mut(target)
+                .expect("missing prequal candidate pool");
+            apply_r_remove(pool, accum, R_REMOVE);
+            if let Some(server_idx) = pool.select_best() {
+                server_idx
+            } else {
+                rng::random_usize_range(0..n_servers)
+            }
+        };
+
+        if let Some(tracer) = &self.tracer {
+            tracer.log(
+                call.hop.trace,
+                cx.time(),
+                call.hop.request_id,
+                &format!(
+                    "ReplicaBalancer({}/{}) prequal outbound target={target} -> server={global_idx} endpoint={}",
+                    self.microservice_id, self.server_idx, call.hop.endpoint
+                ),
+            );
+        }
+
+        if let Some(caller) = &mut call.hop.caller {
+            caller.outbound_target_microservice = target.to_string();
+            caller.outbound_target_server = global_idx;
+        }
+
+        if let Some(inflight) = self.local_outbound_inflight.get_mut(target) {
+            inflight[global_idx] += 1;
+        }
+
+        let Some(outputs) = self.downstream_outputs.get_mut(target) else {
+            return;
+        };
+        outputs[global_idx]
+            .send(ReplicaInput::Upstream(call.hop))
+            .await;
+
+        if let Some(pool) = self.candidate_pools.get_mut(target) {
+            pool.after_dispatch(global_idx, B_REUSE);
+        }
+        self.issue_probes(target, n_servers).await;
+    }
 }
 
 #[Model]
@@ -435,6 +544,11 @@ impl ReplicaBalancer {
             Self::enqueue_outbound_call(queue, call, self.approx_sched);
             self.sample_outbound_queue_occupancy(cx.time());
             self.send_pull_intent_for_target(&target, request_id, deadline).await;
+            return;
+        }
+
+        if self.lb_policy.is_prequal() {
+            self.dispatch_prequal(call, &target, cx).await;
             return;
         }
 
@@ -575,6 +689,15 @@ impl ReplicaBalancer {
             if release.target_server < inflight.len() {
                 inflight[release.target_server] = inflight[release.target_server].saturating_sub(1);
             }
+        }
+    }
+
+    pub async fn probe_reply(&mut self, reply: ReplicaProbeReply, _cx: &Context<Self>) {
+        if !self.lb_policy.is_prequal() {
+            return;
+        }
+        if let Some(pool) = self.candidate_pools.get_mut(&reply.microservice_id) {
+            pool.ingest_reply(reply.server_idx, reply.rif);
         }
     }
 }

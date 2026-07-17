@@ -39,7 +39,18 @@ LB_POLICIES = (
     "prequal",
 )
 PULL_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
-MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx", "cl", "cl-lr", "corr")
+MS_LB_POLICIES = (
+    "random",
+    "power-of-two",
+    "least-request",
+    "round-robin",
+    "centralized",
+    "approx",
+    "prequal",
+    "cl",
+    "cl-lr",
+    "corr",
+)
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
 MS_APPROX_SCHED_POLICIES = ("fcfs", "edf")
 SIMULATORS = ("lb", "ms")
@@ -603,6 +614,12 @@ def main() -> None:
         return
 
     validate_ms_args(args)
+    if lb_policy not in MS_LB_POLICIES:
+        raise SystemExit(
+            f"--lb-policy {lb_policy} is not supported with --simulator ms "
+            f"(choices: {', '.join(MS_LB_POLICIES)})"
+        )
+    validate_prequal_subset(lb_policy, args.lb_subset_size)
     binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="ms")
     data = run_ms_simulation(
         binary,

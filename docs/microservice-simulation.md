@@ -110,8 +110,8 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Push routing to entry replicas; honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `centralized` / `corr` / `approx` |
-| **ReplicaBalancer** | one per server (default and `approx` policies) | Outbound only: push dispatch (default policies) or decentralized pull-intent queues (`approx`) |
+| **EdgeBalancer** | one per API | Push routing to entry replicas; honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `prequal` |
+| **ReplicaBalancer** | one per server (default, `approx`, and `prequal` policies) | Outbound only: push dispatch (default policies), decentralized pull-intent queues (`approx`), or async RIF probe pools (`prequal`) |
 | **DownstreamBalancer** | one per downstream target (`cl`, `cl-lr`, `centralized`, `corr`) | Shared outbound LB: push P2C (`cl`), push least-request (`cl-lr`), pull FCFS (`centralized`), or experimental push (`corr`) |
 | **OutboundGateway** | one per server (`cl`, `cl-lr`, `centralized`, `corr`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
 | **Replica** (server) | `replicas` per microservice | Configurable queue (`fifo` default, `edf` optional; see [scheduling.md](scheduling.md)), local processing, nested dispatch/return |
@@ -121,7 +121,7 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 A callgraph microservice node becomes:
 
 - `replicas` × `Replica` (server) models, each with `max_concurrency = cpu / replicas`
-- Default push policies and `approx`: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
+- Default push policies, `approx`, and `prequal`: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
 - `--lb-policy cl`, `cl-lr`, `centralized`, or `corr`: one `DownstreamBalancer` per downstream microservice target, plus `replicas` × `OutboundGateway` forwarders
 
 All interfaces of a microservice share the same server pool. The queue is per-server, not per-interface.
@@ -135,7 +135,7 @@ When `--lb-subset-size k > 0`, each balancer only routes among `min(k, replicas)
 - **EdgeBalancer:** client id is the API index (APIs sorted lexicographically).
 - **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
 
-**Not supported with `cl`, `cl-lr`, `centralized`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. All shared-layer policies require all replicas (ingress and outbound).
+**Not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. Shared-layer policies and prequal require all replicas (ingress and outbound).
 
 See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm.
 
@@ -195,7 +195,7 @@ The **EdgeBalancer** handles **user ingress only**. It always uses **push** rout
 | `--lb-policy` | EdgeBalancer algorithm |
 |---------------|------------------------|
 | `random`, `power-of-two`, `least-request`, `round-robin` | Honors `--lb-policy` |
-| `cl`, `cl-lr`, `centralized`, `corr`, `approx` | Always **power-of-two** (the flag changes outbound architecture only) |
+| `cl`, `cl-lr`, `centralized`, `corr`, `approx`, `prequal` | Always **power-of-two** (the flag changes outbound architecture only) |
 
 Outbound RPC routing and returns are handled separately (see below).
 
@@ -261,6 +261,12 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are **bound** by `request_id` by default (omit `--approx-sched`); optional **`--approx-sched fcfs`** or **`--approx-sched edf`** pops the queue head per `(rb_id, target)` — see [approx-policy.md § Unbound pull modes](approx-policy.md#unbound-pull-modes---approx-sched).
 
 Full documentation: **[approx-policy.md](approx-policy.md)**.
+
+### Prequal policy (decentralized outbound probe pool)
+
+`--lb-policy prequal` uses the same per-caller-replica `ReplicaBalancer` topology as default push policies (no shared `DownstreamBalancer`). Ingress stays push-based power-of-two on `EdgeBalancer`. Outbound routing uses an async RIF probe pool per downstream target, with the same hardcoded parameters as `lb` prequal (`r_probe=2`, `b_reuse=1`, `r_remove=0.3`, `pool_cap=ceil(0.25N)`). Replica RIF is `queue.len() + in_flight`. `--lb-subset-size > 0` is rejected.
+
+Full documentation: **[prequal-policy.md](prequal-policy.md)**.
 
 ### Corr policy (experimental)
 
@@ -420,12 +426,12 @@ cargo build --release
 | `--callgraph` | Path to callgraph JSON (required) |
 | `--load-file` | Path to per-API load JSON (`rps` + `slo_ms`) (required) |
 | `--n` | Total requests, split across APIs proportional to RPS |
-| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `approx` (decentralized outbound pull; requires `--pull-policy`), `cl` (shared push P2C outbound), `cl-lr` (shared push least-request outbound), `centralized` (shared pull FCFS outbound), or `corr` (experimental shared push outbound). For `cl` / `cl-lr` / `centralized` / `corr` / `approx`, ingress stays push P2C on `EdgeBalancer`. |
+| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `approx` (decentralized outbound pull; requires `--pull-policy`), `prequal` (decentralized outbound RIF probe pool), `cl` (shared push P2C outbound), `cl-lr` (shared push least-request outbound), `centralized` (shared pull FCFS outbound), or `corr` (experimental shared push outbound). For `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `prequal`, ingress stays push P2C on `EdgeBalancer`. |
 | `--pull-policy` | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | Omit for bound 1:1 pulls; `fcfs` or `edf` for unbound queue-head fulfillment; independent of `--scheduling` |
 | `--scheduling` | Server queue discipline at each replica: `fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
 | `--force-fixed-svc` | Use fixed service times from callgraph instead of sampling |
-| `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `cl`, `cl-lr`, `centralized`, or `corr`. |
+| `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr`. |
 | `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
 | `--seed` | Optional RNG seed for reproducible runs |
 | `--format` | `human` or `json` |

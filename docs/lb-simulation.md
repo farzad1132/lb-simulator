@@ -174,7 +174,7 @@ The load-balancing policy only chooses among servers in this subset.
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
 | **centralized** | `--lb-policy centralized` | Pull-based: global FIFO queue at one dispatcher; servers request work on spare capacity ([details below](#centralized-policy-pull-based)) |
 | **approx** | `--lb-policy approx` + `--pull-policy` | Decentralized pull: per-client FIFO queues; `--pull-policy` selects pull-intent target ([details in approx-policy.md](approx-policy.md)) |
-| **prequal** | `--lb-policy prequal` | Decentralized push with async RIF probe pool; rejects `--lb-subset-size > 0`; `lb` only ([details in prequal-policy.md](prequal-policy.md)) |
+| **prequal** | `--lb-policy prequal` | Decentralized push with async RIF probe pool; rejects `--lb-subset-size > 0` ([details in prequal-policy.md](prequal-policy.md)) |
 
 Local inflight tracking runs for all push policies so switching among them does not require different wiring. Under **approx**, server selection uses outstanding pull-intent counts instead of local inflight. Under **prequal**, routing uses the candidate pool of probed server RIF values (still updating `local_inflight` for release accounting).
 
