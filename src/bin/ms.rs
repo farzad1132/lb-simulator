@@ -48,6 +48,11 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
+    if cli.lb_policy.is_lb_only() {
+        return Err(
+            "--lb-policy prequal is not supported by the ms simulator".into(),
+        );
+    }
     let args = MsArgs {
         callgraph: cli.callgraph,
         load_file: cli.load_file,

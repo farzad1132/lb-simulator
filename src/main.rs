@@ -1,6 +1,9 @@
 use clap::{Parser, ValueEnum};
 use lb::lb_simulate::{LbArrivalDistribution, LbRunArgs, LbServiceDistribution, LbServiceStats};
-use lb::policy::{validate_approx_sched, validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{
+    validate_approx_sched, validate_prequal_subset, validate_pull_policy, ApproxSchedKind,
+    LoadBalancePolicyKind, PullPolicyKind,
+};
 use lb::subset::SubsetPolicyKind;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -566,6 +569,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     validate_pull_policy(args.lb_policy, args.pull_policy).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     validate_approx_sched(args.lb_policy, args.approx_sched, false).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    validate_prequal_subset(args.lb_policy, args.lb_subset_size)
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;
     let work_shedding = validate_work_shedding(&args)?;

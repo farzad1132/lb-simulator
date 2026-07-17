@@ -29,7 +29,15 @@ LB_REQUIRED_JSON_KEYS = ("utilization_pct", "e2e")
 MS_REQUIRED_JSON_KEYS = ("microservice_utilization_pct", "by_api")
 MS_API_REQUIRED_KEYS = ("e2e_ms", "slo_latency_ms", "unloaded_latency_p99_ms")
 SERVICE_MEAN = 1.0
-LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx")
+LB_POLICIES = (
+    "random",
+    "power-of-two",
+    "least-request",
+    "round-robin",
+    "centralized",
+    "approx",
+    "prequal",
+)
 PULL_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
 MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx", "cl", "cl-lr", "corr")
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
@@ -472,6 +480,11 @@ def validate_lb_args(args: argparse.Namespace) -> None:
         raise SystemExit("--slo is only valid with --simulator lb")
 
 
+def validate_prequal_subset(lb_policy: str, lb_subset_size: int) -> None:
+    if lb_policy == "prequal" and lb_subset_size > 0:
+        raise SystemExit("--lb-subset-size is not supported with --lb-policy prequal")
+
+
 def validate_ms_args(args: argparse.Namespace) -> None:
     if args.callgraph is None:
         raise SystemExit("--callgraph is required with --simulator ms")
@@ -556,6 +569,7 @@ def main() -> None:
 
     if args.simulator == "lb":
         validate_lb_args(args)
+        validate_prequal_subset(lb_policy, args.lb_subset_size)
         binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="lb")
         data = run_simulation(
             binary,

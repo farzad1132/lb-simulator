@@ -44,6 +44,10 @@ def uses_work_shedding(config: ExperimentConfig) -> bool:
 
 def validate_config(config: ExperimentConfig) -> None:
     label = config.label
+    if config.lb_policy == "prequal" and config.lb_subset_size > 0:
+        raise SystemExit(
+            f"config {label!r}: lb_subset_size is not supported with lb_policy prequal"
+        )
     if uses_pull_policy(config):
         if config.pull_policy is None:
             raise SystemExit(

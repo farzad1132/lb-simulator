@@ -174,8 +174,9 @@ The load-balancing policy only chooses among servers in this subset.
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
 | **centralized** | `--lb-policy centralized` | Pull-based: global FIFO queue at one dispatcher; servers request work on spare capacity ([details below](#centralized-policy-pull-based)) |
 | **approx** | `--lb-policy approx` + `--pull-policy` | Decentralized pull: per-client FIFO queues; `--pull-policy` selects pull-intent target ([details in approx-policy.md](approx-policy.md)) |
+| **prequal** | `--lb-policy prequal` | Decentralized push with async RIF probe pool; rejects `--lb-subset-size > 0`; `lb` only ([details in prequal-policy.md](prequal-policy.md)) |
 
-Local inflight tracking runs for all push policies so switching among them does not require different wiring. Under **approx**, server selection uses outstanding pull-intent counts instead of local inflight.
+Local inflight tracking runs for all push policies so switching among them does not require different wiring. Under **approx**, server selection uses outstanding pull-intent counts instead of local inflight. Under **prequal**, routing uses the candidate pool of probed server RIF values (still updating `local_inflight` for release accounting).
 
 ## Centralized policy (pull-based)
 
@@ -248,6 +249,12 @@ Decentralized pull with per-client FIFO queues, pull intents, and `--pull-policy
 Optional **`--approx-sched fcfs`**: pull fulfillment pops the oldest queued task and ignores `pull.request_id`; intents still carry bound ids on the wire. See [approx-policy.md § Unbound pull modes](approx-policy.md#unbound-pull-modes---approx-sched).
 
 Full documentation: **[approx-policy.md](approx-policy.md)** (wire protocol, counter semantics, intent binding, port wiring, `ms` differences, tests).
+
+## Prequal policy
+
+Decentralized push with an async candidate pool of probed server RIF values (`queue.len + in_flight`). Each request removes worst candidates at rate `r_remove`, selects the least-RIF candidate (or random if the pool is empty), then issues probes for future decisions. Subsetting is rejected. `lb` only.
+
+Full documentation: **[prequal-policy.md](prequal-policy.md)** (pseudocode, wire protocol, parameters, future work).
 
 ## Server concurrency model
 
@@ -384,13 +391,14 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Network latency between client, load balancer, and server
 - Failures, retries, or timeouts
 - Request cancellation
-- Cross–load-balancer load visibility (each LB sees only its own inflight counts)
-- Downstream queue depth or in-flight work from other balancers
+- Cross–load-balancer load visibility for non-prequal push policies (each LB sees only its own inflight counts)
+- Downstream queue depth for non-prequal push policies (prequal probes server `queue.len + in_flight`)
 - Connection limits or backpressure on load balancer outputs
 - Per-client partial observability under centralized (one global queue)
-- Subset routing under centralized
+- Subset routing under centralized or prequal
 - Load-probe-based server selection under centralized (assignment is pull-order FCFS)
 - Centralized policy in the `ms` simulator (per-downstream-target outbound pull layer)
+- Prequal policy in the `ms` simulator
 - Express lane with client `--lb-policy centralized`
 - Work shedding with client `--lb-policy centralized` or `approx`
 
@@ -399,9 +407,10 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 | File | Responsibility |
 |------|----------------|
 | `src/main.rs` | CLI, simulation assembly, arrival source, metrics |
-| `src/load_balancer.rs` | Routing, local inflight tracking, release handler, approx pull queues |
-| `src/server.rs` | Queueing, concurrency, completion, release notifications, approx pull drain |
-| `src/policy.rs` | Load-balancing algorithms, pull-policy validation |
+| `src/load_balancer.rs` | Routing, local inflight tracking, release handler, approx pull queues, prequal pool |
+| `src/server.rs` | Queueing, concurrency, completion, release notifications, approx pull drain, prequal probes |
+| `src/policy.rs` | Load-balancing algorithms, pull-policy / prequal validation |
 | `src/approx.rs` | `PullIntent` / `PullRequest` wire types |
+| `src/prequal.rs` | `Probe` / `ProbeReply` wire types and candidate pool |
 
-Approx policy details: [approx-policy.md](approx-policy.md).
+Approx policy details: [approx-policy.md](approx-policy.md). Prequal: [prequal-policy.md](prequal-policy.md).

@@ -597,6 +597,17 @@ def main() -> None:
     else:
         raise SystemExit(f"unsupported series parameter: {args.series}")
 
+    if "prequal" in series_values:
+        if args.sweep == "lb-subset-size":
+            raise SystemExit(
+                "--lb-policy prequal is incompatible with --sweep lb-subset-size"
+            )
+        fixed_subset = fixed_param_value(args, "lb-subset-size")
+        if int(fixed_subset) > 0:
+            raise SystemExit(
+                "--lb-subset-size is not supported with --lb-policy prequal"
+            )
+
     if args.no_build:
         binary = args.binary or DEFAULT_BINARY
     else:

@@ -125,6 +125,8 @@ def run_all_simulations(args: argparse.Namespace, binary: Path) -> list[tuple[st
         raise SystemExit("--pull-policy is required when --lb-policy approx")
     if args.lb_policy != "approx" and args.pull_policy is not None:
         raise SystemExit("--pull-policy is only valid with --lb-policy approx")
+    if args.lb_policy == "prequal" and args.lb_subset_size > 0:
+        raise SystemExit("--lb-subset-size is not supported with --lb-policy prequal")
     results: list[tuple[str, dict]] = []
     for service_dist, arrival, title, modes, probs in DIST_SPECS:
         data = run_simulation(

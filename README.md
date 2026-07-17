@@ -31,11 +31,12 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 - **centralized** — pull-based: one global queue at a single dispatcher; servers request work when they have spare capacity (`lb`: flat pool; ignores `--lb-subset-size`; incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target); see [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer).
 - **approx** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); optional **`--approx-sched fcfs`** or **`--approx-sched edf`** (`ms`) for unbound queue-head pulls; see [docs/approx-policy.md](docs/approx-policy.md)
+- **prequal** — decentralized push with async RIF probe pool (`lb` only; `--lb-subset-size > 0` rejected); see [docs/prequal-policy.md](docs/prequal-policy.md)
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **cl-lr** — shared push least-request outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **corr** — experimental shared push outbound layer (`ms` only; same topology as `cl`; ingress stays P2C; `--lb-subset-size > 0` rejected)
 
-Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only; not supported with `cl`, `cl-lr`, `centralized`, or `corr` in `ms`). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
+Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only; not supported with `prequal` in `lb`, or with `cl`, `cl-lr`, `centralized`, or `corr` in `ms`). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
 
 ## Metrics
 
@@ -181,10 +182,10 @@ Options:
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server (CPU cores) |
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`, `prequal`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs` for unbound FCFS queue-head fulfillment |
-| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
+| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers; not supported with `prequal`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--slo` | (none) | SLO latency threshold in seconds; when set, reports P(latency > SLO) |
@@ -254,10 +255,10 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`, `prequal`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | (omit) | With `approx`: pass `fcfs` or `edf` to the simulator subprocess |
-| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
+| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all; not supported with `prequal`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible simulation |
 | `--slo` | (none) | SLO latency threshold in seconds (marked on CDF when set) |
@@ -373,7 +374,7 @@ python plot_lb_sweep.py --sweep load --servers 10 --n 100000
 | `--service-dist` | `exponential` | Service distribution (`exponential`, `constant`, or `bimodal`) |
 | `--service-modes` | (none) | Two exponential means for bimodal |
 | `--service-mode-probs` | (none) | Two mode probabilities for bimodal |
-| `--lb-policy` | all five policies | Policies to compare (series lines) |
+| `--lb-policy` | all lb policies | Policies to compare (series lines); includes `prequal` |
 | `--slo` | (none) | SLO threshold in seconds (required for `--metric slo-violation`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--format` | `compact` | `human` (summary + e2e percentiles) or `compact` (one line per run) |

@@ -99,6 +99,15 @@ impl LoadBalancePolicy for ApproxPolicy {
     }
 }
 
+pub struct PrequalPolicy;
+
+impl LoadBalancePolicy for PrequalPolicy {
+    fn select(&mut self, loads: &[u32]) -> usize {
+        let _ = loads;
+        0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum PullPolicyKind {
     Random,
@@ -130,6 +139,8 @@ pub enum LoadBalancePolicyKind {
     Centralized,
     #[value(name = "approx")]
     Approx,
+    #[value(name = "prequal")]
+    Prequal,
     #[value(name = "cl")]
     Cl,
     #[value(name = "cl-lr")]
@@ -150,6 +161,7 @@ impl LoadBalancePolicyKind {
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized => Box::new(CentralizedPolicy),
             Self::Approx => Box::new(ApproxPolicy),
+            Self::Prequal => Box::new(PrequalPolicy),
             Self::Cl | Self::ClLr | Self::Corr => Box::new(PowerOfTwoPolicy),
         }
     }
@@ -162,12 +174,16 @@ impl LoadBalancePolicyKind {
         matches!(self, Self::Approx)
     }
 
+    pub fn is_prequal(self) -> bool {
+        matches!(self, Self::Prequal)
+    }
+
     pub fn is_pull_based(self) -> bool {
         matches!(self, Self::Centralized | Self::Approx)
     }
 
     pub fn is_lb_only(self) -> bool {
-        false
+        matches!(self, Self::Prequal)
     }
 
     pub fn is_cl(self) -> bool {
@@ -191,7 +207,7 @@ impl LoadBalancePolicyKind {
 
     pub fn ingress_policy(self) -> Box<dyn LoadBalancePolicy> {
         match self {
-            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr | Self::Approx => {
+            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr | Self::Approx | Self::Prequal => {
                 Box::new(PowerOfTwoPolicy)
             }
             other => other.build(),
@@ -235,6 +251,16 @@ pub fn validate_approx_sched(
     Ok(())
 }
 
+pub fn validate_prequal_subset(
+    lb_policy: LoadBalancePolicyKind,
+    lb_subset_size: u32,
+) -> Result<(), String> {
+    if lb_policy.is_prequal() && lb_subset_size > 0 {
+        return Err("--lb-subset-size is not supported with --lb-policy prequal".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +277,22 @@ mod tests {
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_approx());
         assert!(!LoadBalancePolicyKind::Approx.is_lb_only());
         assert!(!LoadBalancePolicyKind::Centralized.is_lb_only());
+    }
+
+    #[test]
+    fn prequal_policy_kind_is_lb_only() {
+        assert!(LoadBalancePolicyKind::Prequal.is_prequal());
+        assert!(LoadBalancePolicyKind::Prequal.is_lb_only());
+        assert!(!LoadBalancePolicyKind::Prequal.is_pull_based());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_prequal());
+    }
+
+    #[test]
+    fn validate_prequal_subset_rejects_nonzero() {
+        assert!(validate_prequal_subset(LoadBalancePolicyKind::Prequal, 0).is_ok());
+        let err = validate_prequal_subset(LoadBalancePolicyKind::Prequal, 3).unwrap_err();
+        assert!(err.contains("--lb-subset-size is not supported"));
+        assert!(validate_prequal_subset(LoadBalancePolicyKind::PowerOfTwo, 3).is_ok());
     }
 
     #[test]

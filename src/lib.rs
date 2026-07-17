@@ -5,6 +5,7 @@ pub mod lb_simulate;
 pub mod load_balancer;
 pub mod microservice;
 pub mod policy;
+pub mod prequal;
 pub mod rng;
 pub mod scheduling;
 pub mod server;

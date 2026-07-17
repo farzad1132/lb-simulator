@@ -63,6 +63,7 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("P2C", "power-of-two", 100, 10),
     ExperimentConfig("LR", "least-request", 10, 11),
     ExperimentConfig("R", "random", 10, 11),
+    ExperimentConfig("Prequal", "prequal", 10, 10),
 ]
 
 

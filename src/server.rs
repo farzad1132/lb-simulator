@@ -1,5 +1,6 @@
 use crate::approx::{PullIntent, PullRequest};
 use crate::lb_pull_audit::LbPullAudit;
+use crate::prequal::{Probe, ProbeReply};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use nexosim::simulation::EventKey;
@@ -148,6 +149,8 @@ pub struct Server {
     #[serde(skip)]
     shed_outputs: Vec<Output<Task>>,
     #[serde(skip)]
+    probe_reply_outputs: Vec<Output<ProbeReply>>,
+    #[serde(skip)]
     pending_sheds: Vec<(MonotonicTime, PendingShed)>,
 }
 
@@ -184,6 +187,7 @@ impl Server {
             express_lb_id,
             pending_evictions: Vec::new(),
             shed_outputs: Vec::new(),
+            probe_reply_outputs: Vec::new(),
             pending_sheds: Vec::new(),
         }
     }
@@ -194,6 +198,14 @@ impl Server {
 
     pub fn set_shed_outputs(&mut self, shed_outputs: Vec<Output<Task>>) {
         self.shed_outputs = shed_outputs;
+    }
+
+    pub fn set_probe_reply_outputs(&mut self, probe_reply_outputs: Vec<Output<ProbeReply>>) {
+        self.probe_reply_outputs = probe_reply_outputs;
+    }
+
+    fn rif(&self) -> u32 {
+        self.queue.len() as u32 + self.in_flight
     }
 
     fn depth_exceeds(&self, th: u32) -> bool {
@@ -407,6 +419,20 @@ impl Server {
             self.apply_enqueue_eviction(task_start, cx).await;
             self.apply_work_shedding_on_enqueue(task_start, cx).await;
         }
+    }
+
+    pub async fn probe(&mut self, probe: Probe, _cx: &Context<Self>) {
+        let rif = self.rif();
+        let server_idx = self.server_idx;
+        let Some(output) = self.probe_reply_outputs.get_mut(probe.sender_id) else {
+            return;
+        };
+        output
+            .send(ProbeReply {
+                server_idx,
+                rif,
+            })
+            .await;
     }
 
     pub async fn receive_pull_intent(&mut self, intent: PullIntent, _cx: &Context<Self>) {

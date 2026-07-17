@@ -4,6 +4,11 @@ use crate::policy::ApproxSchedKind;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
+use crate::prequal::{
+    apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe, ProbeReply, B_REUSE,
+    R_PROBE, R_REMOVE,
+};
+use crate::rng;
 use crate::server::Task;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
@@ -39,8 +44,14 @@ pub struct LoadBalancer {
     approx_sched: Option<ApproxSchedKind>,
     #[serde(skip)]
     pull_audit: Option<Arc<LbPullAudit>>,
+    #[serde(skip)]
+    candidate_pool: CandidatePool,
+    #[serde(skip)]
+    r_remove_accum: f64,
+    n_servers: usize,
     pub outputs: Vec<Output<Task>>,
     pub pull_intent_outputs: Vec<Output<PullIntent>>,
+    pub probe_outputs: Vec<Output<Probe>>,
 }
 
 impl LoadBalancer {
@@ -68,9 +79,46 @@ impl LoadBalancer {
             preserve_client_metadata,
             approx_sched,
             pull_audit,
+            candidate_pool: CandidatePool::new(pool_cap(n_servers)),
+            r_remove_accum: 0.0,
+            n_servers,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
             pull_intent_outputs: (0..n_servers).map(|_| Output::default()).collect(),
+            probe_outputs: (0..n_servers).map(|_| Output::default()).collect(),
         }
+    }
+
+    async fn issue_probes(&mut self) {
+        let targets = sample_probe_targets(self.n_servers, &self.candidate_pool, R_PROBE);
+        for server_idx in targets {
+            self.probe_outputs[server_idx]
+                .send(Probe {
+                    sender_id: self.lb_id,
+                })
+                .await;
+        }
+    }
+
+    async fn dispatch_prequal(&mut self, mut task: Task) {
+        apply_r_remove(&mut self.candidate_pool, &mut self.r_remove_accum, R_REMOVE);
+
+        let global_idx = if let Some(server_idx) = self.candidate_pool.select_best() {
+            server_idx
+        } else if self.n_servers == 0 {
+            return;
+        } else {
+            rng::random_usize_range(0..self.n_servers)
+        };
+
+        self.local_inflight[global_idx] += 1;
+        if !self.preserve_client_metadata {
+            task.lb_id = self.lb_id;
+            task.origin_server_idx = global_idx;
+        }
+        self.outputs[global_idx].send(task).await;
+
+        self.candidate_pool.after_dispatch(global_idx, B_REUSE);
+        self.issue_probes().await;
     }
 
     async fn dispatch_to_server(&mut self, server_idx: usize, mut task: Task) {
@@ -139,6 +187,11 @@ impl LoadBalancer {
             }
             self.queue.push(task);
             self.send_pull_intent(request_id).await;
+            return;
+        }
+
+        if self.lb_policy.is_prequal() {
+            self.dispatch_prequal(task).await;
             return;
         }
 
@@ -246,6 +299,14 @@ impl LoadBalancer {
 
     pub async fn release(&mut self, server_idx: usize, _cx: &Context<Self>) {
         self.local_inflight[server_idx] = self.local_inflight[server_idx].saturating_sub(1);
+    }
+
+    pub async fn probe_reply(&mut self, reply: ProbeReply, _cx: &Context<Self>) {
+        if !self.lb_policy.is_prequal() {
+            return;
+        }
+        self.candidate_pool
+            .ingest_reply(reply.server_idx, reply.rif);
     }
 }
 

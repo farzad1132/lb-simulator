@@ -608,6 +608,7 @@ fn run_push_simulation(
     };
 
     let is_approx = args.lb_policy.is_approx();
+    let is_prequal = args.lb_policy.is_prequal();
     let pull_audit = args.pull_audit.clone();
 
     for i in 0..n_clients {
@@ -645,6 +646,9 @@ fn run_push_simulation(
             if is_approx {
                 load_balancer.pull_intent_outputs[j]
                     .connect(Server::receive_pull_intent, &server_mailboxes[j]);
+            }
+            if is_prequal {
+                load_balancer.probe_outputs[j].connect(Server::probe, &server_mailboxes[j]);
             }
         }
         let lb_mailbox = Mailbox::new();
@@ -758,6 +762,14 @@ fn run_push_simulation(
                 pull_outputs[lb_id].connect(LoadBalancer::pull, lb_address);
             }
             server.set_pull_outputs(pull_outputs);
+        }
+        if is_prequal && !is_express {
+            let mut probe_reply_outputs: Vec<_> =
+                (0..n_clients).map(|_| Output::default()).collect();
+            for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
+                probe_reply_outputs[lb_id].connect(LoadBalancer::probe_reply, lb_address);
+            }
+            server.set_probe_reply_outputs(probe_reply_outputs);
         }
         if args.express_lane.is_some() && !is_express {
             if let Some(express_addr) = express_lb_address.as_ref() {
