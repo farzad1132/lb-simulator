@@ -30,8 +30,7 @@ fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsA
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: None,
-        no_bind: false,
-        approx_sched: SchedulingPolicyKind::Fifo,
+        approx_sched: None,
     }
 }
 
@@ -141,8 +140,7 @@ fn f1_nested_callgraph_completes() {
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: None,
-        no_bind: false,
-        approx_sched: SchedulingPolicyKind::Fifo,
+        approx_sched: None,
     })
     .unwrap()
     .expect("stats");

@@ -118,12 +118,12 @@ Custom fixtures and policy variants:
   --n 50000 --seed 7 \
   --output output/ms_service_distributions_chain3.pdf
 
-# approx no-bind with outbound EDF queue scheduling
+# approx unbound with outbound EDF queue scheduling
 .venv/bin/python analyze/ms_service_distributions.py \
   --callgraph tests/chain/3/callgraph.json \
   --load-file tests/chain/3/load.json \
   --lb-policy approx --pull-policy least-request \
-  --no-bind --approx-sched edf \
+  --approx-sched edf \
   --comment approx-lr-nb-edf
 ```
 

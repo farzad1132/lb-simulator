@@ -1,5 +1,5 @@
 use lb::microservice::{ApproxPullAudit, MsArgs, OutputFormat, run};
-use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ fn approx_args(
     load_file: PathBuf,
     n: u32,
     seed: u64,
-    approx_sched: SchedulingPolicyKind,
+    approx_sched: ApproxSchedKind,
     audit: Option<std::sync::Arc<ApproxPullAudit>>,
 ) -> MsArgs {
     MsArgs {
@@ -31,8 +31,7 @@ fn approx_args(
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: audit,
-        no_bind: true,
-        approx_sched,
+        approx_sched: Some(approx_sched),
     }
 }
 
@@ -51,7 +50,7 @@ fn ms_no_bind_edf_trace_invariants() {
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        SchedulingPolicyKind::Edf,
+        ApproxSchedKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
@@ -69,7 +68,7 @@ fn ms_no_bind_edf_pulls_earliest_deadline_not_intent_id() {
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        SchedulingPolicyKind::Edf,
+        ApproxSchedKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
@@ -105,7 +104,7 @@ fn ms_no_bind_edf_multi_caller_independent() {
         root.join("tests/fanin/multi/load.json"),
         400,
         7,
-        SchedulingPolicyKind::Edf,
+        ApproxSchedKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
@@ -126,7 +125,7 @@ fn ms_no_bind_edf_differs_from_fcfs() {
         load_file.clone(),
         500,
         99,
-        SchedulingPolicyKind::Fifo,
+        ApproxSchedKind::Fcfs,
         Some(fcfs_audit.clone()),
     );
     run_with_audit(&fcfs_args);
@@ -138,7 +137,7 @@ fn ms_no_bind_edf_differs_from_fcfs() {
         load_file,
         500,
         99,
-        SchedulingPolicyKind::Edf,
+        ApproxSchedKind::Edf,
         Some(edf_audit.clone()),
     );
     run_with_audit(&edf_args);

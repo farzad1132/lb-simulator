@@ -258,7 +258,7 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 
 ### Approx policy (decentralized outbound pull)
 
-Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are **bound** by `request_id` by default; optional **`--no-bind`** pops the queue head (FCFS by default, or EDF with **`--approx-sched edf`**) per `(rb_id, target)` — see [approx-policy.md § No-bind mode](approx-policy.md#no-bind-mode---no-bind).
+Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are **bound** by `request_id` by default (omit `--approx-sched`); optional **`--approx-sched fcfs`** or **`--approx-sched edf`** pops the queue head per `(rb_id, target)` — see [approx-policy.md § Unbound pull modes](approx-policy.md#unbound-pull-modes---approx-sched).
 
 Full documentation: **[approx-policy.md](approx-policy.md)**.
 
@@ -422,8 +422,7 @@ cargo build --release
 | `--n` | Total requests, split across APIs proportional to RPS |
 | `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `approx` (decentralized outbound pull; requires `--pull-policy`), `cl` (shared push P2C outbound), `cl-lr` (shared push least-request outbound), `centralized` (shared pull FCFS outbound), or `corr` (experimental shared push outbound). For `cl` / `cl-lr` / `centralized` / `corr` / `approx`, ingress stays push P2C on `EdgeBalancer`. |
 | `--pull-policy` | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--no-bind` | With `approx`: fulfill outbound pulls by popping queue head (ignore `pull.request_id`); FCFS by default |
-| `--approx-sched` | Outbound approx queue discipline with `--no-bind`: `fifo` (default) or `edf`; independent of `--scheduling` |
+| `--approx-sched` | Omit for bound 1:1 pulls; `fcfs` or `edf` for unbound queue-head fulfillment; independent of `--scheduling` |
 | `--scheduling` | Server queue discipline at each replica: `fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
 | `--force-fixed-svc` | Use fixed service times from callgraph instead of sampling |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `cl`, `cl-lr`, `centralized`, or `corr`. |

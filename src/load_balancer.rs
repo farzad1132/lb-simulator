@@ -1,5 +1,6 @@
 use crate::approx::{fatal_pull_abort, PullIntent, PullRequest};
 use crate::lb_pull_audit::LbPullAudit;
+use crate::policy::ApproxSchedKind;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
@@ -35,7 +36,7 @@ pub struct LoadBalancer {
     #[serde(skip)]
     next_task_id: u64,
     preserve_client_metadata: bool,
-    no_bind: bool,
+    approx_sched: Option<ApproxSchedKind>,
     #[serde(skip)]
     pull_audit: Option<Arc<LbPullAudit>>,
     pub outputs: Vec<Output<Task>>,
@@ -50,7 +51,7 @@ impl LoadBalancer {
         server_indices: Vec<usize>,
         lb_id: usize,
         preserve_client_metadata: bool,
-        no_bind: bool,
+        approx_sched: Option<ApproxSchedKind>,
         pull_audit: Option<Arc<LbPullAudit>>,
     ) -> Self {
         Self {
@@ -65,7 +66,7 @@ impl LoadBalancer {
             pull_intent_load: vec![0; n_servers],
             next_task_id: 0,
             preserve_client_metadata,
-            no_bind,
+            approx_sched,
             pull_audit,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
             pull_intent_outputs: (0..n_servers).map(|_| Output::default()).collect(),
@@ -157,7 +158,7 @@ impl LoadBalancer {
     pub async fn pull(&mut self, pull: PullRequest, _cx: &Context<Self>) {
         if self.lb_policy.is_approx() {
             let server_idx = pull.server_idx;
-            if self.no_bind {
+            if self.approx_sched.is_some() {
                 if self.queue.is_empty() {
                     fatal_pull_abort(
                         "lb",
@@ -253,7 +254,7 @@ mod tests {
     use super::*;
     use nexosim::time::MonotonicTime;
 
-    fn test_lb(no_bind: bool) -> LoadBalancer {
+    fn test_lb(approx_sched: Option<ApproxSchedKind>) -> LoadBalancer {
         LoadBalancer::new(
             LoadBalancePolicyKind::Approx.build(),
             LoadBalancePolicyKind::Approx,
@@ -261,7 +262,7 @@ mod tests {
             vec![0, 1],
             0,
             false,
-            no_bind,
+            approx_sched,
             None,
         )
     }
@@ -274,7 +275,7 @@ mod tests {
 
     #[test]
     fn bound_pull_removes_matching_task_not_front() {
-        let mut lb = test_lb(false);
+        let mut lb = test_lb(None);
         lb.queue.push(task_with_id(1));
         lb.queue.push(task_with_id(2));
         lb.queue.push(task_with_id(3));
@@ -287,7 +288,7 @@ mod tests {
 
     #[test]
     fn no_bind_pull_takes_oldest_not_bound_id() {
-        let mut lb = test_lb(true);
+        let mut lb = test_lb(Some(ApproxSchedKind::Fcfs));
         lb.queue.push(task_with_id(1));
         lb.queue.push(task_with_id(2));
         lb.queue.push(task_with_id(3));

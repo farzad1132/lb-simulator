@@ -2,7 +2,12 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::rng;
-use crate::scheduling::SchedulingPolicyKind;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+pub enum ApproxSchedKind {
+    Fcfs,
+    Edf,
+}
 
 pub trait LoadBalancePolicy: Send {
     fn select(&mut self, loads: &[u32]) -> usize;
@@ -213,29 +218,19 @@ pub fn validate_pull_policy(
     }
 }
 
-pub fn validate_no_bind(
-    lb_policy: LoadBalancePolicyKind,
-    no_bind: bool,
-) -> Result<(), String> {
-    if no_bind && !lb_policy.is_approx() {
-        return Err("--no-bind is only valid with --lb-policy approx".into());
-    }
-    Ok(())
-}
-
 pub fn validate_approx_sched(
     lb_policy: LoadBalancePolicyKind,
-    no_bind: bool,
-    approx_sched: SchedulingPolicyKind,
+    approx_sched: Option<ApproxSchedKind>,
+    allow_edf: bool,
 ) -> Result<(), String> {
-    if approx_sched != SchedulingPolicyKind::Edf {
+    let Some(approx_sched) = approx_sched else {
         return Ok(());
-    }
+    };
     if !lb_policy.is_approx() {
-        return Err("--approx-sched edf is only valid with --lb-policy approx".into());
+        return Err("--approx-sched is only valid with --lb-policy approx".into());
     }
-    if !no_bind {
-        return Err("--approx-sched edf requires --no-bind".into());
+    if approx_sched == ApproxSchedKind::Edf && !allow_edf {
+        return Err("--approx-sched edf is only supported by the ms simulator".into());
     }
     Ok(())
 }
@@ -346,34 +341,33 @@ mod tests {
     }
 
     #[test]
-    fn validate_approx_sched_edf_requires_approx_and_no_bind() {
-        use crate::scheduling::SchedulingPolicyKind;
-
+    fn validate_approx_sched_requires_approx_and_ms_for_edf() {
         assert!(validate_approx_sched(
             LoadBalancePolicyKind::Approx,
+            Some(ApproxSchedKind::Edf),
             true,
-            SchedulingPolicyKind::Edf
         )
         .is_ok());
         assert!(validate_approx_sched(
             LoadBalancePolicyKind::Approx,
+            Some(ApproxSchedKind::Fcfs),
             false,
-            SchedulingPolicyKind::Fifo
         )
         .is_ok());
-        let err = validate_approx_sched(
-            LoadBalancePolicyKind::Approx,
-            false,
-            SchedulingPolicyKind::Edf,
-        )
-        .unwrap_err();
-        assert!(err.contains("--no-bind"));
+        assert!(validate_approx_sched(LoadBalancePolicyKind::Approx, None, false).is_ok());
         let err = validate_approx_sched(
             LoadBalancePolicyKind::PowerOfTwo,
-            true,
-            SchedulingPolicyKind::Edf,
+            Some(ApproxSchedKind::Fcfs),
+            false,
         )
         .unwrap_err();
         assert!(err.contains("approx"));
+        let err = validate_approx_sched(
+            LoadBalancePolicyKind::Approx,
+            Some(ApproxSchedKind::Edf),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("ms simulator"));
     }
 }

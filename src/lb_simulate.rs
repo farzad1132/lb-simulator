@@ -1,6 +1,6 @@
 use crate::lb_pull_audit::LbPullAudit;
 use crate::load_balancer::LoadBalancer;
-use crate::policy::{LoadBalancePolicyKind, PullPolicyKind};
+use crate::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use crate::server::{
     DispatchMode, ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task,
 };
@@ -76,7 +76,7 @@ pub struct LbRunArgs {
     pub lb_subset_policy: SubsetPolicyKind,
     pub clients: u32,
     pub verbose: u8,
-    pub no_bind: bool,
+    pub approx_sched: Option<ApproxSchedKind>,
     pub pull_audit: Option<Arc<LbPullAudit>>,
     pub express_lane: Option<ExpressLaneConfig>,
     pub work_shedding: Option<Duration>,
@@ -496,7 +496,7 @@ fn run_centralized_simulation(
         server_indices,
         0,
         false,
-        false,
+        None,
         None,
     );
     for j in 0..n_servers {
@@ -637,7 +637,7 @@ fn run_push_simulation(
             server_indices,
             i,
             false,
-            args.no_bind,
+            args.approx_sched,
             pull_audit.clone(),
         );
         for j in 0..client_lb_pool {
@@ -667,7 +667,7 @@ fn run_push_simulation(
             express_indices,
             express_lb_id,
             true,
-            false,
+            None,
             None,
         );
         for j in n_regular..n_servers {

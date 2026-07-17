@@ -1,5 +1,5 @@
 use lb::microservice::{ApproxPullAudit, MsArgs, OutputFormat, run};
-use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ fn approx_args(
     load_file: PathBuf,
     n: u32,
     seed: u64,
-    no_bind: bool,
+    approx_sched: Option<ApproxSchedKind>,
     pull_policy: PullPolicyKind,
     audit: Option<std::sync::Arc<ApproxPullAudit>>,
 ) -> MsArgs {
@@ -32,8 +32,7 @@ fn approx_args(
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: audit,
-        no_bind,
-        approx_sched: SchedulingPolicyKind::Fifo,
+        approx_sched,
     }
 }
 
@@ -52,7 +51,7 @@ fn ms_no_bind_trace_invariants() {
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        true,
+        Some(ApproxSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         Some(audit.clone()),
     );
@@ -71,7 +70,7 @@ fn ms_no_bind_pulls_oldest_not_intent_id() {
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        true,
+        Some(ApproxSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         Some(audit.clone()),
     );
@@ -108,7 +107,7 @@ fn ms_no_bind_multi_caller_independent_fcfs() {
         root.join("tests/fanin/multi/load.json"),
         400,
         7,
-        true,
+        Some(ApproxSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         Some(audit.clone()),
     );
@@ -127,7 +126,7 @@ fn ms_bound_pull_trace_regression() {
         root.join("tests/chain/3/load.json"),
         200,
         42,
-        false,
+        None,
         PullPolicyKind::LeastRequest,
         Some(audit.clone()),
     );

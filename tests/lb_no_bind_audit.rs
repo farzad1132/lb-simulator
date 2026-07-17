@@ -1,6 +1,6 @@
 use lb::lb_pull_audit::LbPullAudit;
 use lb::lb_simulate::{LbArrivalDistribution, LbRunArgs, LbServiceDistribution};
-use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::rng;
 use lb::subset::SubsetPolicyKind;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 fn approx_args(
     n: u32,
     _seed: u64,
-    no_bind: bool,
+    approx_sched: Option<ApproxSchedKind>,
     pull_policy: PullPolicyKind,
     servers: u32,
     concurrency: u32,
@@ -31,7 +31,7 @@ fn approx_args(
         lb_subset_policy: SubsetPolicyKind::Deterministic,
         clients,
         verbose: 0,
-        no_bind,
+        approx_sched,
         pull_audit: audit,
         express_lane: None,
         work_shedding: None,
@@ -53,7 +53,7 @@ fn lb_no_bind_trace_invariants() {
     let args = approx_args(
         200,
         99,
-        true,
+        Some(ApproxSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         2,
         2,
@@ -73,7 +73,7 @@ fn lb_no_bind_pulls_oldest_not_intent_id() {
     let args = approx_args(
         200,
         99,
-        true,
+        Some(ApproxSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         2,
         2,
@@ -111,7 +111,7 @@ fn lb_no_bind_multi_client_independent_fcfs() {
     let args = approx_args(
         200,
         99,
-        true,
+        Some(ApproxSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         2,
         2,
@@ -131,7 +131,7 @@ fn lb_bound_pull_trace_regression() {
     let args = approx_args(
         100,
         42,
-        false,
+        None,
         PullPolicyKind::LeastRequest,
         2,
         1,

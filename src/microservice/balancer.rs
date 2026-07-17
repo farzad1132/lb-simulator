@@ -3,11 +3,12 @@ use super::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::{fatal_pull_abort, PullIntent};
 use crate::approx_audit::ApproxPullAudit;
+use crate::policy::ApproxSchedKind;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
 use crate::rng;
-use crate::scheduling::{edf_insert_index, SchedulingPolicyKind};
+use crate::scheduling::edf_insert_index;
 use hdrhistogram::Histogram;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
@@ -192,9 +193,7 @@ pub struct ReplicaBalancer {
     #[serde(skip)]
     pull_audit: Option<Arc<ApproxPullAudit>>,
     #[serde(skip)]
-    no_bind: bool,
-    #[serde(skip)]
-    approx_sched: SchedulingPolicyKind,
+    approx_sched: Option<ApproxSchedKind>,
     #[serde(skip)]
     caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
 }
@@ -210,8 +209,7 @@ impl ReplicaBalancer {
         graph_server_counts: &HashMap<String, u32>,
         tracer: Option<Arc<MsTracer>>,
         pull_audit: Option<Arc<ApproxPullAudit>>,
-        no_bind: bool,
-        approx_sched: SchedulingPolicyKind,
+        approx_sched: Option<ApproxSchedKind>,
         caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
@@ -249,7 +247,6 @@ impl ReplicaBalancer {
             downstream_outputs,
             pull_intent_outputs,
             pull_audit,
-            no_bind,
             approx_sched,
             caller_lb_queue_occupancy,
         }
@@ -273,10 +270,14 @@ impl ReplicaBalancer {
         }
     }
 
-    fn enqueue_outbound_call(queue: &mut VecDeque<OutboundCall>, call: OutboundCall, approx_sched: SchedulingPolicyKind) {
+    fn enqueue_outbound_call(
+        queue: &mut VecDeque<OutboundCall>,
+        call: OutboundCall,
+        approx_sched: Option<ApproxSchedKind>,
+    ) {
         match approx_sched {
-            SchedulingPolicyKind::Fifo => queue.push_back(call),
-            SchedulingPolicyKind::Edf => {
+            None | Some(ApproxSchedKind::Fcfs) => queue.push_back(call),
+            Some(ApproxSchedKind::Edf) => {
                 let deadline = call.hop.deadline;
                 let insert_at = edf_insert_index(
                     queue.iter().map(|c| c.hop.deadline),
@@ -504,7 +505,7 @@ impl ReplicaBalancer {
         let queue_len_before = queue.len();
         let queue_head_request_id = queue.front().map(|c| c.hop.request_id);
 
-        let call = if self.no_bind {
+        let call = if self.approx_sched.is_some() {
             if queue.is_empty() {
                 fatal_pull_abort(
                     "ms",
@@ -888,7 +889,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    fn test_rb(no_bind: bool) -> ReplicaBalancer {
+    fn test_rb(approx_sched: Option<ApproxSchedKind>) -> ReplicaBalancer {
         let mut downstream_indices = HashMap::new();
         downstream_indices.insert("backend1".to_string(), vec![0]);
         let mut graph_server_counts = HashMap::new();
@@ -903,8 +904,7 @@ mod tests {
             &graph_server_counts,
             None,
             None,
-            no_bind,
-            SchedulingPolicyKind::Fifo,
+            approx_sched,
             Arc::new(Mutex::new(HashMap::new())),
         )
     }
@@ -931,7 +931,7 @@ mod tests {
 
     #[test]
     fn no_bind_pull_takes_oldest_not_bound_id() {
-        let mut rb = test_rb(true);
+        let mut rb = test_rb(Some(ApproxSchedKind::Fcfs));
         rb.outbound_queues
             .get_mut("backend1")
             .unwrap()
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn no_bind_empty_queue_aborts() {
-        let rb = test_rb(true);
+        let rb = test_rb(Some(ApproxSchedKind::Fcfs));
         assert!(rb.outbound_queues.get("backend1").unwrap().is_empty());
     }
 }

@@ -25,8 +25,7 @@ fn chain3_approx_args(n: u32, seed: u64, audit: Option<std::sync::Arc<ApproxPull
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: audit,
-        no_bind: false,
-        approx_sched: SchedulingPolicyKind::Fifo,
+        approx_sched: None,
     }
 }
 
@@ -89,8 +88,7 @@ fn ms_approx_pull_invariants_with_power_of_two_pull_policy() {
         scheduling: SchedulingPolicyKind::Fifo,
         force_fixed_svc: false,
         pull_audit: Some(audit.clone()),
-        no_bind: false,
-        approx_sched: SchedulingPolicyKind::Fifo,
+        approx_sched: None,
     })
     .unwrap()
     .expect("simulation should complete");

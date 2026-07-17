@@ -30,7 +30,7 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 - **centralized** — pull-based: one global queue at a single dispatcher; servers request work when they have spare capacity (`lb`: flat pool; ignores `--lb-subset-size`; incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target); see [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer).
-- **approx** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); Optional **`--no-bind`** on `lb` and `ms` for oldest-FCFS pull fulfillment; see [docs/approx-policy.md](docs/approx-policy.md)
+- **approx** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); optional **`--approx-sched fcfs`** or **`--approx-sched edf`** (`ms`) for unbound queue-head pulls; see [docs/approx-policy.md](docs/approx-policy.md)
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **cl-lr** — shared push least-request outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **corr** — experimental shared push outbound layer (`ms` only; same topology as `cl`; ingress stays P2C; `--lb-subset-size > 0` rejected)
@@ -131,8 +131,7 @@ cargo build --release
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--no-bind` | (off) | With `approx`: fulfill outbound pulls by popping the oldest queued call (ignore `pull.request_id`) |
-| `--approx-sched` | `fifo` | With `approx` + `--no-bind`: outbound queue discipline (`fifo` or deadline-ordered `edf`); see [docs/approx-policy.md](docs/approx-policy.md) |
+| `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs` or `edf` (ms only) for unbound queue-head fulfillment; see [docs/approx-policy.md](docs/approx-policy.md) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `cl`, `cl-lr`, `centralized`, or `corr`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
@@ -184,7 +183,7 @@ Options:
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--no-bind` | (off) | With `approx`: fulfill pulls by popping the oldest queued task/call (ignore `pull.request_id`) |
+| `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs` for unbound FCFS queue-head fulfillment |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
@@ -257,7 +256,7 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--clients` | `1` | Number of independent clients |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--no-bind` | (off) | With `approx`: pass `--no-bind` to the simulator subprocess |
+| `--approx-sched` | (omit) | With `approx`: pass `fcfs` or `edf` to the simulator subprocess |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible simulation |
@@ -296,7 +295,7 @@ Approx with oldest-FCFS pulls (`lb` only):
 ```bash
 python plot_cdfs.py \
   --lb-policy approx --pull-policy least-request \
-  --no-bind --n 100000
+  --approx-sched fcfs --n 100000
 ```
 
 On failure, `plot_cdfs.py` prints the simulator command, exit code, and full stderr/stdout. Set `RUST_BACKTRACE=1` for panic backtraces when debugging the Rust binary.
@@ -426,11 +425,11 @@ python plot_lb_sweep.py \
 
 ## Plot LB config load compare
 
-`plot_lb_load_compare.py` compares named experiment configs while sweeping **raw load** on the x-axis. Each config can differ in LB policy, client/server counts, concurrency, `lb_subset_size`, and (for approx) `no_bind`. All configs share the same load values (target utilization).
+`plot_lb_load_compare.py` compares named experiment configs while sweeping **raw load** on the x-axis. Each config can differ in LB policy, client/server counts, concurrency, `lb_subset_size`, and (for approx) `approx_sched`. All configs share the same load values (target utilization).
 
 Use this when you want to compare specific topologies at equal utilization. Use [`plot_lb_sweep.py`](plot_lb_sweep.py) for generic one-parameter sweeps with one line per policy. Use [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) when the x-axis should be equal offered load (task/s) across different server counts.
 
-Edit experiment configs in the `DEFAULT_CONFIGS` list at the top of [`plot_lb_load_compare.py`](plot_lb_load_compare.py) (or shared [`lb_plot_configs.py`](lb_plot_configs.py) types). Use `--config-index` to run a subset without editing the file. For approx configs, set `no_bind=True` on individual `ExperimentConfig` entries to enable oldest-FCFS pull fulfillment.
+Edit experiment configs in the `DEFAULT_CONFIGS` list at the top of [`plot_lb_load_compare.py`](plot_lb_load_compare.py) (or shared [`lb_plot_configs.py`](lb_plot_configs.py) types). Use `--config-index` to run a subset without editing the file. For approx configs, set `approx_sched="fcfs"` on individual `ExperimentConfig` entries to enable unbound FCFS pull fulfillment.
 
 ```bash
 python plot_lb_load_compare.py --n 100000 --seed 42
@@ -462,7 +461,7 @@ python plot_lb_load_compare.py \
 # writes output/lb_load_compare_p99_subset.pdf
 ```
 
-Example comparing bound vs no-bind approx (per-config `no_bind` in `DEFAULT_CONFIGS`):
+Example comparing bound vs unbound approx (per-config `approx_sched` in `DEFAULT_CONFIGS`):
 
 ```bash
 python plot_lb_load_compare.py \
@@ -566,8 +565,7 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--n` | `100000` | Requests per run |
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (required with `--lb-policy approx`) |
-| `--no-bind` | (off) | With `--lb-policy approx`: oldest-FCFS pull fulfillment |
-| `--approx-sched` | `fifo` | With `approx` + `--no-bind`: outbound queue discipline (`fifo` or `edf`) |
+| `--approx-sched` | (omit) | With `--lb-policy approx`: omit for bound pulls; `fcfs` or `edf` (ms only) for unbound queue-head fulfillment |
 | `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas) |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`) |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |

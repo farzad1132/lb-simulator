@@ -19,7 +19,8 @@ fn lb_approx_no_bind_completes_with_sane_utilization() {
             "approx",
             "--pull-policy",
             "least-request",
-            "--no-bind",
+            "--approx-sched",
+            "fcfs",
             "--seed",
             "42",
         ])
@@ -43,7 +44,7 @@ fn lb_approx_no_bind_completes_with_sane_utilization() {
 }
 
 #[test]
-fn lb_rejects_no_bind_without_approx() {
+fn lb_rejects_approx_sched_without_approx() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -56,7 +57,8 @@ fn lb_rejects_no_bind_without_approx() {
             "2",
             "--lb-policy",
             "power-of-two",
-            "--no-bind",
+            "--approx-sched",
+            "fcfs",
         ])
         .output()
         .expect("failed to spawn lb");
@@ -64,7 +66,7 @@ fn lb_rejects_no_bind_without_approx() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--no-bind is only valid with --lb-policy approx"),
+        stderr.contains("--approx-sched is only valid with --lb-policy approx"),
         "unexpected stderr: {stderr}"
     );
 }

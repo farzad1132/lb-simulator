@@ -33,7 +33,7 @@ LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centra
 PULL_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
 MS_LB_POLICIES = ("random", "power-of-two", "least-request", "round-robin", "centralized", "approx", "cl", "cl-lr", "corr")
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
-MS_APPROX_SCHED_POLICIES = MS_SCHEDULING_POLICIES
+MS_APPROX_SCHED_POLICIES = ("fcfs", "edf")
 SIMULATORS = ("lb", "ms")
 
 
@@ -240,7 +240,7 @@ def run_simulation(
     express_th: int | None = None,
     ideal: bool = False,
     shed_delay: float | None = None,
-    no_bind: bool = False,
+    approx_sched: str | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -285,8 +285,8 @@ def run_simulation(
             cmd.append("--ideal")
     if shed_delay is not None:
         cmd.extend(["--shed-delay", str(shed_delay)])
-    if no_bind:
-        cmd.append("--no-bind")
+    if approx_sched is not None:
+        cmd.extend(["--approx-sched", approx_sched])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
@@ -307,8 +307,7 @@ def run_ms_simulation(
     slo_ms: float | None = None,
     scheduling: str = "fifo",
     force_fixed_svc: bool = False,
-    no_bind: bool = False,
-    approx_sched: str = "fifo",
+    approx_sched: str | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -337,9 +336,7 @@ def run_ms_simulation(
         cmd.extend(["--slo-ms", str(slo_ms)])
     if force_fixed_svc:
         cmd.append("--force-fixed-svc")
-    if no_bind:
-        cmd.append("--no-bind")
-    if approx_sched != "fifo":
+    if approx_sched is not None:
         cmd.extend(["--approx-sched", approx_sched])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:

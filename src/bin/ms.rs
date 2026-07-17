@@ -1,6 +1,6 @@
 use clap::Parser;
 use lb::microservice::{MsArgs, MsStats, OutputFormat, print_human_stats, run};
-use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::io::{self, Write};
@@ -40,10 +40,8 @@ struct Args {
     scheduling: SchedulingPolicyKind,
     #[arg(long)]
     force_fixed_svc: bool,
-    #[arg(long, default_value_t = false)]
-    no_bind: bool,
-    #[arg(long, value_enum, default_value_t = SchedulingPolicyKind::Fifo)]
-    approx_sched: SchedulingPolicyKind,
+    #[arg(long, value_enum)]
+    approx_sched: Option<ApproxSchedKind>,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
     verbose: u8,
 }
@@ -69,7 +67,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         force_fixed_svc: cli.force_fixed_svc,
         verbose: cli.verbose,
         pull_audit: None,
-        no_bind: cli.no_bind,
         approx_sched: cli.approx_sched,
     };
 
@@ -249,15 +246,14 @@ mod tests {
             "approx",
             "--pull-policy",
             "least-request",
-            "--no-bind",
             "--approx-sched",
             "edf",
         ]);
-        assert_eq!(cli.approx_sched, SchedulingPolicyKind::Edf);
+        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::Edf));
     }
 
     #[test]
-    fn parses_no_bind_flag() {
+    fn parses_approx_sched_fcfs() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
@@ -268,9 +264,10 @@ mod tests {
             "approx",
             "--pull-policy",
             "least-request",
-            "--no-bind",
+            "--approx-sched",
+            "fcfs",
         ]);
-        assert!(cli.no_bind);
+        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::Fcfs));
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Approx);
     }
 

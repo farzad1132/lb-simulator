@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use lb::lb_simulate::{LbArrivalDistribution, LbRunArgs, LbServiceDistribution, LbServiceStats};
-use lb::policy::{validate_no_bind, validate_pull_policy, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{validate_approx_sched, validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::subset::SubsetPolicyKind;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -264,8 +264,8 @@ struct Args {
     ideal: bool,
     #[arg(long)]
     shed_delay: Option<f64>,
-    #[arg(long)]
-    no_bind: bool,
+    #[arg(long, value_enum)]
+    approx_sched: Option<ApproxSchedKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -456,7 +456,7 @@ fn lb_run_args_from_cli(
         lb_subset_policy: args.lb_subset_policy,
         clients: args.clients,
         verbose: args.verbose,
-        no_bind: args.no_bind,
+        approx_sched: args.approx_sched,
         pull_audit: None,
         express_lane: express_lane.map(|cfg| lb::lb_simulate::ExpressLaneConfig {
             express_size: cfg.express_size,
@@ -565,7 +565,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     validate_pull_policy(args.lb_policy, args.pull_policy).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
-    validate_no_bind(args.lb_policy, args.no_bind).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    validate_approx_sched(args.lb_policy, args.approx_sched, false).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let slo = validate_slo(args.slo).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let express_lane = validate_expresslane(&args)?;
     let work_shedding = validate_work_shedding(&args)?;
@@ -765,16 +765,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_no_bind_rejected_without_approx() {
+    fn validate_approx_sched_rejected_without_approx() {
         let args = Args::try_parse_from([
             "lb",
             "--lb-policy",
             "power-of-two",
-            "--no-bind",
+            "--approx-sched",
+            "fcfs",
         ])
         .unwrap();
-        let err = validate_no_bind(args.lb_policy, args.no_bind).unwrap_err();
-        assert!(err.contains("--no-bind is only valid with --lb-policy approx"));
+        let err = validate_approx_sched(args.lb_policy, args.approx_sched, false).unwrap_err();
+        assert!(err.contains("--approx-sched is only valid with --lb-policy approx"));
     }
 
     #[test]

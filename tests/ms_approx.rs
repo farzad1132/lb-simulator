@@ -122,7 +122,8 @@ fn ms_approx_no_bind_completes_on_chain_topology() {
             "approx",
             "--pull-policy",
             "least-request",
-            "--no-bind",
+            "--approx-sched",
+            "fcfs",
             "--seed",
             "42",
         ])
@@ -142,7 +143,7 @@ fn ms_approx_no_bind_completes_on_chain_topology() {
 }
 
 #[test]
-fn ms_rejects_no_bind_without_approx() {
+fn ms_rejects_approx_sched_without_approx() {
     let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");
     let root = repo_root();
 
@@ -158,7 +159,8 @@ fn ms_rejects_no_bind_without_approx() {
             "100",
             "--lb-policy",
             "power-of-two",
-            "--no-bind",
+            "--approx-sched",
+            "fcfs",
         ])
         .output()
         .expect("failed to spawn ms");
@@ -166,7 +168,7 @@ fn ms_rejects_no_bind_without_approx() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--no-bind is only valid with --lb-policy approx"),
+        stderr.contains("--approx-sched is only valid with --lb-policy approx"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -190,7 +192,6 @@ fn ms_approx_no_bind_edf_completes_on_chain_topology() {
             "approx",
             "--pull-policy",
             "least-request",
-            "--no-bind",
             "--approx-sched",
             "edf",
             "--seed",
@@ -201,7 +202,7 @@ fn ms_approx_no_bind_edf_completes_on_chain_topology() {
 
     assert!(
         output.status.success(),
-        "ms approx no-bind edf run failed: {}",
+        "ms approx edf run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -212,20 +213,17 @@ fn ms_approx_no_bind_edf_completes_on_chain_topology() {
 }
 
 #[test]
-fn ms_rejects_approx_sched_edf_without_no_bind() {
-    let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");
-    let root = repo_root();
+fn ms_rejects_approx_sched_edf_on_lb_binary() {
+    let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
-    let output = Command::new(&ms_binary)
+    let output = Command::new(&lb_binary)
         .args([
-            "--callgraph",
-            root.join("tests/chain/3/callgraph.json").to_str().unwrap(),
-            "--load-file",
-            root.join("tests/chain/3/load.json").to_str().unwrap(),
             "--format",
             "json",
             "--n",
             "100",
+            "--servers",
+            "2",
             "--lb-policy",
             "approx",
             "--pull-policy",
@@ -234,12 +232,12 @@ fn ms_rejects_approx_sched_edf_without_no_bind() {
             "edf",
         ])
         .output()
-        .expect("failed to spawn ms");
+        .expect("failed to spawn lb");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--approx-sched edf requires --no-bind"),
+        stderr.contains("--approx-sched edf is only supported by the ms simulator"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -270,7 +268,7 @@ fn ms_rejects_approx_sched_edf_without_approx() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--approx-sched edf is only valid with --lb-policy approx"),
+        stderr.contains("--approx-sched is only valid with --lb-policy approx"),
         "unexpected stderr: {stderr}"
     );
 }
