@@ -64,13 +64,13 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("LR", "least-request", 10, 10),
     ExperimentConfig("RR", "round-robin", 10, 10),
     ExperimentConfig("R", "random", 10, 10),
-    ExperimentConfig("CL-1-LR", "least-request", 1, 10),
-    ExperimentConfig("CL-1-P2C", "power-of-two", 1, 10),
-    ExperimentConfig("Approx-LR-1:1", "approx", 10, 10, pull_policy="least-request"),
+    #ExperimentConfig("CL-1-LR", "least-request", 1, 10),
+    ExperimentConfig("C-P2C", "power-of-two", 1, 10),
+    ExperimentConfig("Approx-LR", "approx", 10, 10, pull_policy="least-request"),
     ExperimentConfig("Approx-LR-FCFS", "approx", 10, 10, pull_policy="least-request", approx_sched="fcfs"),
-    #ExperimentConfig("Approx-R-1:1", "approx", 10, 10, pull_policy="random"),
+    #ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
     #ExperimentConfig("Approx-R-FCFS", "approx", 10, 10, pull_policy="random", approx_sched="fcfs"),
-    ExperimentConfig("Prequal", "prequal", 10, 10),
+    #ExperimentConfig("Prequal", "prequal", 10, 10),
     #ExperimentConfig("P2C-S5", "power-of-two", 10, 10, shed_delay=5),
     #ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
     #ExperimentConfig("P2C-E36-ideal", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, ideal=True),
@@ -107,6 +107,7 @@ def format_run_summary(
     metric_value: float,
     data: dict[str, Any],
     clients: int,
+    servers: int,
 ) -> str:
     kind, pct = parse_metric(metric_name)
     parts = [
@@ -114,7 +115,7 @@ def format_run_summary(
         f"load={load:g}",
         f"k={config.lb_subset_size}",
         f"policy={config.lb_policy}",
-        f"servers={config.servers}",
+        f"servers={servers}",
         f"clients={clients}",
     ]
     if uses_pull_policy(config):
@@ -150,6 +151,7 @@ def run_load_sweep(
     metric: str,
     slo: float | None,
     clients_override: int | None = None,
+    servers_override: int | None = None,
 ) -> list[tuple[str, list[float]]]:
     """Return (label, y metric values) per config; x is shared load_values."""
     series: list[tuple[str, list[float]]] = [
@@ -163,12 +165,13 @@ def run_load_sweep(
         unit="run",
     ):
         clients = clients_override if clients_override is not None else config.clients
+        servers = servers_override if servers_override is not None else config.servers
         sim_kwargs = {
             **base_kwargs,
             "load": load,
             "lb_policy": config.lb_policy,
             "clients": clients,
-            "servers": config.servers,
+            "servers": servers,
             "concurrency": config.concurrency,
             "lb_subset_size": config.lb_subset_size,
         }
@@ -201,6 +204,7 @@ def run_load_sweep(
                 metric_value=metric_value,
                 data=data,
                 clients=clients,
+                servers=servers,
             )
         )
     return series
@@ -399,6 +403,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override number of clients for all configs",
     )
+    parser.add_argument(
+        "--servers",
+        type=int,
+        default=None,
+        help="Override number of servers for all configs",
+    )
     return parser.parse_args()
 
 
@@ -436,6 +446,7 @@ def main() -> None:
         metric=args.metric,
         slo=args.slo,
         clients_override=args.clients,
+        servers_override=args.servers,
     )
 
     output_path = args.output or default_output_path(args.metric)
