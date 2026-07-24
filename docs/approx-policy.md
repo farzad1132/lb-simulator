@@ -16,7 +16,7 @@ See also:
 **Approx** is a **decentralized pull** policy. Unlike push policies (tasks pushed to servers on arrival) or **centralized** (one global pull queue), approx gives each client/caller its own FIFO queue and uses a two-phase pull protocol:
 
 1. **Pull intent** — the client balancer tells a server “I have work for you.”
-2. **Pull + dispatch** — when the server has spare capacity, it pulls from that client balancer and starts service immediately. By default the pull is **bound** to the queued item identified by `request_id`; with `--approx-sched fcfs` or `--approx-sched edf` the balancer ignores the pull's `request_id` and dispatches the queue head (FCFS or earliest-deadline, respectively).
+2. **Pull + dispatch** — when the server has spare capacity, it pulls from that client balancer and starts service immediately. By default the pull is **bound** to the queued item identified by `request_id`; with `--approx-sched fcfs`, `edf`, or `edf+` the balancer ignores the pull's `request_id` and dispatches the queue head (FCFS or earliest-deadline, respectively).
 
 Backlog lives at **client-side queues**, not at server task queues. Servers queue **pull intents**, not tasks.
 
@@ -39,8 +39,8 @@ Ingress in `ms` stays push power-of-two on `EdgeBalancer` (same as `centralized`
 Types live in `[src/approx.rs](../src/approx.rs)`:
 
 ```rust
-PullIntent { sender_id, request_id }  // balancer → server
-PullRequest { server_idx, request_id } // server → balancer
+PullIntent { sender_id, request_id, deadline }  // balancer → server
+PullRequest { server_idx, request_id }          // server → balancer
 ```
 
 
@@ -217,37 +217,40 @@ If lookup fails (missing `request_id`, unknown queue, or no matching id), the si
 
 Omit `--approx-sched` for **bound** mode (default): pull fulfillment removes the item matching `pull.request_id`.
 
-With `--approx-sched fcfs`, pull fulfillment **ignores** `pull.request_id` and always pops the **head** of the outbound queue (oldest enqueued item, FCFS). With `--approx-sched edf` (`ms` **only**), outbound queues are ordered by hop deadline and the head is the **earliest-deadline** item.
+With `--approx-sched fcfs`, pull fulfillment **ignores** `pull.request_id` and always pops the **head** of the outbound queue (oldest enqueued item, FCFS). With `--approx-sched edf` or `edf+` (`ms` **only**), outbound queues are ordered by hop deadline and the head is the **earliest-deadline** item. `edf+` additionally orders the **replica pull-intent queue** by deadline.
 
-In `lb`, `--approx-sched fcfs` uses FCFS on the client task queue (`queue.remove(0)`). In `ms`, unbound modes use the per-target outbound queue on each `ReplicaBalancer` (`outbound_queues[target].pop_front()`). Pull intents and pull messages still carry `request_id` on the wire — only the balancer's `pull` handler changes.
-
-
-| Aspect               | Bound (default)                                | `--approx-sched fcfs`                         | `--approx-sched edf` (`ms`)        |
-| -------------------- | ---------------------------------------------- | --------------------------------------------- | ---------------------------------- |
-| Fulfillment          | Remove item matching `pull.request_id`         | Remove FIFO head                              | Remove earliest-deadline head      |
-| `request_id` on wire | Required; must match a queued item             | Still sent; ignored at fulfillment            | Still sent; ignored at fulfillment |
-| Empty queue on pull  | Panic (`bound task/call not found` or similar) | Panic (`no queued task/call for approx pull`) | Same                               |
-| Simulator support    | `lb` and `ms`                                  | `lb` and `ms` (outbound only in `ms`)         | `ms` **only**                      |
+In `lb`, `--approx-sched fcfs` uses FCFS on the client task queue (`queue.remove(0)`). In `ms`, unbound modes use the per-target outbound queue on each `ReplicaBalancer` (`outbound_queues[target].pop_front()`). Pull intents and pull messages still carry `request_id` on the wire — only the balancer's `pull` handler (and, for `edf+`, intent-queue enqueue) changes.
 
 
-Use unbound modes to model decentralized pull where the server cannot rely on intent ids to identify a specific queued item — fulfillment is driven by queue discipline at the client/caller balancer regardless of which intent triggered the pull. In `ms`, queue ordering is **per** `(rb_id, target_microservice)` queue.
+| Aspect               | Bound (default)                                | `--approx-sched fcfs`                         | `--approx-sched edf` (`ms`)        | `--approx-sched edf+` (`ms`)                          |
+| -------------------- | ---------------------------------------------- | --------------------------------------------- | ---------------------------------- | ----------------------------------------------------- |
+| Fulfillment          | Remove item matching `pull.request_id`         | Remove FIFO head                              | Remove earliest-deadline head      | Remove earliest-deadline head                         |
+| Outbound queue       | FIFO                                           | FIFO                                          | EDF                                | EDF                                                   |
+| Intent queue         | FIFO                                           | FIFO                                          | FIFO                               | EDF (by `PullIntent.deadline`)                        |
+| `request_id` on wire | Required; must match a queued item             | Still sent; ignored at fulfillment            | Still sent; ignored at fulfillment | Still sent; ignored at fulfillment                    |
+| Empty queue on pull  | Panic (`bound task/call not found` or similar) | Panic (`no queued task/call for approx pull`) | Same                               | Same                                                  |
+| Simulator support    | `lb` and `ms`                                  | `lb` and `ms` (outbound only in `ms`)         | `ms` **only**                      | `ms` **only**                                         |
+
+
+Use unbound modes to model decentralized pull where the server cannot rely on intent ids to identify a specific queued item — fulfillment is driven by queue discipline at the client/caller balancer regardless of which intent triggered the pull. In `ms`, outbound queue ordering is **per** `(rb_id, target_microservice)` queue. Intent-queue ordering is **per** downstream replica.
 
 ### Outbound queue scheduling (`--approx-sched`)
 
 Independent of server-side `[--scheduling](scheduling.md)`. Requires `--lb-policy approx`.
 
 
-| Flag             | Default  | Values        | Description                                                                  |
-| ---------------- | -------- | ------------- | ---------------------------------------------------------------------------- |
-| `--approx-sched` | *(omit)* | `fcfs`, `edf` | Omit for bound 1:1 pulls; `fcfs` or `edf` for unbound queue-head fulfillment |
+| Flag             | Default  | Values                 | Description                                                                                      |
+| ---------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `--approx-sched` | *(omit)* | `fcfs`, `edf`, `edf+` | Omit for bound 1:1 pulls; `fcfs` / `edf` / `edf+` for unbound queue-head fulfillment |
 
 
-- `fcfs`: append on enqueue (`push_back`); pulls `pop_front` (FCFS head).
-- `edf`: insert by `hop.deadline` on enqueue (same tie-breaking as server EDF); pulls `pop_front` (earliest deadline at head). `ms` **only.**
+- `fcfs`: append on enqueue (`push_back`); pulls `pop_front` (FCFS head). Intent queue remains FIFO.
+- `edf`: insert by `hop.deadline` on enqueue (same tie-breaking as server EDF); pulls `pop_front` (earliest deadline at head). Intent queue remains FIFO. `ms` **only.**
+- `edf+`: same outbound EDF as `edf`, plus EDF insert on the replica pull-intent queue by `PullIntent.deadline`. `ms` **only.**
 
-Validation (`[src/policy.rs](../src/policy.rs)`): any `--approx-sched` value requires `--lb-policy approx`; `--approx-sched edf` is only supported by the `ms` simulator.
+Validation (`[src/policy.rs](../src/policy.rs)`): any `--approx-sched` value requires `--lb-policy approx`; `--approx-sched edf` / `edf+` are only supported by the `ms` simulator.
 
-Trace-based tests record pull events via `[LbPullAudit](../src/lb_pull_audit.rs)` (`lb`) or `[ApproxPullAudit](../src/approx_audit.rs)` (`ms`) and check `validate_no_bind()` (FCFS) or `validate_no_bind_edf()` (EDF) invariants (queue head popped, intent id may differ from pulled id). See `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`, `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`, and `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`.
+Trace-based tests record pull events via `[LbPullAudit](../src/lb_pull_audit.rs)` (`lb`) or `[ApproxPullAudit](../src/approx_audit.rs)` (`ms`) and check `validate_no_bind()` (FCFS), `validate_no_bind_edf()` (EDF outbound, FIFO intents), or `validate_no_bind_edf_plus()` (EDF outbound and intent queues) invariants (queue head popped, intent id may differ from pulled id). See `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`, `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`, `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`, and `[tests/ms_no_bind_edf_plus_audit.rs](../tests/ms_no_bind_edf_plus_audit.rs)`.
 
 ## Port wiring (`lb`)
 
@@ -303,7 +306,7 @@ The regression test `lb_all_policies_similar_with_single_server` in `[tests/lb_p
 | -------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--lb-policy approx` | —        | Enable approx                                                                                                                                                    |
 | `--pull-policy`      | **Yes**  | Server selection for pull intents: `random`, `power-of-two`, `least-request`, `round-robin`. Reuses push policy implementations on the `pull_intent_load` slice. |
-| `--approx-sched`     | No       | Omit for bound 1:1 pulls. `fcfs`: unbound FCFS head. `edf`: unbound EDF head (`ms` **only**). Requires `approx`. Independent of `--scheduling`.                  |
+| `--approx-sched`     | No       | Omit for bound 1:1 pulls. `fcfs`: unbound FCFS head. `edf`: unbound EDF outbound head (`ms` **only**). `edf+`: EDF outbound + EDF intent queue (`ms` **only**). Requires `approx`. Independent of `--scheduling`. |
 | `--lb-subset-size`   | No       | Supported (same as push); restricts `--pull-policy` choices                                                                                                      |
 
 
@@ -311,7 +314,7 @@ Validation (`[src/policy.rs](../src/policy.rs)`):
 
 - `--pull-policy` required with `approx`; forbidden with other `--lb-policy` values
 - `--approx-sched` only with `approx` (`lb` and `ms` binaries)
-- `--approx-sched edf` only on the `ms` binary
+- `--approx-sched edf` / `edf+` only on the `ms` binary
 
 
 
@@ -349,9 +352,9 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | LB topology         | One balancer per client (`lb`) / per caller replica (`ms`)                                                               |
 | Server choice       | `--pull-policy` at arrival/intent time                                                                                   |
-| Intent binding      | On by default (omit `--approx-sched`); violations panic. `--approx-sched fcfs`/`edf`: fulfill queue head, ignore pull id |
+| Intent binding      | On by default (omit `--approx-sched`); violations panic. `--approx-sched fcfs`/`edf`/`edf+`: fulfill queue head, ignore pull id |
 | Server task queue   | Disabled under approx                                                                                                    |
-| Server intent queue | FIFO per server/replica                                                                                                  |
+| Server intent queue | FIFO per server/replica for bound/`fcfs`/`edf`; EDF by deadline for `edf+` (`ms`)                                        |
 | Load for routing    | `pull_intent_load`, not `local_inflight`                                                                                 |
 | Release lifecycle   | Standard `local_inflight` via `release` on complete                                                                      |
 
@@ -370,11 +373,12 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 | `[src/lb_pull_audit.rs](../src/lb_pull_audit.rs)`                     | Trace recorder for approx pull events; `validate_bound()` / `validate_no_bind()`                           |
 | `[src/microservice/balancer.rs](../src/microservice/balancer.rs)`     | `ReplicaBalancer` approx outbound (bound and unbound)                                                      |
 | `[src/microservice/replica.rs](../src/microservice/replica.rs)`       | Replica-side pull drain and `pending_pulls`                                                                |
-| `[src/approx_audit.rs](../src/approx_audit.rs)`                       | Trace recorder for `ms` approx pulls; `validate_bound()` / `validate_no_bind()` / `validate_no_bind_edf()` |
+| `[src/approx_audit.rs](../src/approx_audit.rs)`                       | Trace recorder for `ms` approx pulls; `validate_bound()` / `validate_no_bind()` / `validate_no_bind_edf()` / `validate_no_bind_edf_plus()` |
 | `[tests/lb_approx.rs](../tests/lb_approx.rs)`                         | Approx CLI validation and completion tests                                                                 |
 | `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`           | Trace-based `--approx-sched fcfs` invariant tests (`lb`)                                                   |
 | `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`           | Trace-based `--approx-sched fcfs` invariant tests (`ms`)                                                   |
 | `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`   | Trace-based `--approx-sched edf` invariant tests (`ms`)                                                    |
+| `[tests/ms_no_bind_edf_plus_audit.rs](../tests/ms_no_bind_edf_plus_audit.rs)` | Trace-based `--approx-sched edf+` invariant tests (`ms`)                                            |
 | `[tests/lb_policy_equivalence.rs](../tests/lb_policy_equivalence.rs)` | Cross-policy latency equivalence (1 client / 1 server)                                                     |
 | `[tests/ms_approx.rs](../tests/ms_approx.rs)`                         | `ms` approx integration tests                                                                              |
 
@@ -388,6 +392,7 @@ cargo test lb_approx --release
 cargo test lb_no_bind_audit --release
 cargo test ms_no_bind_audit --release
 cargo test ms_no_bind_edf_audit --release
+cargo test ms_no_bind_edf_plus_audit --release
 cargo test lb_all_policies_similar_with_single_server --release
 cargo test ms_approx --release
 ```
@@ -409,5 +414,7 @@ Compare bound vs unbound approx (same topology; unbound modes may diverge under 
   --lb-policy approx --pull-policy least-request --format human --n 10000
 ./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
   --lb-policy approx --pull-policy least-request --approx-sched edf --format human --n 10000
+./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
+  --lb-policy approx --pull-policy least-request --approx-sched edf+ --format human --n 10000
 ```
 

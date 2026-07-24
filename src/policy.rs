@@ -7,6 +7,25 @@ use crate::rng;
 pub enum ApproxSchedKind {
     Fcfs,
     Edf,
+    #[value(name = "edf+")]
+    EdfPlus,
+}
+
+impl ApproxSchedKind {
+    /// Outbound balancer queues use EDF insert for `edf` and `edf+`.
+    pub fn outbound_uses_edf(self) -> bool {
+        matches!(self, Self::Edf | Self::EdfPlus)
+    }
+
+    /// Replica pull-intent queues use EDF insert only for `edf+`.
+    pub fn intent_queue_uses_edf(self) -> bool {
+        matches!(self, Self::EdfPlus)
+    }
+
+    /// `edf` / `edf+` are only supported by the `ms` simulator.
+    pub fn requires_ms(self) -> bool {
+        matches!(self, Self::Edf | Self::EdfPlus)
+    }
 }
 
 pub trait LoadBalancePolicy: Send {
@@ -241,8 +260,8 @@ pub fn validate_approx_sched(
     if !lb_policy.is_approx() {
         return Err("--approx-sched is only valid with --lb-policy approx".into());
     }
-    if approx_sched == ApproxSchedKind::Edf && !allow_edf {
-        return Err("--approx-sched edf is only supported by the ms simulator".into());
+    if approx_sched.requires_ms() && !allow_edf {
+        return Err("--approx-sched edf/edf+ is only supported by the ms simulator".into());
     }
     Ok(())
 }
@@ -398,6 +417,12 @@ mod tests {
         .is_ok());
         assert!(validate_approx_sched(
             LoadBalancePolicyKind::Approx,
+            Some(ApproxSchedKind::EdfPlus),
+            true,
+        )
+        .is_ok());
+        assert!(validate_approx_sched(
+            LoadBalancePolicyKind::Approx,
             Some(ApproxSchedKind::Fcfs),
             false,
         )
@@ -417,5 +442,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("ms simulator"));
+        let err = validate_approx_sched(
+            LoadBalancePolicyKind::Approx,
+            Some(ApproxSchedKind::EdfPlus),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("ms simulator"));
+        assert!(ApproxSchedKind::Edf.outbound_uses_edf());
+        assert!(ApproxSchedKind::EdfPlus.outbound_uses_edf());
+        assert!(!ApproxSchedKind::Fcfs.outbound_uses_edf());
+        assert!(ApproxSchedKind::EdfPlus.intent_queue_uses_edf());
+        assert!(!ApproxSchedKind::Edf.intent_queue_uses_edf());
     }
 }

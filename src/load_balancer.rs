@@ -187,6 +187,8 @@ impl LoadBalancer {
             .send(PullIntent {
                 sender_id: self.lb_id,
                 request_id,
+                // lb never enables edf+; deadline is unused for intent ordering here.
+                deadline: MonotonicTime::EPOCH,
             })
             .await;
     }

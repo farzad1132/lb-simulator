@@ -666,7 +666,7 @@ def parse_args() -> argparse.Namespace:
         "--approx-sched",
         choices=MS_APPROX_SCHED_POLICIES,
         default=None,
-        help="Approx outbound pull scheduling: fcfs or edf (only valid with --lb-policy approx)",
+        help="Approx outbound pull scheduling: fcfs, edf, or edf+ (only valid with --lb-policy approx)",
     )
     parser.add_argument(
         "--output",

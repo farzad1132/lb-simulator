@@ -1,3 +1,4 @@
+use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
 
 /// Pull intent sent from a client balancer to a server.
@@ -7,6 +8,8 @@ pub struct PullIntent {
     pub sender_id: usize,
     /// Bound request id for the queued item this intent will pull.
     pub request_id: u64,
+    /// Request deadline (used for `--approx-sched edf+` intent-queue ordering).
+    pub deadline: MonotonicTime,
 }
 
 /// Pull request sent from a server back to a client balancer.

@@ -30,6 +30,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **Prequal async probe pool** | yes | yes (outbound only) | See [prequal-policy.md](prequal-policy.md); ms ingress stays P2C |
 | **`--approx-sched fcfs` (unbound approx pulls)** | yes | yes | Outbound approx only in `ms`; see [approx-policy.md](approx-policy.md) |
 | **`--approx-sched edf` (outbound approx queue)** | — | yes | `ms` only; see [approx-policy.md](approx-policy.md) |
+| **`--approx-sched edf+` (outbound + intent EDF)** | — | yes | `ms` only; EDF outbound and intent queues; see [approx-policy.md](approx-policy.md) |
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
 | **CL-LR shared least-request outbound** | — | yes | Same shared topology as `cl`; downstream uses least-request on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-lr-policy-shared-least-request-outbound). |
 | **Corr (experimental)** | — | yes | Same shared topology as `cl`; outbound routing is experimental. See [microservice-simulation.md](microservice-simulation.md#corr-policy-experimental). |

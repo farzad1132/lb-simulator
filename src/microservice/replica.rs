@@ -9,6 +9,7 @@ use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::PullIntent;
 use crate::approx_audit::ApproxPullAudit;
+use crate::policy::ApproxSchedKind;
 use crate::prequal::Probe;
 use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
 use nexosim::model::{Context, Model, schedulable};
@@ -47,6 +48,7 @@ pub struct ReplicaConfig {
     pub probe_reply_outputs: HashMap<usize, Output<ReplicaProbeReply>>,
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
     pub scheduling: SchedulingPolicyKind,
+    pub approx_sched: Option<ApproxSchedKind>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -90,6 +92,8 @@ pub struct Replica {
     pull_audit: Option<Arc<ApproxPullAudit>>,
     #[serde(skip)]
     scheduling: SchedulingPolicyKind,
+    #[serde(skip)]
+    approx_sched: Option<ApproxSchedKind>,
 }
 
 impl Replica {
@@ -117,6 +121,7 @@ impl Replica {
             pull_intent_queue: VecDeque::new(),
             pull_audit: config.pull_audit,
             scheduling: config.scheduling,
+            approx_sched: config.approx_sched,
         }
     }
 
@@ -474,10 +479,22 @@ impl Replica {
                 self.server_idx,
                 intent.sender_id,
                 intent.request_id,
+                intent.deadline,
                 queue_len_before,
             );
         }
-        self.pull_intent_queue.push_back(intent);
+        if self
+            .approx_sched
+            .is_some_and(|s| s.intent_queue_uses_edf())
+        {
+            let insert_at = edf_insert_index(
+                self.pull_intent_queue.iter().map(|i| i.deadline),
+                intent.deadline,
+            );
+            self.pull_intent_queue.insert(insert_at, intent);
+        } else {
+            self.pull_intent_queue.push_back(intent);
+        }
         self.drain_pull_intents_async().await;
     }
 

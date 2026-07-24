@@ -10,7 +10,7 @@ Each replica (server) has a local queue. By default, the queue is **FIFO** (`--s
 
 Scheduling applies only to **replica queues**. It does not reorder work at shared `DownstreamBalancer` pull queues used by `--lb-policy centralized`.
 
-For **approx unbound outbound queues** on `ReplicaBalancer`, use [`--approx-sched`](approx-policy.md#outbound-queue-scheduling---approx-sched) (`fcfs` or `edf`) instead. That flag is independent of `--scheduling`.
+For **approx unbound outbound queues** on `ReplicaBalancer`, use [`--approx-sched`](approx-policy.md#outbound-queue-scheduling---approx-sched) (`fcfs`, `edf`, or `edf+`) instead. That flag is independent of `--scheduling`. With `edf+`, the replica **pull-intent queue** is also EDF-ordered (still separate from this work-queue `--scheduling`).
 
 ## CLI
 

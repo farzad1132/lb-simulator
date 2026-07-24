@@ -20,7 +20,7 @@ class ExperimentConfig:
     express_th: int | None = None
     ideal: bool = False
     shed_delay: float | None = None
-    approx_sched: str | None = None  # fcfs or edf; only valid when lb_policy == "approx"
+    approx_sched: str | None = None  # fcfs, edf, or edf+; only valid when lb_policy == "approx"
 
 
 def uses_pull_policy(config: ExperimentConfig) -> bool:

@@ -8,6 +8,7 @@ use crate::scheduling::edf_insert_index;
 
 type OutboundQueueKey = (usize, String);
 type OutboundReplayItem = (u64, MonotonicTime);
+type IntentReplayItem = (usize, u64, MonotonicTime);
 
 /// Records approx pull/intent events during a simulation run for post-hoc invariant checks.
 #[derive(Default)]
@@ -40,6 +41,7 @@ pub enum ApproxPullEventKind {
         downstream_server: usize,
         sender_rb_id: usize,
         request_id: u64,
+        deadline: MonotonicTime,
         queue_len_before: usize,
     },
     /// Downstream replica popped the front intent and sent a bound pull upstream.
@@ -104,6 +106,7 @@ impl ApproxPullAudit {
         downstream_server: usize,
         sender_rb_id: usize,
         request_id: u64,
+        deadline: MonotonicTime,
         queue_len_before: usize,
     ) {
         self.record(ApproxPullEventKind::IntentQueued {
@@ -111,6 +114,7 @@ impl ApproxPullAudit {
             downstream_server,
             sender_rb_id,
             request_id,
+            deadline,
             queue_len_before,
         });
     }
@@ -199,7 +203,19 @@ impl ApproxPullAudit {
             .collect()
     }
 
-    /// Shared invariants for bound and no-bind approx runs.
+    pub fn intent_drained_request_ids(&self) -> Vec<u64> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ApproxPullEventKind::IntentDrained { request_id, .. } => Some(*request_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Shared invariants for bound and no-bind approx runs (depth/capacity/counts only).
     pub fn validate_common(&self) -> Result<(), String> {
         let events = self.events.lock().unwrap();
         if events.is_empty() {
@@ -207,8 +223,6 @@ impl ApproxPullAudit {
         }
 
         let mut intent_queue_depth: HashMap<(String, usize), usize> = HashMap::new();
-        let mut intent_fifo_queues: HashMap<(String, usize), VecDeque<(usize, u64)>> =
-            HashMap::new();
         let mut outbound_queue_depth: HashMap<OutboundQueueKey, usize> = HashMap::new();
 
         let mut sent = 0usize;
@@ -231,9 +245,8 @@ impl ApproxPullAudit {
                 ApproxPullEventKind::IntentQueued {
                     downstream_ms,
                     downstream_server,
-                    sender_rb_id,
-                    request_id,
                     queue_len_before,
+                    ..
                 } => {
                     let key = (downstream_ms.clone(), *downstream_server);
                     let expected = intent_queue_depth.get(&key).copied().unwrap_or(0);
@@ -245,22 +258,17 @@ impl ApproxPullAudit {
                             recorded.seq
                         ));
                     }
-                    intent_queue_depth.insert(key.clone(), expected + 1);
-                    intent_fifo_queues
-                        .entry(key.clone())
-                        .or_default()
-                        .push_back((*sender_rb_id, *request_id));
+                    intent_queue_depth.insert(key, expected + 1);
                     queued += 1;
                 }
                 ApproxPullEventKind::IntentDrained {
                     downstream_ms,
                     downstream_server,
-                    sender_rb_id,
-                    request_id,
                     queue_len_before,
                     pending_pulls_before,
                     in_flight_before,
                     max_concurrency,
+                    ..
                 } => {
                     if *in_flight_before + *pending_pulls_before >= *max_concurrency {
                         return Err(format!(
@@ -288,24 +296,7 @@ impl ApproxPullAudit {
                             recorded.seq
                         ));
                     }
-                    intent_queue_depth.insert(key.clone(), expected - 1);
-
-                    let fifo = intent_fifo_queues.get_mut(&key).expect("fifo queue present");
-                    let front = fifo.pop_front().ok_or_else(|| {
-                        format!(
-                            "IntentDrained with no fifo head \
-                             ({downstream_ms}/{downstream_server}) (seq={})",
-                            recorded.seq
-                        )
-                    })?;
-                    if front != (*sender_rb_id, *request_id) {
-                        return Err(format!(
-                            "intent queue pop was not FIFO \
-                             ({downstream_ms}/{downstream_server}): expected {:?}, \
-                             got sender_rb_id={sender_rb_id} request_id={request_id} (seq={})",
-                            front, recorded.seq
-                        ));
-                    }
+                    intent_queue_depth.insert(key, expected - 1);
                     drained += 1;
                 }
                 ApproxPullEventKind::PullFulfilled {
@@ -377,8 +368,139 @@ impl ApproxPullAudit {
         Ok(())
     }
 
+    /// Intent queues are FIFO (bound / fcfs / edf).
+    pub fn validate_intent_fifo(&self) -> Result<(), String> {
+        let events = self.events.lock().unwrap();
+        let mut intent_fifo_queues: HashMap<(String, usize), VecDeque<(usize, u64)>> =
+            HashMap::new();
+
+        for recorded in events.iter() {
+            match &recorded.kind {
+                ApproxPullEventKind::IntentQueued {
+                    downstream_ms,
+                    downstream_server,
+                    sender_rb_id,
+                    request_id,
+                    ..
+                } => {
+                    intent_fifo_queues
+                        .entry((downstream_ms.clone(), *downstream_server))
+                        .or_default()
+                        .push_back((*sender_rb_id, *request_id));
+                }
+                ApproxPullEventKind::IntentDrained {
+                    downstream_ms,
+                    downstream_server,
+                    sender_rb_id,
+                    request_id,
+                    ..
+                } => {
+                    let key = (downstream_ms.clone(), *downstream_server);
+                    let fifo = intent_fifo_queues.get_mut(&key).ok_or_else(|| {
+                        format!(
+                            "IntentDrained with no fifo queue \
+                             ({downstream_ms}/{downstream_server}) (seq={})",
+                            recorded.seq
+                        )
+                    })?;
+                    let front = fifo.pop_front().ok_or_else(|| {
+                        format!(
+                            "IntentDrained with no fifo head \
+                             ({downstream_ms}/{downstream_server}) (seq={})",
+                            recorded.seq
+                        )
+                    })?;
+                    if front != (*sender_rb_id, *request_id) {
+                        return Err(format!(
+                            "intent queue pop was not FIFO \
+                             ({downstream_ms}/{downstream_server}): expected {:?}, \
+                             got sender_rb_id={sender_rb_id} request_id={request_id} (seq={})",
+                            front, recorded.seq
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn edf_insert_intent_replay_item(
+        queue: &mut VecDeque<IntentReplayItem>,
+        sender_rb_id: usize,
+        request_id: u64,
+        deadline: MonotonicTime,
+    ) {
+        let insert_at = edf_insert_index(queue.iter().map(|(_, _, d)| *d), deadline);
+        queue.insert(insert_at, (sender_rb_id, request_id, deadline));
+    }
+
+    /// Intent queues are EDF (`edf+`).
+    pub fn validate_intent_edf(&self) -> Result<(), String> {
+        let events = self.events.lock().unwrap();
+        let mut intent_edf_queues: HashMap<(String, usize), VecDeque<IntentReplayItem>> =
+            HashMap::new();
+
+        for recorded in events.iter() {
+            match &recorded.kind {
+                ApproxPullEventKind::IntentQueued {
+                    downstream_ms,
+                    downstream_server,
+                    sender_rb_id,
+                    request_id,
+                    deadline,
+                    ..
+                } => {
+                    let key = (downstream_ms.clone(), *downstream_server);
+                    let replay = intent_edf_queues.entry(key).or_default();
+                    Self::edf_insert_intent_replay_item(
+                        replay,
+                        *sender_rb_id,
+                        *request_id,
+                        *deadline,
+                    );
+                }
+                ApproxPullEventKind::IntentDrained {
+                    downstream_ms,
+                    downstream_server,
+                    sender_rb_id,
+                    request_id,
+                    ..
+                } => {
+                    let key = (downstream_ms.clone(), *downstream_server);
+                    let replay = intent_edf_queues.get_mut(&key).ok_or_else(|| {
+                        format!(
+                            "IntentDrained with no edf queue \
+                             ({downstream_ms}/{downstream_server}) (seq={})",
+                            recorded.seq
+                        )
+                    })?;
+                    let front = replay.pop_front().ok_or_else(|| {
+                        format!(
+                            "IntentDrained with no edf head \
+                             ({downstream_ms}/{downstream_server}) (seq={})",
+                            recorded.seq
+                        )
+                    })?;
+                    if front.0 != *sender_rb_id || front.1 != *request_id {
+                        return Err(format!(
+                            "intent queue pop was not EDF \
+                             ({downstream_ms}/{downstream_server}): expected {:?}, \
+                             got sender_rb_id={sender_rb_id} request_id={request_id} (seq={})",
+                            (front.0, front.1),
+                            recorded.seq
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_bound(&self) -> Result<(), String> {
         self.validate_common()?;
+        self.validate_intent_fifo()?;
         let events = self.events.lock().unwrap();
 
         let mut outbound_replay_queues: HashMap<OutboundQueueKey, VecDeque<u64>> = HashMap::new();
@@ -493,6 +615,7 @@ impl ApproxPullAudit {
 
     pub fn validate_no_bind(&self) -> Result<(), String> {
         self.validate_common()?;
+        self.validate_intent_fifo()?;
         let events = self.events.lock().unwrap();
         let mut outbound_replay_queues: HashMap<OutboundQueueKey, VecDeque<u64>> = HashMap::new();
         let mut saw_mismatch = false;
@@ -593,8 +716,7 @@ impl ApproxPullAudit {
         queue.insert(insert_at, (request_id, deadline));
     }
 
-    pub fn validate_no_bind_edf(&self) -> Result<(), String> {
-        self.validate_common()?;
+    fn validate_outbound_edf(&self, mode_label: &str) -> Result<(), String> {
         let events = self.events.lock().unwrap();
         let mut outbound_replay_queues: HashMap<OutboundQueueKey, VecDeque<OutboundReplayItem>> =
             HashMap::new();
@@ -639,15 +761,15 @@ impl ApproxPullAudit {
                     let key = (*handler_rb_id, target_ms.clone());
                     let replay = outbound_replay_queues.get_mut(&key).ok_or_else(|| {
                         format!(
-                            "no-bind edf pull with no replay queue (rb_id={handler_rb_id}, \
-                             target={target_ms}) (seq={})",
+                            "no-bind {mode_label} pull with no replay queue \
+                             (rb_id={handler_rb_id}, target={target_ms}) (seq={})",
                             recorded.seq
                         )
                     })?;
                     let front = replay.pop_front().ok_or_else(|| {
                         format!(
-                            "no-bind edf pull with empty replay queue (rb_id={handler_rb_id}, \
-                             target={target_ms}) (seq={})",
+                            "no-bind {mode_label} pull with empty replay queue \
+                             (rb_id={handler_rb_id}, target={target_ms}) (seq={})",
                             recorded.seq
                         )
                     })?;
@@ -670,21 +792,32 @@ impl ApproxPullAudit {
         for ((handler_rb_id, target_ms), replay) in &outbound_replay_queues {
             if !replay.is_empty() {
                 return Err(format!(
-                    "non-empty outbound replay queue after no-bind edf validation \
+                    "non-empty outbound replay queue after no-bind {mode_label} validation \
                      (rb_id={handler_rb_id}, target={target_ms})"
                 ));
             }
         }
 
         if !saw_mismatch {
-            return Err(
-                "no-bind edf trace never exercised intent_request_id != pulled_request_id; \
-                 no-bind semantics may not be active"
-                    .into(),
-            );
+            return Err(format!(
+                "no-bind {mode_label} trace never exercised \
+                 intent_request_id != pulled_request_id; no-bind semantics may not be active"
+            ));
         }
 
         Ok(())
+    }
+
+    pub fn validate_no_bind_edf(&self) -> Result<(), String> {
+        self.validate_common()?;
+        self.validate_intent_fifo()?;
+        self.validate_outbound_edf("edf")
+    }
+
+    pub fn validate_no_bind_edf_plus(&self) -> Result<(), String> {
+        self.validate_common()?;
+        self.validate_intent_edf()?;
+        self.validate_outbound_edf("edf+")
     }
 
     /// Check delivery, queue accounting, FIFO pops, and bound pull routing.
@@ -706,7 +839,7 @@ mod tests {
     fn validate_bound_accepts_well_formed_sequence() {
         let audit = ApproxPullAudit::new();
         audit.record_intent_sent(3, "frontend", 3, "backend1", 4, 10, t(100));
-        audit.record_intent_queued("backend1", 4, 3, 10, 0);
+        audit.record_intent_queued("backend1", 4, 3, 10, t(100), 0);
         audit.record_intent_drained("backend1", 4, 3, 10, 1, 0, 0, 1);
         audit.record_pull_fulfilled(3, "frontend", 3, "backend1", 4, 10, 10, 1, Some(10));
         audit.validate_bound().expect("valid sequence");
@@ -717,10 +850,10 @@ mod tests {
         let audit = ApproxPullAudit::new();
         audit.record_intent_sent(1, "frontend", 1, "backend1", 0, 1, t(100));
         audit.record_intent_sent(2, "frontend", 2, "backend1", 0, 2, t(120));
-        audit.record_intent_queued("backend1", 0, 1, 1, 0);
-        audit.record_intent_queued("backend1", 0, 2, 2, 1);
+        audit.record_intent_queued("backend1", 0, 1, 1, t(100), 0);
+        audit.record_intent_queued("backend1", 0, 2, 2, t(120), 1);
         audit.record_intent_drained("backend1", 0, 2, 2, 2, 0, 0, 2);
-        let err = audit.validate_common().unwrap_err();
+        let err = audit.validate_intent_fifo().unwrap_err();
         assert!(err.contains("not FIFO"), "unexpected error: {err}");
     }
 
@@ -729,10 +862,10 @@ mod tests {
         let audit = ApproxPullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(120));
-        audit.record_intent_queued("backend1", 1, 0, 5, 0);
+        audit.record_intent_queued("backend1", 1, 0, 5, t(120), 0);
         audit.record_intent_drained("backend1", 1, 0, 5, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 5, 3, 2, Some(3));
-        audit.record_intent_queued("backend1", 1, 0, 3, 0);
+        audit.record_intent_queued("backend1", 1, 0, 3, t(100), 0);
         audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 5, 1, Some(5));
         audit.validate_no_bind().expect("valid no-bind sequence");
@@ -742,7 +875,7 @@ mod tests {
     fn validate_no_bind_rejects_wrong_queue_head() {
         let audit = ApproxPullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
-        audit.record_intent_queued("backend1", 1, 0, 3, 0);
+        audit.record_intent_queued("backend1", 1, 0, 3, t(100), 0);
         audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 99, 1, Some(3));
         let err = audit.validate_no_bind().unwrap_err();
@@ -757,10 +890,10 @@ mod tests {
         let audit = ApproxPullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(200));
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(100));
-        audit.record_intent_queued("backend1", 1, 0, 3, 0);
+        audit.record_intent_queued("backend1", 1, 0, 3, t(200), 0);
         audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 5, 2, Some(5));
-        audit.record_intent_queued("backend1", 1, 0, 5, 0);
+        audit.record_intent_queued("backend1", 1, 0, 5, t(100), 0);
         audit.record_intent_drained("backend1", 1, 0, 5, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 5, 3, 1, Some(3));
         audit.validate_no_bind_edf().expect("valid no-bind edf sequence");
@@ -770,7 +903,7 @@ mod tests {
     fn validate_no_bind_edf_rejects_wrong_queue_head() {
         let audit = ApproxPullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
-        audit.record_intent_queued("backend1", 1, 0, 3, 0);
+        audit.record_intent_queued("backend1", 1, 0, 3, t(100), 0);
         audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 99, 1, Some(3));
         let err = audit.validate_no_bind_edf().unwrap_err();
@@ -778,5 +911,44 @@ mod tests {
             err.contains("queue head") || err.contains("not EDF"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn validate_no_bind_edf_plus_accepts_intent_edf_and_outbound_mismatch() {
+        let audit = ApproxPullAudit::new();
+        // Outbound EDF head is 5@100; intent EDF drains 5 then 3. First pull uses
+        // intent id 5 but pulls outbound head 5; second intent 3 pulls remaining 3.
+        // Force a mismatch by draining intent 3 while outbound still has both items
+        // is awkward; instead send intents in order that creates intent!=pulled:
+        // drain earliest-deadline intent 5 first, but outbound EDF head is also 5 —
+        // so enqueue outbound as 3@100 then 5@200 so head is 3 while intent EDF
+        // drains 5 first → mismatch.
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(200));
+        audit.record_intent_queued("backend1", 1, 0, 3, t(200), 0);
+        audit.record_intent_queued("backend1", 1, 0, 5, t(100), 1);
+        audit.record_intent_drained("backend1", 1, 0, 5, 2, 0, 0, 1);
+        audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 5, 3, 2, Some(3));
+        audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
+        audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 5, 1, Some(5));
+        audit
+            .validate_no_bind_edf_plus()
+            .expect("valid no-bind edf+ sequence");
+    }
+
+    #[test]
+    fn validate_no_bind_edf_plus_rejects_fifo_intent_drain() {
+        let audit = ApproxPullAudit::new();
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(200));
+        audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(100));
+        audit.record_intent_queued("backend1", 1, 0, 3, t(200), 0);
+        audit.record_intent_queued("backend1", 1, 0, 5, t(100), 1);
+        // FIFO drain of 3 first — wrong for EDF intent queue.
+        audit.record_intent_drained("backend1", 1, 0, 3, 2, 0, 0, 1);
+        audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 3, 5, 2, Some(5));
+        audit.record_intent_drained("backend1", 1, 0, 5, 1, 0, 0, 1);
+        audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 5, 3, 1, Some(3));
+        let err = audit.validate_intent_edf().unwrap_err();
+        assert!(err.contains("not EDF"), "unexpected error: {err}");
     }
 }

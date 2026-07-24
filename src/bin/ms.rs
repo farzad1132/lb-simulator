@@ -285,6 +285,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_approx_sched_edf_plus() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "approx",
+            "--pull-policy",
+            "least-request",
+            "--approx-sched",
+            "edf+",
+        ]);
+        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::EdfPlus));
+    }
+
+    #[test]
     fn parses_approx_sched_fcfs() {
         let cli = Args::parse_from([
             "ms",

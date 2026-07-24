@@ -65,7 +65,7 @@ pub struct MsArgs {
     pub service_dist: MsServiceDistribution,
     /// When set, records approx pull/intent events for post-run invariant checks (tests).
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
-    /// Approx outbound pull scheduling: None = bound 1:1; Some(Fcfs|Edf) = unbound queue head.
+    /// Approx outbound pull scheduling: None = bound 1:1; Some(Fcfs|Edf|EdfPlus) = unbound queue head.
     pub approx_sched: Option<ApproxSchedKind>,
 }
 
@@ -1054,6 +1054,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 probe_reply_outputs,
                 pull_audit: pull_audit.clone(),
                 scheduling: args.scheduling,
+                approx_sched: args.approx_sched,
             });
             bench = bench.add_model(replica, mb, &format!("{microservice_id}-server-{i}"));
             if let Some(pull_input) = pull_input {

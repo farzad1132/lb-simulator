@@ -52,7 +52,7 @@ MS_LB_POLICIES = (
     "corr",
 )
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
-MS_APPROX_SCHED_POLICIES = ("fcfs", "edf")
+MS_APPROX_SCHED_POLICIES = ("fcfs", "edf", "edf+")
 LB_APPROX_SCHED_POLICIES = ("fcfs",)
 MS_SERVICE_DISTS = ("exp", "fixed", "bimodal")
 LB_SERVICE_DISTS = ("exponential", "constant", "bimodal")

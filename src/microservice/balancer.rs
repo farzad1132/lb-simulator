@@ -307,16 +307,15 @@ impl ReplicaBalancer {
         call: OutboundCall,
         approx_sched: Option<ApproxSchedKind>,
     ) {
-        match approx_sched {
-            None | Some(ApproxSchedKind::Fcfs) => queue.push_back(call),
-            Some(ApproxSchedKind::Edf) => {
-                let deadline = call.hop.deadline;
-                let insert_at = edf_insert_index(
-                    queue.iter().map(|c| c.hop.deadline),
-                    deadline,
-                );
-                queue.insert(insert_at, call);
-            }
+        if approx_sched.is_some_and(|s| s.outbound_uses_edf()) {
+            let deadline = call.hop.deadline;
+            let insert_at = edf_insert_index(
+                queue.iter().map(|c| c.hop.deadline),
+                deadline,
+            );
+            queue.insert(insert_at, call);
+        } else {
+            queue.push_back(call);
         }
     }
 
@@ -375,6 +374,7 @@ impl ReplicaBalancer {
                     .send(PullIntent {
                         sender_id: self.rb_id,
                         request_id,
+                        deadline,
                     })
                     .await;
             }
