@@ -1,5 +1,5 @@
 use super::hop::{CallerRef, Hop, OutboundCall, OutboundRelease, ReplicaInput};
-use super::occupancy::OccupancyAccumulator;
+use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::{fatal_pull_abort, PullIntent};
 use crate::approx_audit::ApproxPullAudit;

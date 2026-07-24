@@ -4,6 +4,7 @@ pub mod lb_pull_audit;
 pub mod lb_simulate;
 pub mod load_balancer;
 pub mod microservice;
+pub mod occupancy;
 pub mod policy;
 pub mod prequal;
 pub mod rng;

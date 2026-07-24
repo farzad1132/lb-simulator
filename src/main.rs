@@ -1,5 +1,8 @@
 use clap::{Parser, ValueEnum};
-use lb::lb_simulate::{LbArrivalDistribution, LbRunArgs, LbServiceDistribution, LbServiceStats};
+use lb::lb_simulate::{
+    HopStats as LbHopStats, LbArrivalDistribution, LbRunArgs, LbServiceDistribution, LbServiceStats,
+};
+use std::collections::HashMap;
 use lb::policy::{
     validate_approx_sched, validate_prequal_subset, validate_pull_policy, ApproxSchedKind,
     LoadBalancePolicyKind, PullPolicyKind,
@@ -57,6 +60,16 @@ fn compute_rates(args: &Args, service_mean: f32) -> Rates {
     }
 }
 
+#[derive(Clone, Serialize)]
+struct HopStats {
+    response_time: Vec<f64>,
+    queueing_delay: Vec<f64>,
+    cumulative_queueing_delay: Vec<f64>,
+    processing_time: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prob_latency_gt_slo: Option<f64>,
+}
+
 struct ServiceStats {
     utilization_pct: f64,
     regular_utilization_pct: Option<f64>,
@@ -74,6 +87,10 @@ struct ServiceStats {
     pre_eviction_queueing_delays: Option<Vec<f64>>,
     post_eviction_queueing_delays: Option<Vec<f64>>,
     pct_shed_requests: Option<f64>,
+    hop_order: Vec<String>,
+    by_hop: HashMap<String, HopStats>,
+    server_utilization_pct: HashMap<String, HashMap<usize, f64>>,
+    server_avg_queue_inflight: HashMap<String, HashMap<usize, f64>>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +128,10 @@ struct RunOutput {
     post_eviction_queueing_delays: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pct_shed_requests: Option<f64>,
+    hop_order: Vec<String>,
+    by_hop: HashMap<String, HopStats>,
+    server_utilization_pct: HashMap<String, HashMap<usize, f64>>,
+    server_avg_queue_inflight: HashMap<String, HashMap<usize, f64>>,
 }
 
 fn validate_slo(slo: Option<f64>) -> Result<Option<f64>, String> {
@@ -411,6 +432,17 @@ fn validate_work_shedding(args: &Args) -> Result<Option<Duration>, String> {
         .map(Some)
 }
 
+fn hop_stats_from_lb(stats: LbHopStats) -> HopStats {
+    HopStats {
+        response_time: stats.response_time,
+        queueing_delay: stats.queueing_delay,
+        cumulative_queueing_delay: stats.cumulative_queueing_delay,
+        processing_time: stats.processing_time,
+        // Filled in run_output when --slo is set.
+        prob_latency_gt_slo: None,
+    }
+}
+
 fn service_stats_from_lb(stats: LbServiceStats) -> ServiceStats {
     ServiceStats {
         utilization_pct: stats.utilization_pct,
@@ -429,6 +461,14 @@ fn service_stats_from_lb(stats: LbServiceStats) -> ServiceStats {
         pre_eviction_queueing_delays: stats.pre_eviction_queueing_delays,
         post_eviction_queueing_delays: stats.post_eviction_queueing_delays,
         pct_shed_requests: stats.pct_shed_requests,
+        hop_order: stats.hop_order,
+        by_hop: stats
+            .by_hop
+            .into_iter()
+            .map(|(k, v)| (k, hop_stats_from_lb(v)))
+            .collect(),
+        server_utilization_pct: stats.server_utilization_pct,
+        server_avg_queue_inflight: stats.server_avg_queue_inflight,
     }
 }
 
@@ -494,7 +534,7 @@ fn run_simulation(
 }
 
 fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> RunOutput {
-    let (slo_latency, prob_latency_gt_slo) = match (stats.as_ref(), slo) {
+    let (slo_latency, top_prob_latency_gt_slo) = match (stats.as_ref(), slo) {
         (Some(stats), Some(slo)) => (
             Some(slo),
             Some(prob_latency_gt_slo(&stats.e2e, slo)),
@@ -502,30 +542,42 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
         _ => (None, None),
     };
     match stats {
-        Some(stats) => RunOutput {
-            total_service_rate: rates.total_service_rate,
-            per_server_service_rate: rates.per_server_service_rate,
-            total_arrival_rate: rates.total_arrival_rate,
-            per_client_arrival_rate: rates.per_client_arrival_rate,
-            utilization_pct: stats.utilization_pct,
-            regular_utilization_pct: stats.regular_utilization_pct,
-            express_utilization_pct: stats.express_utilization_pct,
-            unloaded_latency_p99: stats.unloaded_latency_p99,
-            slo_latency,
-            prob_latency_gt_slo,
-            inter_arrival: stats.inter_arrival,
-            inter_departure: stats.inter_departure,
-            e2e: stats.e2e,
-            processing_times: stats.processing_times,
-            queueing_delays: stats.queueing_delays,
-            regular_e2e: stats.regular_e2e,
-            express_e2e: stats.express_e2e,
-            regular_queueing_delays: stats.regular_queueing_delays,
-            express_queueing_delays: stats.express_queueing_delays,
-            pre_eviction_queueing_delays: stats.pre_eviction_queueing_delays,
-            post_eviction_queueing_delays: stats.post_eviction_queueing_delays,
-            pct_shed_requests: stats.pct_shed_requests,
-        },
+        Some(mut stats) => {
+            if let Some(slo) = slo {
+                let p = prob_latency_gt_slo(&stats.e2e, slo);
+                for hop in stats.by_hop.values_mut() {
+                    hop.prob_latency_gt_slo = Some(p);
+                }
+            }
+            RunOutput {
+                total_service_rate: rates.total_service_rate,
+                per_server_service_rate: rates.per_server_service_rate,
+                total_arrival_rate: rates.total_arrival_rate,
+                per_client_arrival_rate: rates.per_client_arrival_rate,
+                utilization_pct: stats.utilization_pct,
+                regular_utilization_pct: stats.regular_utilization_pct,
+                express_utilization_pct: stats.express_utilization_pct,
+                unloaded_latency_p99: stats.unloaded_latency_p99,
+                slo_latency,
+                prob_latency_gt_slo: top_prob_latency_gt_slo,
+                inter_arrival: stats.inter_arrival,
+                inter_departure: stats.inter_departure,
+                e2e: stats.e2e,
+                processing_times: stats.processing_times,
+                queueing_delays: stats.queueing_delays,
+                regular_e2e: stats.regular_e2e,
+                express_e2e: stats.express_e2e,
+                regular_queueing_delays: stats.regular_queueing_delays,
+                express_queueing_delays: stats.express_queueing_delays,
+                pre_eviction_queueing_delays: stats.pre_eviction_queueing_delays,
+                post_eviction_queueing_delays: stats.post_eviction_queueing_delays,
+                pct_shed_requests: stats.pct_shed_requests,
+                hop_order: stats.hop_order,
+                by_hop: stats.by_hop,
+                server_utilization_pct: stats.server_utilization_pct,
+                server_avg_queue_inflight: stats.server_avg_queue_inflight,
+            }
+        }
         None => RunOutput {
             total_service_rate: rates.total_service_rate,
             per_server_service_rate: rates.per_server_service_rate,
@@ -536,7 +588,7 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             express_utilization_pct: None,
             unloaded_latency_p99: 0.0,
             slo_latency,
-            prob_latency_gt_slo,
+            prob_latency_gt_slo: top_prob_latency_gt_slo,
             inter_arrival: Vec::new(),
             inter_departure: Vec::new(),
             e2e: Vec::new(),
@@ -549,6 +601,10 @@ fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> R
             pre_eviction_queueing_delays: None,
             post_eviction_queueing_delays: None,
             pct_shed_requests: None,
+            hop_order: vec!["client".to_string(), "server".to_string()],
+            by_hop: HashMap::new(),
+            server_utilization_pct: HashMap::new(),
+            server_avg_queue_inflight: HashMap::new(),
         },
     }
 }

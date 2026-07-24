@@ -20,7 +20,7 @@ use super::hop::{
     CompletedRequest, Hop, OutboundCall, ReplicaInput, microservice_for_endpoint, sample_exp,
 };
 use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
-use super::occupancy::OccupancyAccumulator;
+use crate::occupancy::OccupancyAccumulator;
 use super::replica::{Replica, ReplicaConfig};
 use super::trace::MsTracer;
 use crate::approx_audit::ApproxPullAudit;
@@ -1435,7 +1435,7 @@ mod tests {
 
     #[test]
     fn caller_lb_queue_finalize_merges_into_server_avg_occupancy() {
-        use super::super::occupancy::OccupancyAccumulator;
+        use crate::occupancy::OccupancyAccumulator;
 
         let sim_start = MonotonicTime::EPOCH;
         let sim_end = sim_start + Duration::from_secs(10);

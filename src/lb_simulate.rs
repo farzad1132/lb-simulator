@@ -1,5 +1,6 @@
 use crate::lb_pull_audit::LbPullAudit;
 use crate::load_balancer::LoadBalancer;
+use crate::occupancy::OccupancyAccumulator;
 use crate::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use crate::server::{
     DispatchMode, ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task,
@@ -10,7 +11,8 @@ use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, Sin
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
 use rand::Rng;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MIN_DURATION_SECS: f32 = 1e-9;
@@ -82,6 +84,15 @@ pub struct LbRunArgs {
     pub work_shedding: Option<Duration>,
 }
 
+#[derive(Debug, Clone)]
+pub struct HopStats {
+    pub response_time: Vec<f64>,
+    pub queueing_delay: Vec<f64>,
+    pub cumulative_queueing_delay: Vec<f64>,
+    pub processing_time: Vec<f64>,
+    pub prob_latency_gt_slo: f64,
+}
+
 pub struct LbServiceStats {
     pub utilization_pct: f64,
     pub regular_utilization_pct: Option<f64>,
@@ -99,6 +110,19 @@ pub struct LbServiceStats {
     pub pre_eviction_queueing_delays: Option<Vec<f64>>,
     pub post_eviction_queueing_delays: Option<Vec<f64>>,
     pub pct_shed_requests: Option<f64>,
+    pub hop_order: Vec<String>,
+    pub by_hop: HashMap<String, HopStats>,
+    pub server_utilization_pct: HashMap<String, HashMap<usize, f64>>,
+    pub server_avg_queue_inflight: HashMap<String, HashMap<usize, f64>>,
+}
+
+struct HopTelemetry {
+    client_queue_occupancy: Arc<Mutex<HashMap<usize, OccupancyAccumulator>>>,
+    server_occupancy: Arc<Mutex<HashMap<usize, OccupancyAccumulator>>>,
+    server_busy_time: Arc<Mutex<HashMap<usize, Duration>>>,
+    n_clients: usize,
+    n_servers: usize,
+    concurrency: u32,
 }
 
 struct ExpressLaneStatsConfig {
@@ -286,12 +310,39 @@ fn percentile(sorted: &[f64], pct: f64) -> f64 {
     sorted[idx]
 }
 
+fn empty_hop_stats() -> HopStats {
+    HopStats {
+        response_time: Vec::new(),
+        queueing_delay: Vec::new(),
+        cumulative_queueing_delay: Vec::new(),
+        processing_time: Vec::new(),
+        prob_latency_gt_slo: 0.0,
+    }
+}
+
+fn finalize_occupancy_map(
+    map: &mut HashMap<usize, OccupancyAccumulator>,
+    keys: impl IntoIterator<Item = usize>,
+    end: MonotonicTime,
+    sim_start: MonotonicTime,
+) -> HashMap<usize, f64> {
+    let mut out = HashMap::new();
+    for key in keys {
+        let avg = map.entry(key).or_default().finalize(end, sim_start);
+        out.insert(key, avg);
+    }
+    out
+}
+
 fn calculate_stats(
     output: &mut EventQueueReader<Task>,
     observation: Duration,
     total_capacity: u32,
     express_lane: Option<&ExpressLaneStatsConfig>,
     work_shedding: bool,
+    hop_telemetry: &HopTelemetry,
+    sim_start: MonotonicTime,
+    sim_end: MonotonicTime,
 ) -> Option<LbServiceStats> {
     let mut task_samples: Vec<(f64, f64, bool, Option<f64>, Option<f64>)> = Vec::new();
     let mut arrival_times: Vec<f64> = Vec::new();
@@ -301,6 +352,9 @@ fn calculate_stats(
     let mut express_busy = Duration::ZERO;
     let mut total_requests = 0usize;
     let mut shed_requests = 0usize;
+
+    let mut client_stats = empty_hop_stats();
+    let mut server_stats = empty_hop_stats();
 
     while let Some(task) = output.try_read() {
         total_requests += 1;
@@ -341,6 +395,30 @@ fn calculate_stats(
             pre_eviction,
             post_eviction,
         ));
+
+        let dispatched_at = task
+            .dispatched_at
+            .expect("completed task missing dispatched_at");
+        let service_started_at = task
+            .service_started_at
+            .expect("completed task missing service_started_at");
+        let client_queueing = duration_secs(dispatched_at.duration_since(task.start));
+        let server_queueing = duration_secs(service_started_at.duration_since(dispatched_at));
+        let e2e = e2e_ns as f64 / 1e9;
+        let processing = unloaded_ns as f64 / 1e9;
+        let server_response = duration_secs(task.finish.duration_since(dispatched_at));
+
+        client_stats.response_time.push(e2e);
+        client_stats.queueing_delay.push(client_queueing);
+        client_stats.cumulative_queueing_delay.push(client_queueing);
+        client_stats.processing_time.push(0.0);
+
+        server_stats.response_time.push(server_response);
+        server_stats.queueing_delay.push(server_queueing);
+        server_stats
+            .cumulative_queueing_delay
+            .push(client_queueing + server_queueing);
+        server_stats.processing_time.push(processing);
     }
 
     if task_samples.is_empty() {
@@ -440,6 +518,53 @@ fn calculate_stats(
         None
     };
 
+    let mut client_occ = hop_telemetry
+        .client_queue_occupancy
+        .lock()
+        .expect("client occupancy lock");
+    let mut server_occ = hop_telemetry
+        .server_occupancy
+        .lock()
+        .expect("server occupancy lock");
+    let server_busy = hop_telemetry
+        .server_busy_time
+        .lock()
+        .expect("server busy lock");
+
+    let client_avg = finalize_occupancy_map(
+        &mut client_occ,
+        0..hop_telemetry.n_clients,
+        sim_end,
+        sim_start,
+    );
+    let server_avg = finalize_occupancy_map(
+        &mut server_occ,
+        0..hop_telemetry.n_servers,
+        sim_end,
+        sim_start,
+    );
+
+    let mut server_util = HashMap::new();
+    for server_idx in 0..hop_telemetry.n_servers {
+        let busy = server_busy.get(&server_idx).copied().unwrap_or(Duration::ZERO);
+        server_util.insert(
+            server_idx,
+            pool_utilization_pct(busy, observation, hop_telemetry.concurrency),
+        );
+    }
+
+    let mut server_utilization_pct = HashMap::new();
+    server_utilization_pct.insert("client".to_string(), HashMap::new());
+    server_utilization_pct.insert("server".to_string(), server_util);
+
+    let mut server_avg_queue_inflight = HashMap::new();
+    server_avg_queue_inflight.insert("client".to_string(), client_avg);
+    server_avg_queue_inflight.insert("server".to_string(), server_avg);
+
+    let mut by_hop = HashMap::new();
+    by_hop.insert("client".to_string(), client_stats);
+    by_hop.insert("server".to_string(), server_stats);
+
     Some(LbServiceStats {
         utilization_pct,
         regular_utilization_pct,
@@ -457,6 +582,10 @@ fn calculate_stats(
         pre_eviction_queueing_delays,
         post_eviction_queueing_delays,
         pct_shed_requests,
+        hop_order: vec!["client".to_string(), "server".to_string()],
+        by_hop,
+        server_utilization_pct,
+        server_avg_queue_inflight,
     })
 }
 
@@ -470,6 +599,17 @@ pub fn run(
     run_push_simulation(args, &service_time).map_err(Into::into)
 }
 
+fn new_hop_telemetry(n_clients: usize, n_servers: usize, concurrency: u32) -> HopTelemetry {
+    HopTelemetry {
+        client_queue_occupancy: Arc::new(Mutex::new(HashMap::new())),
+        server_occupancy: Arc::new(Mutex::new(HashMap::new())),
+        server_busy_time: Arc::new(Mutex::new(HashMap::new())),
+        n_clients,
+        n_servers,
+        concurrency,
+    }
+}
+
 fn run_centralized_simulation(
     args: &LbRunArgs,
     service_time: &ServiceTimeConfig,
@@ -478,6 +618,7 @@ fn run_centralized_simulation(
     let n_servers = args.servers.max(1) as usize;
     let concurrency = args.concurrency.max(1);
     let total_capacity = args.servers.max(1) * concurrency;
+    let hop_telemetry = new_hop_telemetry(1, n_servers, concurrency);
 
     let mut bench = SimInit::with_num_threads(1);
     let (sink, mut output) = event_queue(SinkState::Enabled);
@@ -498,6 +639,7 @@ fn run_centralized_simulation(
         false,
         None,
         None,
+        Some(hop_telemetry.client_queue_occupancy.clone()),
     );
     for j in 0..n_servers {
         load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
@@ -527,6 +669,8 @@ fn run_centralized_simulation(
             None,
             DispatchMode::Centralized,
             None,
+            Some(hop_telemetry.server_occupancy.clone()),
+            Some(hop_telemetry.server_busy_time.clone()),
         );
         server
             .pull_output
@@ -565,13 +709,17 @@ fn run_centralized_simulation(
 
     simu.run()?;
 
-    let observation = simu.time().duration_since(t0);
+    let sim_end = simu.time();
+    let observation = sim_end.duration_since(t0);
     Ok(calculate_stats(
         &mut output,
         observation,
         total_capacity,
         None,
         false,
+        &hop_telemetry,
+        t0,
+        sim_end,
     ))
 }
 
@@ -583,6 +731,13 @@ fn run_push_simulation(
     let n_servers = args.servers.max(1) as usize;
     let concurrency = args.concurrency.max(1);
     let total_capacity = args.servers.max(1) * concurrency;
+    // Express LB uses lb_id = n_clients; include it in the client occupancy map size.
+    let occupancy_clients = if args.express_lane.is_some() {
+        n_clients + 1
+    } else {
+        n_clients
+    };
+    let hop_telemetry = new_hop_telemetry(occupancy_clients, n_servers, concurrency);
 
     let (n_regular, express_lb_id) = match &args.express_lane {
         Some(cfg) => {
@@ -640,6 +795,7 @@ fn run_push_simulation(
             false,
             args.approx_sched,
             pull_audit.clone(),
+            Some(hop_telemetry.client_queue_occupancy.clone()),
         );
         for j in 0..client_lb_pool {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
@@ -673,6 +829,7 @@ fn run_push_simulation(
             true,
             None,
             None,
+            Some(hop_telemetry.client_queue_occupancy.clone()),
         );
         for j in n_regular..n_servers {
             express_lb.outputs[j].connect(Server::input, &server_mailboxes[j]);
@@ -755,6 +912,8 @@ fn run_push_simulation(
             server_express_lb_id,
             dispatch_mode,
             server_pull_audit,
+            Some(hop_telemetry.server_occupancy.clone()),
+            Some(hop_telemetry.server_busy_time.clone()),
         );
         if is_approx && !is_express {
             let mut pull_outputs: Vec<_> = (0..n_clients).map(|_| Output::default()).collect();
@@ -828,7 +987,8 @@ fn run_push_simulation(
 
     simu.run()?;
 
-    let observation = simu.time().duration_since(t0);
+    let sim_end = simu.time();
+    let observation = sim_end.duration_since(t0);
     let stats_config = args.express_lane.as_ref().map(|cfg| ExpressLaneStatsConfig {
         n_regular: (n_servers - cfg.express_size as usize) as u32,
         express_size: cfg.express_size,
@@ -840,5 +1000,8 @@ fn run_push_simulation(
         total_capacity,
         stats_config.as_ref(),
         args.work_shedding.is_some(),
+        &hop_telemetry,
+        t0,
+        sim_end,
     ))
 }

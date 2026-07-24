@@ -2,7 +2,6 @@ mod balancer;
 mod callgraph;
 mod hop;
 mod microservice_stats;
-mod occupancy;
 mod replica;
 mod simulate;
 mod trace;

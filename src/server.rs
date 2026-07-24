@@ -1,13 +1,14 @@
 use crate::approx::{PullIntent, PullRequest};
 use crate::lb_pull_audit::LbPullAudit;
+use crate::occupancy::OccupancyAccumulator;
 use crate::prequal::{Probe, ProbeReply};
 use nexosim::model::{Context, Model, schedulable};
 use nexosim::ports::Output;
 use nexosim::simulation::EventKey;
 use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Default, Deserialize, Serialize, Clone)]
@@ -21,6 +22,7 @@ pub struct Task {
     pub served_by_express: bool,
     pub evicted_at: Option<MonotonicTime>,
     pub shed_at: Option<MonotonicTime>,
+    pub dispatched_at: Option<MonotonicTime>,
     pub service_started_at: Option<MonotonicTime>,
 }
 
@@ -36,6 +38,7 @@ impl Task {
             served_by_express: false,
             evicted_at: None,
             shed_at: None,
+            dispatched_at: None,
             service_started_at: None,
         }
     }
@@ -152,6 +155,10 @@ pub struct Server {
     probe_reply_outputs: Vec<Output<ProbeReply>>,
     #[serde(skip)]
     pending_sheds: Vec<(MonotonicTime, PendingShed)>,
+    #[serde(skip)]
+    occupancy: Option<Arc<Mutex<HashMap<usize, OccupancyAccumulator>>>>,
+    #[serde(skip)]
+    busy_time: Option<Arc<Mutex<HashMap<usize, Duration>>>>,
 }
 
 impl Server {
@@ -165,6 +172,8 @@ impl Server {
         express_lb_id: Option<usize>,
         dispatch_mode: DispatchMode,
         pull_audit: Option<Arc<LbPullAudit>>,
+        occupancy: Option<Arc<Mutex<HashMap<usize, OccupancyAccumulator>>>>,
+        busy_time: Option<Arc<Mutex<HashMap<usize, Duration>>>>,
     ) -> Self {
         Self {
             output: Output::default(),
@@ -189,6 +198,19 @@ impl Server {
             shed_outputs: Vec::new(),
             probe_reply_outputs: Vec::new(),
             pending_sheds: Vec::new(),
+            occupancy,
+            busy_time,
+        }
+    }
+
+    fn record_occupancy(&self, now: MonotonicTime) {
+        let Some(occupancy) = &self.occupancy else {
+            return;
+        };
+        if let Ok(mut map) = occupancy.lock() {
+            map.entry(self.server_idx)
+                .or_default()
+                .record(now, self.rif());
         }
     }
 
@@ -306,6 +328,7 @@ impl Server {
 
     async fn forward_evicted(&mut self, mut task: Task, cx: &Context<Self>) {
         task.evicted_at = Some(cx.time());
+        self.record_occupancy(cx.time());
         self.express_output.send(task).await;
     }
 
@@ -355,6 +378,7 @@ impl Server {
 
     async fn forward_shed(&mut self, mut task: Task, cx: &Context<Self>) {
         task.shed_at = Some(cx.time());
+        self.record_occupancy(cx.time());
         let lb_id = task.lb_id;
         self.release_outputs[lb_id]
             .send(self.server_idx)
@@ -372,16 +396,19 @@ impl Server {
             duration: task.duration,
         });
         self.in_flight += 1;
+        self.record_occupancy(started_at);
         if let Err(t) = cx.schedule_event(task.duration, schedulable!(Self::complete), task) {
             eprintln!("could not schedule complete. err: {}", t);
             self.in_flight_services.pop();
             self.in_flight -= 1;
+            self.record_occupancy(started_at);
         }
     }
 
     fn drain_queue(&mut self, cx: &Context<Self>) {
         while self.in_flight < self.max_concurrency && !self.queue.is_empty() {
             let next = self.queue.remove(0);
+            self.record_occupancy(cx.time());
             self.begin_service(next, cx);
         }
     }
@@ -416,6 +443,7 @@ impl Server {
         } else {
             let task_start = task.start;
             self.queue.push(task);
+            self.record_occupancy(cx.time());
             self.apply_enqueue_eviction(task_start, cx).await;
             self.apply_work_shedding_on_enqueue(task_start, cx).await;
         }
@@ -519,8 +547,14 @@ impl Server {
         task.served_by_express = self.is_express;
         let lb_id = task.lb_id;
         let origin_server_idx = task.origin_server_idx;
+        let task_duration = task.duration;
         if let Some(started_at) = task.service_started_at {
             self.remove_in_flight(started_at);
+        }
+        if let Some(busy_time) = &self.busy_time {
+            if let Ok(mut map) = busy_time.lock() {
+                *map.entry(self.server_idx).or_default() += task_duration;
+            }
         }
         self.output.send(task).await;
         if self.is_express {
@@ -539,6 +573,7 @@ impl Server {
                 .await;
         }
         self.in_flight -= 1;
+        self.record_occupancy(cx.time());
         match self.dispatch_mode {
             DispatchMode::Centralized => {
                 self.pull_output

@@ -5,7 +5,7 @@ use super::hop::{
     filtered_children, microservice_for_endpoint, sample_duration,
 };
 use super::microservice_stats::MicroserviceVisitTracker;
-use super::occupancy::OccupancyAccumulator;
+use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::PullIntent;
 use crate::approx_audit::ApproxPullAudit;

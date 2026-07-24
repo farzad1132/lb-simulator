@@ -53,9 +53,12 @@ MS_LB_POLICIES = (
 )
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
 MS_APPROX_SCHED_POLICIES = ("fcfs", "edf")
+LB_APPROX_SCHED_POLICIES = ("fcfs",)
 MS_SERVICE_DISTS = ("exp", "fixed", "bimodal")
 LB_SERVICE_DISTS = ("exponential", "constant", "bimodal")
 SIMULATORS = ("lb", "ms")
+DEFAULT_BIMODAL_MODES = [0.5, 5.5]
+DEFAULT_BIMODAL_PROBS = [0.9, 0.1]
 
 
 @dataclass

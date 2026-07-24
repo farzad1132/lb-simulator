@@ -1,6 +1,6 @@
 # Analysis scripts (`analyze/`)
 
-Root-level `plot_*.py` scripts run the simulators and produce quick comparison or sweep plots. The `analyze/` directory holds scripts that depend on **extended `ms` JSON output** (per-microservice visit metrics) or other deeper behavioral analysis.
+Root-level `plot_*.py` scripts run the simulators and produce quick comparison or sweep plots. The `analyze/` directory holds scripts that depend on **extended simulator JSON** (per-hop / per-microservice visit metrics) or other deeper behavioral analysis.
 
 See also: [microservice-simulation.md](microservice-simulation.md) for simulator design, [lb-vs-ms.md](lb-vs-ms.md) for feature comparison.
 
@@ -43,13 +43,82 @@ flowchart LR
 ## Prerequisites
 
 - Python 3 with `numpy`, `matplotlib`, and `tqdm` in `.venv` (see [README](../README.md))
-- Release `ms` binary: `cargo build --release --bin ms`
+- Release binaries as needed: `cargo build --release --bin ms` and/or `cargo build --release --bin lb`
 
 ## Script catalog
 
 | Script | Simulator | Description |
 |--------|-----------|-------------|
 | [`analyze/ms_service_distributions.py`](../analyze/ms_service_distributions.py) | `ms` | Per-microservice visit distributions, queueing/stddev panels, replica utilization, and SLO violation rates for a chain topology |
+| [`analyze/lb_service_distributions.py`](../analyze/lb_service_distributions.py) | `lb` | Client/server hop distributions (index 0=client LB queue, 1=server), same panel layout as MS minus slack-d |
+
+## LB client/server hop metrics
+
+Flat `lb` is treated as a **2-hop** path for analysis:
+
+| Index | Hop | Queueing delay | Response time | Processing | Occupancy | Utilization |
+|------:|-----|----------------|---------------|------------|-----------|-------------|
+| 0 | `client` | `dispatched_at − start` (LB wait) | `finish − start` (e2e) | `0` | per-client LB queue length | empty (no client capacity) |
+| 1 | `server` | `service_started_at − dispatched_at` | `finish − dispatched_at` | `duration` | per-server `queue + in_flight` | per-server busy / (obs × concurrency) |
+
+`cumulative_queueing_delay` at the server hop is the sum of client and server queueing. With `--slo`, both hops report the same `prob_latency_gt_slo` based on e2e vs SLO (no per-hop slack-d).
+
+### `by_hop` JSON schema
+
+```json
+{
+  "hop_order": ["client", "server"],
+  "by_hop": {
+    "client": {
+      "response_time": [1.2, ...],
+      "queueing_delay": [0.1, ...],
+      "cumulative_queueing_delay": [0.1, ...],
+      "processing_time": [0.0, ...],
+      "prob_latency_gt_slo": 0.012
+    },
+    "server": { "...": "..." }
+  },
+  "server_utilization_pct": { "client": {}, "server": { "0": 85.1 } },
+  "server_avg_queue_inflight": {
+    "client": { "0": 1.2 },
+    "server": { "0": 2.0 }
+  }
+}
+```
+
+Times are in **seconds**. Aggregate top-level fields (`e2e`, `queueing_delays`, …) are unchanged.
+
+### Running examples
+
+```bash
+cargo build --release --bin lb
+
+# push (default power-of-two) — backlog at servers (hop 1)
+.venv/bin/python analyze/lb_service_distributions.py --n 100000 --seed 42 --servers 4 --clients 4
+
+# approx bound (1:1 pulls) — backlog at client LB queues (hop 0)
+.venv/bin/python analyze/lb_service_distributions.py \
+  --lb-policy approx --pull-policy least-request \
+  --servers 4 --clients 4 --slo 5 --n 100000
+
+# approx unbound FCFS
+.venv/bin/python analyze/lb_service_distributions.py \
+  --lb-policy approx --pull-policy least-request --approx-sched fcfs \
+  --servers 4 --clients 4 --n 100000
+```
+
+Default PDF names include the policy (and pull-policy / approx-sched when set), e.g. `output/lb_service_distributions_approx_leastrequest.pdf`.
+
+### Output artifacts
+
+`lb_service_distributions.py` writes a **4 × 2** multi-panel PDF:
+
+| Row | Left | Right |
+|-----|------|-------|
+| **0** | Cumulative queueing violin | Cumulative queueing stddev (independent vs actual) |
+| **1** | Response time violin | Avg occupancy per client LB / server |
+| **2** | *(hidden — no slack-d)* | Per-hop queueing mean±std |
+| **3** | Replica utilization (servers only) | SLO violations (%) |
 
 ## Per-microservice visit metrics
 

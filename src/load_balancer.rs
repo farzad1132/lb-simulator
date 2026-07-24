@@ -1,5 +1,6 @@
 use crate::approx::{fatal_pull_abort, PullIntent, PullRequest};
 use crate::lb_pull_audit::LbPullAudit;
+use crate::occupancy::OccupancyAccumulator;
 use crate::policy::ApproxSchedKind;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
@@ -12,9 +13,10 @@ use crate::rng;
 use crate::server::Task;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
+use nexosim::time::MonotonicTime;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 fn default_policy() -> Box<dyn LoadBalancePolicy> {
     Box::new(PowerOfTwoPolicy)
@@ -51,6 +53,8 @@ pub struct LoadBalancer {
     #[serde(skip)]
     r_probe_accum: f64,
     n_servers: usize,
+    #[serde(skip)]
+    queue_occupancy: Option<Arc<Mutex<HashMap<usize, OccupancyAccumulator>>>>,
     pub outputs: Vec<Output<Task>>,
     pub pull_intent_outputs: Vec<Output<PullIntent>>,
     pub probe_outputs: Vec<Output<Probe>>,
@@ -66,6 +70,7 @@ impl LoadBalancer {
         preserve_client_metadata: bool,
         approx_sched: Option<ApproxSchedKind>,
         pull_audit: Option<Arc<LbPullAudit>>,
+        queue_occupancy: Option<Arc<Mutex<HashMap<usize, OccupancyAccumulator>>>>,
     ) -> Self {
         Self {
             policy,
@@ -85,9 +90,21 @@ impl LoadBalancer {
             r_remove_accum: 0.0,
             r_probe_accum: 0.0,
             n_servers,
+            queue_occupancy,
             outputs: (0..n_servers).map(|_| Output::default()).collect(),
             pull_intent_outputs: (0..n_servers).map(|_| Output::default()).collect(),
             probe_outputs: (0..n_servers).map(|_| Output::default()).collect(),
+        }
+    }
+
+    fn record_queue_occupancy(&self, now: MonotonicTime) {
+        let Some(occupancy) = &self.queue_occupancy else {
+            return;
+        };
+        if let Ok(mut map) = occupancy.lock() {
+            map.entry(self.lb_id)
+                .or_default()
+                .record(now, self.queue.len() as u32);
         }
     }
 
@@ -103,7 +120,7 @@ impl LoadBalancer {
         }
     }
 
-    async fn dispatch_prequal(&mut self, mut task: Task) {
+    async fn dispatch_prequal(&mut self, mut task: Task, cx: &Context<Self>) {
         apply_r_remove(&mut self.candidate_pool, &mut self.r_remove_accum, R_REMOVE);
 
         let global_idx = if let Some(server_idx) = self.candidate_pool.select_best() {
@@ -119,29 +136,32 @@ impl LoadBalancer {
             task.lb_id = self.lb_id;
             task.origin_server_idx = global_idx;
         }
+        task.dispatched_at = Some(cx.time());
         self.outputs[global_idx].send(task).await;
 
         self.candidate_pool.after_dispatch(global_idx, B_REUSE);
         self.issue_probes().await;
     }
 
-    async fn dispatch_to_server(&mut self, server_idx: usize, mut task: Task) {
+    async fn dispatch_to_server(&mut self, server_idx: usize, mut task: Task, cx: &Context<Self>) {
         self.local_inflight[server_idx] += 1;
         if !self.preserve_client_metadata {
             task.lb_id = self.lb_id;
             task.origin_server_idx = server_idx;
         }
+        task.dispatched_at = Some(cx.time());
         self.outputs[server_idx].send(task).await;
     }
 
-    async fn dispatch_waiting(&mut self) {
+    async fn dispatch_waiting(&mut self, cx: &Context<Self>) {
         while let Some(server_idx) = self.waiting_servers.pop_front() {
             if self.queue.is_empty() {
                 self.waiting_servers.push_front(server_idx);
                 break;
             }
             let task = self.queue.remove(0);
-            self.dispatch_to_server(server_idx, task).await;
+            self.record_queue_occupancy(cx.time());
+            self.dispatch_to_server(server_idx, task, cx).await;
         }
     }
 
@@ -174,10 +194,11 @@ impl LoadBalancer {
 
 #[Model]
 impl LoadBalancer {
-    pub async fn input(&mut self, mut task: Task, _cx: &Context<Self>) {
+    pub async fn input(&mut self, mut task: Task, cx: &Context<Self>) {
         if self.lb_policy.is_centralized() {
             self.queue.push(task);
-            self.dispatch_waiting().await;
+            self.record_queue_occupancy(cx.time());
+            self.dispatch_waiting(cx).await;
             return;
         }
 
@@ -190,12 +211,13 @@ impl LoadBalancer {
                 audit.record_task_enqueued(self.lb_id, request_id, queue_len_before);
             }
             self.queue.push(task);
+            self.record_queue_occupancy(cx.time());
             self.send_pull_intent(request_id).await;
             return;
         }
 
         if self.lb_policy.is_prequal() {
-            self.dispatch_prequal(task).await;
+            self.dispatch_prequal(task, cx).await;
             return;
         }
 
@@ -204,15 +226,10 @@ impl LoadBalancer {
         }
         let local_idx = self.policy.select(&self.load_scratch);
         let global_idx = self.server_indices[local_idx];
-        self.local_inflight[global_idx] += 1;
-        if !self.preserve_client_metadata {
-            task.lb_id = self.lb_id;
-            task.origin_server_idx = global_idx;
-        }
-        self.outputs[global_idx].send(task).await;
+        self.dispatch_to_server(global_idx, task, cx).await;
     }
 
-    pub async fn pull(&mut self, pull: PullRequest, _cx: &Context<Self>) {
+    pub async fn pull(&mut self, pull: PullRequest, cx: &Context<Self>) {
         if self.lb_policy.is_approx() {
             let server_idx = pull.server_idx;
             if self.approx_sched.is_some() {
@@ -233,6 +250,7 @@ impl LoadBalancer {
                 let queue_len_before = self.queue.len();
                 let queue_head_task_id = self.queue.first().map(|t| t.task_id);
                 let task = self.queue.remove(0);
+                self.record_queue_occupancy(cx.time());
                 let pulled_task_id = task.task_id;
                 if let Some(audit) = &self.pull_audit {
                     audit.record_pull_fulfilled(
@@ -246,7 +264,7 @@ impl LoadBalancer {
                 }
                 self.pull_intent_load[server_idx] =
                     self.pull_intent_load[server_idx].saturating_sub(1);
-                self.dispatch_to_server(server_idx, task).await;
+                self.dispatch_to_server(server_idx, task, cx).await;
                 return;
             }
 
@@ -275,6 +293,7 @@ impl LoadBalancer {
                     ),
                 );
             };
+            self.record_queue_occupancy(cx.time());
             let pulled_task_id = task.task_id;
             if let Some(audit) = &self.pull_audit {
                 audit.record_pull_fulfilled(
@@ -288,7 +307,7 @@ impl LoadBalancer {
             }
             self.pull_intent_load[server_idx] =
                 self.pull_intent_load[server_idx].saturating_sub(1);
-            self.dispatch_to_server(server_idx, task).await;
+            self.dispatch_to_server(server_idx, task, cx).await;
             return;
         }
 
@@ -297,7 +316,8 @@ impl LoadBalancer {
             self.waiting_servers.push_back(server_idx);
         } else {
             let task = self.queue.remove(0);
-            self.dispatch_to_server(server_idx, task).await;
+            self.record_queue_occupancy(cx.time());
+            self.dispatch_to_server(server_idx, task, cx).await;
         }
     }
 
@@ -328,6 +348,7 @@ mod tests {
             0,
             false,
             approx_sched,
+            None,
             None,
         )
     }
