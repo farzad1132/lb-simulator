@@ -72,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_dist: cli.service_dist,
         verbose: cli.verbose,
         pull_audit: None,
+        centralized_audit: None,
         approx_sched: cli.approx_sched,
     };
 

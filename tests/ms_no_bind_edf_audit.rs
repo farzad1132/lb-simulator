@@ -31,6 +31,7 @@ fn approx_args(
         scheduling: SchedulingPolicyKind::Fifo,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
+        centralized_audit: None,
         approx_sched: Some(approx_sched),
     }
 }

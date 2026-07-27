@@ -3,6 +3,7 @@ use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::{fatal_pull_abort, PullIntent};
 use crate::approx_audit::ApproxPullAudit;
+use crate::ms_centralized_audit::MsCentralizedAudit;
 use crate::policy::ApproxSchedKind;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
@@ -722,8 +723,11 @@ pub struct DownstreamBalancer {
     policy: Box<dyn LoadBalancePolicy>,
     lb_policy: LoadBalancePolicyKind,
     target_microservice: String,
+    lb_id: usize,
     #[serde(skip)]
     tracer: Option<Arc<MsTracer>>,
+    #[serde(skip)]
+    centralized_audit: Option<Arc<MsCentralizedAudit>>,
     #[serde(skip)]
     local_inflight: Vec<u32>,
     #[serde(skip)]
@@ -756,7 +760,9 @@ impl DownstreamBalancer {
         n_servers: usize,
         server_indices: Vec<usize>,
         lb_policy: LoadBalancePolicyKind,
+        lb_id: usize,
         tracer: Option<Arc<MsTracer>>,
+        centralized_audit: Option<Arc<MsCentralizedAudit>>,
         caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
     ) -> Self {
         debug_assert!(
@@ -767,7 +773,9 @@ impl DownstreamBalancer {
             policy: lb_policy.downstream_push_policy(),
             lb_policy,
             target_microservice,
+            lb_id,
             tracer,
+            centralized_audit,
             local_inflight: vec![0; n_servers],
             load_scratch: vec![0; server_indices.len()],
             server_indices,
@@ -825,6 +833,14 @@ impl DownstreamBalancer {
         self.local_inflight[server_idx] += 1;
 
         if self.lb_policy.is_centralized() {
+            if let Some(audit) = &self.centralized_audit {
+                audit.record_call_dispatched(
+                    &self.target_microservice,
+                    self.lb_id,
+                    server_idx,
+                    call.hop.request_id,
+                );
+            }
             call.hop.slot_release = Some(OutboundRelease {
                 target_microservice: self.target_microservice.clone(),
                 target_server: server_idx,
@@ -872,14 +888,31 @@ impl DownstreamBalancer {
         }
 
         if self.lb_policy.is_centralized() {
+            let queue_len_before = self.queue.len();
+            if let Some(audit) = &self.centralized_audit {
+                let caller_server = call
+                    .hop
+                    .caller
+                    .as_ref()
+                    .map(|c| c.server)
+                    .unwrap_or(0);
+                audit.record_call_enqueued(
+                    &self.target_microservice,
+                    self.lb_id,
+                    caller_server,
+                    call.hop.request_id,
+                    queue_len_before,
+                );
+            }
             if let Some(tracer) = &self.tracer {
                 tracer.log(
                     call.hop.trace,
                     cx.time(),
                     call.hop.request_id,
                     &format!(
-                        "DownstreamBalancer(target={}, centralized) enqueue endpoint={} queue={}",
+                        "DownstreamBalancer(target={}, lb={}, centralized) enqueue endpoint={} queue={}",
                         self.target_microservice,
+                        self.lb_id,
                         call.hop.endpoint,
                         self.queue.len() + 1
                     ),

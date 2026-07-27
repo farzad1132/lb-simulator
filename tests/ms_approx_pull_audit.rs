@@ -25,6 +25,7 @@ fn chain3_approx_args(n: u32, seed: u64, audit: Option<std::sync::Arc<ApproxPull
         scheduling: SchedulingPolicyKind::Fifo,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
+        centralized_audit: None,
         approx_sched: None,
     }
 }
@@ -88,6 +89,7 @@ fn ms_approx_pull_invariants_with_power_of_two_pull_policy() {
         scheduling: SchedulingPolicyKind::Fifo,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: Some(audit.clone()),
+        centralized_audit: None,
         approx_sched: None,
     })
     .unwrap()

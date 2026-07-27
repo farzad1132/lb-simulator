@@ -116,7 +116,7 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
 | **EdgeBalancer** | one per API | Push routing to entry replicas; honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `prequal` |
 | **ReplicaBalancer** | one per server (default, `approx`, and `prequal` policies) | Outbound only: push dispatch (default policies), decentralized pull-intent queues (`approx`), or async RIF probe pools (`prequal`) |
-| **DownstreamBalancer** | one per downstream target (`cl`, `cl-lr`, `centralized`, `corr`) | Shared outbound LB: push P2C (`cl`), push least-request (`cl-lr`), pull FCFS (`centralized`), or experimental push (`corr`) |
+| **DownstreamBalancer** | one per downstream target (`cl`, `cl-lr`, `corr`); one per subset of each target (`centralized` with `k > 0`, else one per target) | Shared outbound LB: push P2C (`cl`), push least-request (`cl-lr`), pull FCFS (`centralized`), or experimental push (`corr`) |
 | **OutboundGateway** | one per server (`cl`, `cl-lr`, `centralized`, `corr`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
 | **Replica** (server) | `replicas` per microservice | Configurable queue (`fifo` default, `edf` optional; see [scheduling.md](scheduling.md)), local processing, nested dispatch/return |
 
@@ -126,7 +126,7 @@ A callgraph microservice node becomes:
 
 - `replicas` × `Replica` (server) models, each with `max_concurrency = cpu / replicas`
 - Default push policies, `approx`, and `prequal`: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
-- `--lb-policy cl`, `cl-lr`, `centralized`, or `corr`: one `DownstreamBalancer` per downstream microservice target, plus `replicas` × `OutboundGateway` forwarders
+- `--lb-policy cl`, `cl-lr`, `centralized`, or `corr`: one `DownstreamBalancer` per downstream microservice target (or `S` partitioned balancers per target when `centralized` and `k > 0`), plus `replicas` × `OutboundGateway` forwarders
 
 All interfaces of a microservice share the same server pool. The queue is per-server, not per-interface.
 
@@ -139,9 +139,11 @@ When `--lb-subset-size k > 0`, each balancer only routes among `min(k, replicas)
 - **EdgeBalancer:** client id is the API index (APIs sorted lexicographically).
 - **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
 
-**Not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. Shared-layer policies and prequal require all replicas (ingress and outbound).
+**Not supported with `prequal`, `cl`, `cl-lr`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. Those policies require all replicas (ingress and outbound).
 
-See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm.
+**Centralized** accepts restricted partition subsetting (same constraints as lb): deterministic only; `k` must divide each downstream target's replica count; each caller's replica count must be divisible by `S = target_replicas / k`. With `k > 0`, each downstream target is partitioned into `S` shared pull `DownstreamBalancer`s; caller replica `i` feeds balancer `i % S`; target replicas pull only from their owning balancer. With `k = 0`, one pull balancer per target (full pool).
+
+See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm and [Centralized subsetting](lb-simulation.md#centralized-subsetting).
 
 ### What is NOT modeled
 
@@ -256,9 +258,9 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 |----|------------|
 | `cl` | Push-on-arrival P2C; inflight released on return to caller |
 | `centralized` | Pull FCFS queue; inflight released after local service complete at assigned replica (before nested child dispatch) |
-| lb `centralized` | One global flat pool; ms uses one pull queue **per downstream target** |
+| lb `centralized` | One global flat pool (or partitioned subsets); ms uses one pull queue **per downstream target** (or `S` partitioned queues when `k > 0`) |
 
-`--lb-subset-size > 0` is not supported with `cl`, `cl-lr`, `centralized`, or `corr`.
+With `--lb-subset-size k > 0`, each downstream target is partitioned into `S = replicas / k` shared pull balancers under the same constraints as [lb centralized subsetting](lb-simulation.md#centralized-subsetting) (deterministic only; `k` divides target replicas; each caller's replicas divisible by `S`). `--lb-subset-size > 0` remains unsupported with `cl`, `cl-lr`, and `corr`.
 
 ### Approx policy (decentralized outbound pull)
 
@@ -437,7 +439,7 @@ cargo build --release
 | `--approx-sched` | Omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment; independent of `--scheduling` |
 | `--scheduling` | Server queue discipline at each replica: `fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
 | `--service-dist` | Service-time distribution: `exp` (default), `fixed`, or `bimodal` (hardcoded modes scaled to each endpoint mean) |
-| `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr`. |
+| `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `prequal`, `cl`, `cl-lr`, or `corr`. With `centralized`, restricted partition subsetting (see above). |
 | `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
 | `--seed` | Optional RNG seed for reproducible runs |
 | `--format` | `human` or `json` |

@@ -30,6 +30,7 @@ fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsA
         scheduling: SchedulingPolicyKind::Fifo,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
+        centralized_audit: None,
         approx_sched: None,
     }
 }
@@ -140,6 +141,7 @@ fn f1_nested_callgraph_completes() {
         scheduling: SchedulingPolicyKind::Fifo,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
+        centralized_audit: None,
         approx_sched: None,
     })
     .unwrap()

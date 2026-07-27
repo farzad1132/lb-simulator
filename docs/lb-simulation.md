@@ -263,7 +263,7 @@ With `--lb-subset-size k > 0`, the pool is partitioned into `S = servers / k` di
 
 | Choice | Decision | Rationale / implications |
 |--------|----------|--------------------------|
-| **Simulator scope** | `lb`: flat pool (optionally partitioned) | `ms`: one pull queue per downstream target (outbound only; ingress stays push P2C). See [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
+| **Simulator scope** | `lb`: flat pool (optionally partitioned) | `ms`: one pull queue per downstream target (or `S` partitioned queues when `k > 0`; outbound only; ingress stays push P2C). See [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Push vs pull** | Pull-based | Push policies call `select()` on arrival. Centralized queues tasks at the LB; servers initiate assignment. |
 | **Queue location** | One FIFO queue per subset LB | With `k = 0`, a single global queue. With `k > 0`, one queue per partition; clients with the same `i % S` share that queue. Per-client LBs are **not** created. |
 | **Multi-client semantics** | Arrivals split; routing shared per subset | `--clients C` creates C arrival sources and splits `--n` across them (aggregate rate unchanged). Without subsetting, all feed one queue. With subsetting, clients map to subset LBs via `i % S`. |
@@ -465,6 +465,7 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 | `src/approx.rs` | `PullIntent` / `PullRequest` wire types |
 | `src/prequal.rs` | `Probe` / `ProbeReply` wire types and candidate pool |
 | `src/lb_centralized_audit.rs` | Optional enqueue/dispatch audit for centralized subset invariants |
+| `src/ms_centralized_audit.rs` | Optional MS centralized enqueue/dispatch audit (per-target subset invariants) |
 | `src/subset.rs` | Server subset assignment (`deterministic` / `random`) |
 
 Approx policy details: [approx-policy.md](approx-policy.md). Prequal: [prequal-policy.md](prequal-policy.md).

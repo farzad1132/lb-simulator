@@ -332,6 +332,7 @@ def run_ms_simulation(
     scheduling: str = "fifo",
     service_dist: str = "exp",
     approx_sched: str | None = None,
+    scale: int | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -362,6 +363,8 @@ def run_ms_simulation(
         cmd.extend(["--slo-ms", str(slo_ms)])
     if approx_sched is not None:
         cmd.extend(["--approx-sched", approx_sched])
+    if scale is not None and scale != 0:
+        cmd.extend(["--scale", str(scale)])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")

@@ -29,7 +29,7 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **power-of-two** — sample two random servers and route to the one with lower local inflight (requests this balancer has dispatched but not yet received a release for)
 - **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
-- **centralized** — pull-based: FIFO queue(s) at central dispatcher(s); servers request work when they have spare capacity (`lb`: full pool or [strict partition subsets](docs/lb-simulation.md#centralized-subsetting); incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target; subsetting rejected); see [microservice-simulation.md](docs/microservice-simulation.md#centralized-policy-pull-based-layer).
+- **centralized** — pull-based: FIFO queue(s) at central dispatcher(s); servers request work when they have spare capacity (`lb`: full pool or [strict partition subsets](docs/lb-simulation.md#centralized-subsetting); incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target, or partitioned subsets when `k > 0`); see [microservice-simulation.md](docs/microservice-simulation.md#centralized-policy-pull-based-layer).
 - **approx** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); optional **`--approx-sched fcfs`**, **`edf`**, or **`edf+`** (`ms`) for unbound queue-head pulls; see [docs/approx-policy.md](docs/approx-policy.md)
 - **prequal** — decentralized push with async RIF probe pool (`lb` and `ms` outbound; `--lb-subset-size > 0` rejected); see [docs/prequal-policy.md](docs/prequal-policy.md)
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
@@ -40,7 +40,7 @@ Each load balancer can be restricted to a subset of servers via `--lb-subset-siz
 
 - **Push / approx:** each client LB routes among `min(k, servers)` servers; leftovers (`n % k`) may be unused; `--lb-subset-policy` may be `deterministic` or `random`.
 - **Centralized (`lb`):** `k` must divide `--servers`; one shared pull LB per subset; `--clients` must be divisible by the subset count; only `deterministic` subset policy. See [docs/lb-simulation.md — Server subset](docs/lb-simulation.md#server-subset).
-- **Not supported:** `prequal`, and in `ms` also `cl`, `cl-lr`, `centralized`, and `corr`.
+- **Not supported:** `prequal`, and in `ms` also `cl`, `cl-lr`, and `corr`. Both simulators support restricted partition subsetting for `centralized`.
 
 ## Metrics
 
@@ -137,7 +137,7 @@ cargo build --release
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `prequal`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` (ms only; `edf+` also EDF-orders intent queues) for unbound queue-head fulfillment; see [docs/approx-policy.md](docs/approx-policy.md) |
-| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr` in `ms`; `lb` centralized requires `k` divides servers) |
+| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, or `corr` in `ms`; `centralized` requires `k` divides servers/replicas and callers divisible by `S`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`); see [docs/scheduling.md](docs/scheduling.md) |
@@ -230,6 +230,7 @@ Python plotting scripts live in the repo root. Each runs the simulator (or compa
 | [`plot_lb_express_heatmap.py`](plot_lb_express_heatmap.py) | express pool size | express delay threshold | Heatmap of a metric across express-size vs express-del-th |
 | [`optimize_express_lane.py`](optimize_express_lane.py) | — | — | Grid-search express_size × express_del_th × express_th; human-readable log only (no plots) |
 | [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6 / chain10) | Heatmap of SLO violation rate (%) across load for chain topologies |
+| [`plot_ms_chain_load_compare.py`](plot_ms_chain_load_compare.py) | load | SLO violation % | Compare MS configs on one required chain (`--chain 3\|6\|10`); one line per config |
 | [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
 
 Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script. Use [`plot_lb_load_compare.py`](plot_lb_load_compare.py) when comparing named configs at the same load levels. Use [`plot_lb_subset_compare.py`](plot_lb_subset_compare.py) when comparing named configs across subset sizes at fixed load.
@@ -595,6 +596,15 @@ python optimize_express_lane.py --resume optimizer_logs/express_lane_20250702_15
 | `--seed` | (none) | RNG seed |
 | `--binary` / `--no-build` | (build release) | Prebuilt binary options |
 
+## Plot microservice chain load compare
+
+`plot_ms_chain_load_compare.py` compares named MS experiment configs on **one** chain topology while sweeping load. Requires `--chain {3,6,10}`. X-axis is load; Y-axis is SLO violation rate (%); one line per config in `DEFAULT_CONFIGS`. SLO is calibrated once (processing p99 × 2) and shared across all configs. Optional `--scale N` adds N cpu cores and N replicas to every microservice (ms `--scale`). Output defaults to `output/ms_chain{N}_load_compare_slo.pdf`.
+
+```bash
+.venv/bin/python plot_ms_chain_load_compare.py --chain 3 --n 100000
+.venv/bin/python plot_ms_chain_load_compare.py --chain 6 --scale 10
+```
+
 ## Plot microservice chain SLO heatmap
 
 `plot_ms_chain_slo_heatmap.py` runs the ms simulator on chain3, chain6, and chain10 fixtures at each load level and writes a heatmap of SLO violation rate (%) to `output/ms_chain_slo_heatmap.pdf`. Cell color encodes the violation percentage; rows are chain depth, columns are load.
@@ -632,7 +642,7 @@ python compare_lb_ms.py --scenario all --plot
 | `--scenario` | `all` | `single`, `multi`, or `all` fixture topologies |
 | `--n` | `200000` | Total requests per run |
 | `--load` | `0.8` | Target utilization for lb (ms `load.json` rps must match) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (`cl`, `cl-lr`, `corr`, and ms `centralized` are shared-layer outbound; subset not supported with those policies) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (`cl`, `cl-lr`, `corr` are shared-layer outbound without subsetting; ms `centralized` supports restricted partition subsetting) |
 | `--plot` | (off) | Write lb vs ms overlay CDF plots to `--output-dir` |
 | `--output-dir` | `output/` | Directory for optional CDF plots |
 | `--no-build` | (off) | Do not run `cargo build --release` |

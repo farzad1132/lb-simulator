@@ -24,9 +24,10 @@ use crate::occupancy::OccupancyAccumulator;
 use super::replica::{Replica, ReplicaConfig};
 use super::trace::MsTracer;
 use crate::approx_audit::ApproxPullAudit;
+use crate::ms_centralized_audit::MsCentralizedAudit;
 use crate::policy::{
-    validate_approx_sched, validate_prequal_subset, validate_pull_policy, ApproxSchedKind,
-    LoadBalancePolicyKind, PullPolicyKind,
+    validate_approx_sched, validate_centralized_subset, validate_prequal_subset,
+    validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind,
 };
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
@@ -65,6 +66,8 @@ pub struct MsArgs {
     pub service_dist: MsServiceDistribution,
     /// When set, records approx pull/intent events for post-run invariant checks (tests).
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
+    /// When set, records centralized enqueue/dispatch events for post-run subset checks (tests).
+    pub centralized_audit: Option<Arc<MsCentralizedAudit>>,
     /// Approx outbound pull scheduling: None = bound 1:1; Some(Fcfs|Edf|EdfPlus) = unbound queue head.
     pub approx_sched: Option<ApproxSchedKind>,
 }
@@ -431,15 +434,64 @@ fn calculate_stats(
     })
 }
 
+fn callers_of_target(graph: &CallGraph, target: &str) -> HashSet<String> {
+    let mut callers = HashSet::new();
+    for microservice_id in &graph.microservice_order {
+        if downstream_targets(graph, microservice_id).contains(target) {
+            callers.insert(microservice_id.clone());
+        }
+    }
+    callers
+}
+
+fn validate_ms_shared_subset(
+    lb_policy: LoadBalancePolicyKind,
+    lb_subset_size: u32,
+    lb_subset_policy: SubsetPolicyKind,
+    graph: &CallGraph,
+) -> Result<(), String> {
+    if lb_subset_size == 0 {
+        return Ok(());
+    }
+    if matches!(
+        lb_policy,
+        LoadBalancePolicyKind::Cl | LoadBalancePolicyKind::ClLr | LoadBalancePolicyKind::Corr
+    ) {
+        return Err(
+            "--lb-subset-size is not supported with --lb-policy cl, cl-lr, or corr".into(),
+        );
+    }
+    if !lb_policy.is_centralized() {
+        return Ok(());
+    }
+
+    let mut targets: Vec<_> = all_downstream_targets(graph).into_iter().collect();
+    targets.sort();
+    for target in targets {
+        let n_servers = graph.microservices[&target].replicas;
+        let mut callers: Vec<_> = callers_of_target(graph, &target).into_iter().collect();
+        callers.sort();
+        for caller in callers {
+            let n_clients = graph.microservices[&caller].replicas;
+            validate_centralized_subset(
+                lb_policy,
+                n_servers,
+                n_clients,
+                lb_subset_size,
+                lb_subset_policy,
+            )
+            .map_err(|err| {
+                format!("centralized subsetting for caller {caller} → target {target}: {err}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     validate_pull_policy(args.lb_policy, args.pull_policy)?;
     validate_approx_sched(args.lb_policy, args.approx_sched, true)?;
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)?;
-    if args.lb_policy.uses_shared_downstream() && args.lb_subset_size > 0 {
-        return Err(
-            "--lb-subset-size is not supported with --lb-policy cl, cl-lr, centralized, or corr".into(),
-        );
-    }
     rng::enter_run(args.seed);
     let result = run_inner(args);
     rng::exit_run();
@@ -450,6 +502,12 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let mut graph = CallGraph::from_file(&args.callgraph)?;
     graph.apply_scale(args.scale)?;
     graph.service_dist = args.service_dist;
+    validate_ms_shared_subset(
+        args.lb_policy,
+        args.lb_subset_size,
+        args.lb_subset_policy,
+        &graph,
+    )?;
     let graph = Arc::new(graph);
     let mut load = load_spec_from_file(&args.load_file)?;
     apply_load_overrides(&mut load, args.rps, args.slo_ms);
@@ -538,6 +596,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         balancer: DownstreamBalancer,
         mailbox: Mailbox<DownstreamBalancer>,
         target_microservice: String,
+        lb_id: usize,
         server_indices: Vec<usize>,
     }
 
@@ -552,6 +611,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let is_approx = args.lb_policy.is_approx();
     let is_prequal = args.lb_policy.is_prequal();
     let pull_audit = args.pull_audit.clone();
+    let centralized_audit = args.centralized_audit.clone();
 
     let mut pending_edge_balancers: Vec<PendingEdgeBalancer> = Vec::new();
     let mut edge_balancer_inputs: HashMap<String, Output<Hop>> = HashMap::new();
@@ -629,40 +689,75 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         (String, usize),
         nexosim::simulation::Address<OutboundGateway>,
     > = HashMap::new();
+    // Keyed by (target, lb_id). With k=0 or non-centralized shared policies, only lb_id=0 exists.
     let mut downstream_balancer_addresses: HashMap<
-        String,
+        (String, usize),
         nexosim::simulation::Address<DownstreamBalancer>,
     > = HashMap::new();
+    let mut server_to_lb: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut target_subset_counts: HashMap<String, usize> = HashMap::new();
 
     if use_shared_downstream {
         let mut sorted_targets: Vec<_> = all_downstream_targets(&graph).into_iter().collect();
         sorted_targets.sort();
 
+        let use_centralized_subsets =
+            args.lb_policy.is_centralized() && args.lb_subset_size > 0;
+
         for target in &sorted_targets {
             let n_servers = graph.microservices[target].replicas as usize;
-            let server_indices: Vec<usize> = (0..n_servers).collect();
-            if args.verbose >= 1 {
-                eprintln!("downstream balancer {target} subset: {server_indices:?}");
+            let k = if use_centralized_subsets {
+                (args.lb_subset_size as usize).min(n_servers).max(1)
+            } else {
+                n_servers.max(1)
+            };
+            let n_lbs = n_servers / k;
+            target_subset_counts.insert(target.clone(), n_lbs);
+
+            let mut owned = vec![0usize; n_servers];
+            for lb_id in 0..n_lbs {
+                let server_indices = if use_centralized_subsets {
+                    subset::assign_subset(
+                        args.lb_subset_policy,
+                        n_servers,
+                        lb_id,
+                        args.lb_subset_size,
+                    )
+                } else {
+                    (0..n_servers).collect()
+                };
+                if args.verbose >= 1 {
+                    eprintln!(
+                        "downstream balancer {target} lb={lb_id} subset: {server_indices:?}"
+                    );
+                }
+                for &server_idx in &server_indices {
+                    owned[server_idx] = lb_id;
+                }
+
+                let balancer = DownstreamBalancer::new(
+                    target.clone(),
+                    n_servers,
+                    server_indices.clone(),
+                    args.lb_policy,
+                    lb_id,
+                    tracer.clone(),
+                    centralized_audit.clone(),
+                    caller_lb_queue_occupancy.clone(),
+                );
+                let mailbox = Mailbox::new();
+                let address = mailbox.address();
+                downstream_balancer_addresses.insert((target.clone(), lb_id), address);
+
+                pending_downstream_balancers.push(PendingDownstreamBalancer {
+                    balancer,
+                    mailbox,
+                    target_microservice: target.clone(),
+                    lb_id,
+                    server_indices,
+                });
             }
-
-            let balancer = DownstreamBalancer::new(
-                target.clone(),
-                n_servers,
-                server_indices.clone(),
-                args.lb_policy,
-                tracer.clone(),
-                caller_lb_queue_occupancy.clone(),
-            );
-            let mailbox = Mailbox::new();
-            let address = mailbox.address();
-            downstream_balancer_addresses.insert(target.clone(), address);
-
-            pending_downstream_balancers.push(PendingDownstreamBalancer {
-                balancer,
-                mailbox,
-                target_microservice: target.clone(),
-                server_indices,
-            });
+            server_to_lb.insert(target.clone(), owned);
         }
 
         for pending in &mut pending_downstream_balancers {
@@ -683,8 +778,12 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 let mut downstream_outputs = HashMap::new();
                 let mut downstream_releases = HashMap::new();
                 for target in &targets {
-                    let db_address = downstream_balancer_addresses
+                    let n_lbs = *target_subset_counts
                         .get(target)
+                        .expect("target subset count");
+                    let lb_id = server_idx % n_lbs;
+                    let db_address = downstream_balancer_addresses
+                        .get(&(target.clone(), lb_id))
                         .expect("downstream balancer address");
                     let mut out = Output::default();
                     out.connect(DownstreamBalancer::outbound, db_address);
@@ -892,7 +991,10 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         bench = bench.add_model(
             pending.balancer,
             pending.mailbox,
-            &format!("downstream-balancer-{}", pending.target_microservice),
+            &format!(
+                "downstream-balancer-{}-{}",
+                pending.target_microservice, pending.lb_id
+            ),
         );
     }
 
@@ -987,8 +1089,12 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
             let mut pull_output = None;
             if args.lb_policy.is_centralized() && downstream_target_set.contains(microservice_id) {
-                let db_address = downstream_balancer_addresses
+                let lb_id = server_to_lb
                     .get(microservice_id)
+                    .map(|owned| owned[i])
+                    .expect("server_to_lb for centralized target");
+                let db_address = downstream_balancer_addresses
+                    .get(&(microservice_id.clone(), lb_id))
                     .expect("downstream balancer address");
                 let mut output = Output::default();
                 output.connect(DownstreamBalancer::pull, db_address);
@@ -1196,6 +1302,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         }
     }
@@ -1222,6 +1329,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         })
         .unwrap()
@@ -1280,6 +1388,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         };
         let first = run(&args).unwrap().expect("stats");
@@ -1325,6 +1434,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         })
         .unwrap()
@@ -1367,6 +1477,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         };
         let first = run(&args).unwrap().expect("stats");
@@ -1399,6 +1510,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         };
 
@@ -1479,6 +1591,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         })
         .unwrap()
@@ -1679,6 +1792,7 @@ mod tests {
             scheduling,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         })
         .unwrap()
@@ -1713,6 +1827,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Fixed,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         })
         .unwrap()
@@ -1753,6 +1868,7 @@ mod tests {
             scheduling: SchedulingPolicyKind::Fifo,
             service_dist: MsServiceDistribution::Bimodal,
             pull_audit: None,
+            centralized_audit: None,
             approx_sched: None,
         })
         .unwrap()
