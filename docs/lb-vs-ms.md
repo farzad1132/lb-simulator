@@ -15,7 +15,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 |---------|:--:|:--:|-------|
 | Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
 | Local inflight load view | yes | yes | Typical push policies use each balancer's **local inflight** counters; **prequal** additionally probes server/replica `queue.len + in_flight` |
-| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, or with `cl`, `cl-lr`, `centralized`, or `corr` in ms. |
+| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, or with `cl`, `cl-lr`, `centralized`, or `corr` in ms. In `lb`, centralized supports restricted partition subsetting (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
@@ -25,7 +25,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Unloaded latency p99 | yes | yes | lb: p99 of service durations; ms: p99 of `processing_time_ms` |
 | **Express lane** | yes | — | lb-only; see [expresslane.md](expresslane.md) |
 | **Work shedding** | yes | — | lb-only; `--shed-delay`; see [work-shedding.md](work-shedding.md) |
-| **Centralized pull dispatch** | yes | yes | lb: one global queue; servers pull on spare capacity. ms: one pull queue per downstream target (outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
+| **Centralized pull dispatch** | yes | yes | lb: one queue per subset (or one global queue); servers pull on spare capacity. ms: one pull queue per downstream target (outbound only; ingress P2C; subsetting rejected). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Approx decentralized pull** | yes | yes (outbound only) | See [approx-policy.md](approx-policy.md) |
 | **Prequal async probe pool** | yes | yes (outbound only) | See [prequal-policy.md](prequal-policy.md); ms ingress stays P2C |
 | **`--approx-sched fcfs` (unbound approx pulls)** | yes | yes | Outbound approx only in `ms`; see [approx-policy.md](approx-policy.md) |
@@ -34,7 +34,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
 | **CL-LR shared least-request outbound** | — | yes | Same shared topology as `cl`; downstream uses least-request on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-lr-policy-shared-least-request-outbound). |
 | **Corr (experimental)** | — | yes | Same shared topology as `cl`; outbound routing is experimental. See [microservice-simulation.md](microservice-simulation.md#corr-policy-experimental). |
-| Multiple ingress client LBs | yes | — | `--clients`: independent arrival sources; push policies use one LB per client; centralized uses one shared dispatcher |
+| Multiple ingress client LBs | yes | — | `--clients`: independent arrival sources; push policies use one LB per client; centralized uses one shared dispatcher per subset (or one global when `k=0`) |
 | Per-API ingress LB | — | yes | `EdgeBalancer`: one per API, routes user traffic to entry replicas |
 | Per-replica outbound LB | — | yes | `ReplicaBalancer`: one per replica (default push policies) |
 | Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl`, `cl-lr`, `centralized`, or `corr`) |
@@ -126,15 +126,16 @@ Example (chain-3): one `EdgeBalancer` for API `handle`, plus `DownstreamBalancer
 
 ### Subset assignment
 
-Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` but use different `client_id` values. **`cl`, `cl-lr`, `centralized`, and `corr` in ms reject `--lb-subset-size > 0`.**
+Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` but use different `client_id` values. **`cl`, `cl-lr`, `centralized`, and `corr` in ms reject `--lb-subset-size > 0`.** In `lb`, centralized accepts subsetting only as a strict partition (see [Centralized subsetting](lb-simulation.md#centralized-subsetting)).
 
 | Balancer | `client_id` |
 |----------|-------------|
-| lb `LoadBalancer` | Load balancer index (`0 .. clients-1`) |
+| lb push/approx `LoadBalancer` | Load balancer index (`0 .. clients-1`) |
+| lb centralized subset LB | Subset index (`0 .. S-1`) |
 | ms `EdgeBalancer` | Sorted API index (APIs ordered lexicographically) |
 | ms `ReplicaBalancer` | `replica_idx` within the calling service |
 
-See [lb-simulation.md — Server subset](lb-simulation.md#server-subset) for the deterministic algorithm.
+See [lb-simulation.md — Server subset](lb-simulation.md#server-subset) for the algorithms and policy differences.
 
 ## lb-only features
 

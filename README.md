@@ -29,14 +29,18 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **power-of-two** — sample two random servers and route to the one with lower local inflight (requests this balancer has dispatched but not yet received a release for)
 - **least-request** — route to the server with the fewest locally in-flight requests; random tie-break among minima
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
-- **centralized** — pull-based: one global queue at a single dispatcher; servers request work when they have spare capacity (`lb`: flat pool; ignores `--lb-subset-size`; incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target); see [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer).
+- **centralized** — pull-based: FIFO queue(s) at central dispatcher(s); servers request work when they have spare capacity (`lb`: full pool or [strict partition subsets](docs/lb-simulation.md#centralized-subsetting); incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target; subsetting rejected); see [microservice-simulation.md](docs/microservice-simulation.md#centralized-policy-pull-based-layer).
 - **approx** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); optional **`--approx-sched fcfs`**, **`edf`**, or **`edf+`** (`ms`) for unbound queue-head pulls; see [docs/approx-policy.md](docs/approx-policy.md)
 - **prequal** — decentralized push with async RIF probe pool (`lb` and `ms` outbound; `--lb-subset-size > 0` rejected); see [docs/prequal-policy.md](docs/prequal-policy.md)
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **cl-lr** — shared push least-request outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **corr** — experimental shared push outbound layer (`ms` only; same topology as `cl`; ingress stays P2C; `--lb-subset-size > 0` rejected)
 
-Each load balancer can be restricted to a subset of servers via `--lb-subset-size` (push policies only; not supported with `prequal`, or with `cl`, `cl-lr`, `centralized`, or `corr` in `ms`). With the default (`0`), every LB sees the full server pool. With `k > 0`, each LB routes among `min(k, servers)` servers using its own local inflight counts. Subset assignment uses `--lb-subset-policy` (default `deterministic`: round-based seeded shuffle partitioned by client id; use `random` for independent shuffle-and-truncate per LB).
+Each load balancer can be restricted to a subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`:
+
+- **Push / approx:** each client LB routes among `min(k, servers)` servers; leftovers (`n % k`) may be unused; `--lb-subset-policy` may be `deterministic` or `random`.
+- **Centralized (`lb`):** `k` must divide `--servers`; one shared pull LB per subset; `--clients` must be divisible by the subset count; only `deterministic` subset policy. See [docs/lb-simulation.md — Server subset](docs/lb-simulation.md#server-subset).
+- **Not supported:** `prequal`, and in `ms` also `cl`, `cl-lr`, `centralized`, and `corr`.
 
 ## Metrics
 
@@ -133,7 +137,7 @@ cargo build --release
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `approx`, `prequal`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` (ms only; `edf+` also EDF-orders intent queues) for unbound queue-head fulfillment; see [docs/approx-policy.md](docs/approx-policy.md) |
-| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr`) |
+| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, `centralized`, or `corr` in `ms`; `lb` centralized requires `k` divides servers) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`); see [docs/scheduling.md](docs/scheduling.md) |
@@ -185,7 +189,7 @@ Options:
 | `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`, `prequal`) |
 | `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
 | `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs` for unbound FCFS queue-head fulfillment |
-| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers; not supported with `prequal`) |
+| `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers; not supported with `prequal`; centralized requires partition constraints) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--slo` | (none) | SLO latency threshold in seconds; when set, reports P(latency > SLO) |
@@ -221,13 +225,14 @@ Python plotting scripts live in the repo root. Each runs the simulator (or compa
 | [`plot_cdfs.py`](plot_cdfs.py) (ms) | e2e latency (ms, log) | CDF | Per-API latency distribution for the microservice simulator |
 | [`plot_lb_sweep.py`](plot_lb_sweep.py) | sweep param (load, clients, …) | configurable metric (default p99) | Compare LB policies (one line each) while sweeping one simulator parameter |
 | [`plot_lb_load_compare.py`](plot_lb_load_compare.py) | load | configurable metric (default p99) | Compare experiment configs (policy, topology, subset size) at equal utilization |
+| [`plot_lb_subset_compare.py`](plot_lb_subset_compare.py) | lb-subset-size | configurable metric (default p99) | Compare experiment configs while sweeping subset size at fixed load |
 | [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) | total arrival rate (task/s) | configurable metric (default p99) | Compare centralized vs power-of-two at equal offered load with different server counts |
 | [`plot_lb_express_heatmap.py`](plot_lb_express_heatmap.py) | express pool size | express delay threshold | Heatmap of a metric across express-size vs express-del-th |
 | [`optimize_express_lane.py`](optimize_express_lane.py) | — | — | Grid-search express_size × express_del_th × express_th; human-readable log only (no plots) |
 | [`plot_ms_chain_slo_heatmap.py`](plot_ms_chain_slo_heatmap.py) | load level | chain depth (chain3 / chain6 / chain10) | Heatmap of SLO violation rate (%) across load for chain topologies |
 | [`compare_lb_ms.py`](compare_lb_ms.py) | latency (s, log) | CDF | Overlay lb vs ms CDFs on equivalent topologies to validate parity |
 
-Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script. Use [`plot_lb_load_compare.py`](plot_lb_load_compare.py) when comparing named configs (different policies, server counts, or subset sizes) at the same load levels.
+Use [`plot_lb_sweep.py`](plot_lb_sweep.py) with `--sweep load` or `--sweep lb-subset-size` for the common load and subset-size studies; other `--sweep` values (e.g. `clients`) use the same script. Use [`plot_lb_load_compare.py`](plot_lb_load_compare.py) when comparing named configs at the same load levels. Use [`plot_lb_subset_compare.py`](plot_lb_subset_compare.py) when comparing named configs across subset sizes at fixed load.
 
 ## Analysis scripts
 
@@ -468,6 +473,46 @@ Example comparing bound vs unbound approx (per-config `approx_sched` in `DEFAULT
 python plot_lb_load_compare.py \
   --config-index 7 8 \
   --comment nb \
+  --n 100000
+```
+
+## Plot LB config subset-size compare
+
+`plot_lb_subset_compare.py` compares named experiment configs while sweeping **`--lb-subset-size`** on the x-axis at a fixed load. Each config can differ in LB policy, client/server counts, concurrency, `pull_policy`, and `approx_sched`. All configs share the same subset-size list. `ExperimentConfig.lb_subset_size` is ignored (the sweep supplies `k`).
+
+Edit configs in `DEFAULT_CONFIGS` at the top of [`plot_lb_subset_compare.py`](plot_lb_subset_compare.py). Use `--config-index` to run a subset. Centralized configs reject subset sizes that do not partition the pool (`k` must divide `servers`, and `clients` must be divisible by `servers/k`).
+
+```bash
+python plot_lb_subset_compare.py \
+  --lb-subset-size 1 2 3 4 6 12 \
+  --load 0.8 \
+  --n 100000 \
+  --seed 42
+# writes output/lb_subset_compare_p99.pdf
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--lb-subset-size` | (required) | Subset sizes for x-axis (e.g. `1 2 3 4 6 12`); `0` = full pool |
+| `--load` | `0.8` | Fixed target utilization |
+| `--metric` | `p99` | Y-axis: `p99`, `p50`, `p90`, `utilization`, `slo-violation`, or `p{N}` |
+| `--output` | `output/lb_subset_compare_{metric}.pdf` | Output PDF path |
+| `--comment` | (none) | Suffix appended to output filename before `.pdf` |
+| `--config-index` | (all) | Run only these `DEFAULT_CONFIGS` indices (0-based) |
+| `--n` | `1000000` | Tasks per run |
+| `--service-dist` | `exponential` | Service distribution (`exponential`, `constant`, or `bimodal`) |
+| `--seed` | (none) | RNG seed for reproducible runs |
+| `--clients` / `--servers` | (none) | Override topology for all configs |
+| `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
+| `--no-build` | (off) | Do not run `cargo build --release` |
+
+Example comparing only centralized and P2C:
+
+```bash
+python plot_lb_subset_compare.py \
+  --lb-subset-size 1 2 3 4 6 12 \
+  --config-index 0 1 \
+  --comment cq_p2c \
   --n 100000
 ```
 

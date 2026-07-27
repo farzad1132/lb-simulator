@@ -97,3 +97,130 @@ fn lb_centralized_rejects_shed_delay() {
         "unexpected stderr: {stderr}"
     );
 }
+
+#[test]
+fn lb_centralized_rejects_subset_size_not_divisor() {
+    let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
+
+    let output = Command::new(&lb_binary)
+        .args([
+            "--format",
+            "json",
+            "--n",
+            "100",
+            "--servers",
+            "12",
+            "--clients",
+            "2",
+            "--lb-policy",
+            "centralized",
+            "--lb-subset-size",
+            "5",
+        ])
+        .output()
+        .expect("failed to spawn lb");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must evenly divide"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn lb_centralized_rejects_clients_not_divisible_by_subset_count() {
+    let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
+
+    let output = Command::new(&lb_binary)
+        .args([
+            "--format",
+            "json",
+            "--n",
+            "100",
+            "--servers",
+            "12",
+            "--clients",
+            "3",
+            "--lb-policy",
+            "centralized",
+            "--lb-subset-size",
+            "6",
+        ])
+        .output()
+        .expect("failed to spawn lb");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must be divisible by the subset count"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn lb_centralized_rejects_random_subset_policy() {
+    let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
+
+    let output = Command::new(&lb_binary)
+        .args([
+            "--format",
+            "json",
+            "--n",
+            "100",
+            "--servers",
+            "12",
+            "--clients",
+            "2",
+            "--lb-policy",
+            "centralized",
+            "--lb-subset-size",
+            "6",
+            "--lb-subset-policy",
+            "random",
+        ])
+        .output()
+        .expect("failed to spawn lb");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("random is not supported"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn lb_centralized_subset_partition_completes() {
+    let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
+
+    let output = Command::new(&lb_binary)
+        .args([
+            "--format",
+            "json",
+            "--n",
+            "200",
+            "--servers",
+            "12",
+            "--clients",
+            "2",
+            "--lb-policy",
+            "centralized",
+            "--lb-subset-size",
+            "6",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .expect("failed to spawn lb");
+
+    assert!(
+        output.status.success(),
+        "lb centralized subset run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
+    let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
+    assert_eq!(stats["e2e"].as_array().map(|a| a.len()), Some(200));
+}

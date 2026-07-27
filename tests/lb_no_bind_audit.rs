@@ -33,6 +33,7 @@ fn approx_args(
         verbose: 0,
         approx_sched,
         pull_audit: audit,
+        centralized_audit: None,
         express_lane: None,
         work_shedding: None,
     }

@@ -1,4 +1,5 @@
 use crate::approx::{fatal_pull_abort, PullIntent, PullRequest};
+use crate::lb_centralized_audit::LbCentralizedAudit;
 use crate::lb_pull_audit::LbPullAudit;
 use crate::occupancy::OccupancyAccumulator;
 use crate::policy::ApproxSchedKind;
@@ -47,6 +48,8 @@ pub struct LoadBalancer {
     #[serde(skip)]
     pull_audit: Option<Arc<LbPullAudit>>,
     #[serde(skip)]
+    centralized_audit: Option<Arc<LbCentralizedAudit>>,
+    #[serde(skip)]
     candidate_pool: CandidatePool,
     #[serde(skip)]
     r_remove_accum: f64,
@@ -70,6 +73,7 @@ impl LoadBalancer {
         preserve_client_metadata: bool,
         approx_sched: Option<ApproxSchedKind>,
         pull_audit: Option<Arc<LbPullAudit>>,
+        centralized_audit: Option<Arc<LbCentralizedAudit>>,
         queue_occupancy: Option<Arc<Mutex<HashMap<usize, OccupancyAccumulator>>>>,
     ) -> Self {
         Self {
@@ -86,6 +90,7 @@ impl LoadBalancer {
             preserve_client_metadata,
             approx_sched,
             pull_audit,
+            centralized_audit,
             candidate_pool: CandidatePool::new(pool_cap(n_servers)),
             r_remove_accum: 0.0,
             r_probe_accum: 0.0,
@@ -150,6 +155,11 @@ impl LoadBalancer {
             task.origin_server_idx = server_idx;
         }
         task.dispatched_at = Some(cx.time());
+        if self.lb_policy.is_centralized() {
+            if let Some(audit) = &self.centralized_audit {
+                audit.record_task_dispatched(self.lb_id, server_idx, task.task_id);
+            }
+        }
         self.outputs[server_idx].send(task).await;
     }
 
@@ -198,6 +208,12 @@ impl LoadBalancer {
 impl LoadBalancer {
     pub async fn input(&mut self, mut task: Task, cx: &Context<Self>) {
         if self.lb_policy.is_centralized() {
+            task.task_id = self.next_task_id;
+            self.next_task_id += 1;
+            let queue_len_before = self.queue.len();
+            if let Some(audit) = &self.centralized_audit {
+                audit.record_task_enqueued(self.lb_id, task.task_id, queue_len_before);
+            }
             self.queue.push(task);
             self.record_queue_occupancy(cx.time());
             self.dispatch_waiting(cx).await;
@@ -350,6 +366,7 @@ mod tests {
             0,
             false,
             approx_sched,
+            None,
             None,
             None,
         )

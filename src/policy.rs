@@ -276,6 +276,46 @@ pub fn validate_prequal_subset(
     Ok(())
 }
 
+/// Centralized subsetting is a strict partition: `k` must divide `n_servers`,
+/// clients must be divisible by the subset count, and only deterministic assignment
+/// is allowed. No-op unless policy is centralized and `lb_subset_size > 0`.
+pub fn validate_centralized_subset(
+    lb_policy: LoadBalancePolicyKind,
+    servers: u32,
+    clients: u32,
+    lb_subset_size: u32,
+    lb_subset_policy: crate::subset::SubsetPolicyKind,
+) -> Result<(), String> {
+    if !lb_policy.is_centralized() || lb_subset_size == 0 {
+        return Ok(());
+    }
+
+    if lb_subset_policy != crate::subset::SubsetPolicyKind::Deterministic {
+        return Err(
+            "--lb-subset-policy random is not supported with --lb-policy centralized; use deterministic"
+                .into(),
+        );
+    }
+
+    let n = servers.max(1) as usize;
+    let k = (lb_subset_size as usize).min(n).max(1);
+    if n % k != 0 {
+        return Err(format!(
+            "--lb-subset-size {lb_subset_size} must evenly divide --servers {servers} with --lb-policy centralized"
+        ));
+    }
+
+    let subset_count = n / k;
+    let n_clients = clients.max(1) as usize;
+    if n_clients % subset_count != 0 {
+        return Err(format!(
+            "--clients {clients} must be divisible by the subset count ({subset_count} = servers/subset-size) with --lb-policy centralized"
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +358,85 @@ mod tests {
         let err = validate_prequal_subset(LoadBalancePolicyKind::Prequal, 3).unwrap_err();
         assert!(err.contains("--lb-subset-size is not supported"));
         assert!(validate_prequal_subset(LoadBalancePolicyKind::PowerOfTwo, 3).is_ok());
+    }
+
+    #[test]
+    fn validate_centralized_subset_ok_partition() {
+        use crate::subset::SubsetPolicyKind;
+        assert!(validate_centralized_subset(
+            LoadBalancePolicyKind::Centralized,
+            12,
+            2,
+            6,
+            SubsetPolicyKind::Deterministic,
+        )
+        .is_ok());
+        assert!(validate_centralized_subset(
+            LoadBalancePolicyKind::Centralized,
+            12,
+            4,
+            6,
+            SubsetPolicyKind::Deterministic,
+        )
+        .is_ok());
+        assert!(validate_centralized_subset(
+            LoadBalancePolicyKind::Centralized,
+            12,
+            3,
+            0,
+            SubsetPolicyKind::Random,
+        )
+        .is_ok());
+        assert!(validate_centralized_subset(
+            LoadBalancePolicyKind::PowerOfTwo,
+            12,
+            3,
+            5,
+            SubsetPolicyKind::Random,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_centralized_subset_rejects_non_divisor() {
+        use crate::subset::SubsetPolicyKind;
+        let err = validate_centralized_subset(
+            LoadBalancePolicyKind::Centralized,
+            12,
+            2,
+            5,
+            SubsetPolicyKind::Deterministic,
+        )
+        .unwrap_err();
+        assert!(err.contains("must evenly divide"));
+    }
+
+    #[test]
+    fn validate_centralized_subset_rejects_clients_not_divisible() {
+        use crate::subset::SubsetPolicyKind;
+        let err = validate_centralized_subset(
+            LoadBalancePolicyKind::Centralized,
+            12,
+            3,
+            6,
+            SubsetPolicyKind::Deterministic,
+        )
+        .unwrap_err();
+        assert!(err.contains("must be divisible by the subset count"));
+    }
+
+    #[test]
+    fn validate_centralized_subset_rejects_random() {
+        use crate::subset::SubsetPolicyKind;
+        let err = validate_centralized_subset(
+            LoadBalancePolicyKind::Centralized,
+            12,
+            2,
+            6,
+            SubsetPolicyKind::Random,
+        )
+        .unwrap_err();
+        assert!(err.contains("random is not supported"));
     }
 
     #[test]

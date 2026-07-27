@@ -12,7 +12,7 @@ class ExperimentConfig:
     clients: int
     servers: int
     concurrency: int = 1
-    lb_subset_size: int = 0  # 0 = full pool; ignored by centralized policy
+    lb_subset_size: int = 0  # 0 = full pool; centralized requires k divides servers
     pull_policy: str | None = None  # required when lb_policy == "approx"
     expresslane: bool = False
     express_size: int | None = None

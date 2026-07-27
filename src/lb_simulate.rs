@@ -1,3 +1,4 @@
+use crate::lb_centralized_audit::LbCentralizedAudit;
 use crate::lb_pull_audit::LbPullAudit;
 use crate::load_balancer::LoadBalancer;
 use crate::occupancy::OccupancyAccumulator;
@@ -80,6 +81,7 @@ pub struct LbRunArgs {
     pub verbose: u8,
     pub approx_sched: Option<ApproxSchedKind>,
     pub pull_audit: Option<Arc<LbPullAudit>>,
+    pub centralized_audit: Option<Arc<LbCentralizedAudit>>,
     pub express_lane: Option<ExpressLaneConfig>,
     pub work_shedding: Option<Duration>,
 }
@@ -618,7 +620,15 @@ fn run_centralized_simulation(
     let n_servers = args.servers.max(1) as usize;
     let concurrency = args.concurrency.max(1);
     let total_capacity = args.servers.max(1) * concurrency;
-    let hop_telemetry = new_hop_telemetry(1, n_servers, concurrency);
+
+    let k = if args.lb_subset_size == 0 {
+        n_servers
+    } else {
+        (args.lb_subset_size as usize).min(n_servers).max(1)
+    };
+    let n_lbs = n_servers / k;
+    let hop_telemetry = new_hop_telemetry(n_lbs, n_servers, concurrency);
+    let centralized_audit = args.centralized_audit.clone();
 
     let mut bench = SimInit::with_num_threads(1);
     let (sink, mut output) = event_queue(SinkState::Enabled);
@@ -629,35 +639,69 @@ fn run_centralized_simulation(
     let mut inputs = Vec::with_capacity(n_clients);
     let mut pull_inputs = Vec::with_capacity(n_servers);
 
-    let server_indices: Vec<usize> = (0..n_servers).collect();
-    let mut load_balancer = LoadBalancer::new(
-        args.lb_policy.build(),
-        args.lb_policy,
-        n_servers,
-        server_indices,
-        0,
-        false,
-        None,
-        None,
-        Some(hop_telemetry.client_queue_occupancy.clone()),
-    );
-    for j in 0..n_servers {
-        load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
-    }
-    let lb_mailbox = Mailbox::new();
-    let lb_address = lb_mailbox.address();
+    let mut server_to_lb: Vec<usize> = vec![0; n_servers];
+    let mut pending_lbs: Vec<(LoadBalancer, Mailbox<LoadBalancer>)> = Vec::with_capacity(n_lbs);
 
-    for _ in 0..n_clients {
+    for lb_id in 0..n_lbs {
+        let server_indices = if args.lb_subset_size == 0 {
+            (0..n_servers).collect()
+        } else {
+            subset::assign_subset(
+                args.lb_subset_policy,
+                n_servers,
+                lb_id,
+                args.lb_subset_size,
+            )
+        };
+        if args.verbose >= 1 {
+            eprintln!("centralized lb {lb_id} subset: {server_indices:?}");
+        }
+        for &server_idx in &server_indices {
+            server_to_lb[server_idx] = lb_id;
+        }
+        let mut load_balancer = LoadBalancer::new(
+            args.lb_policy.build(),
+            args.lb_policy,
+            n_servers,
+            server_indices.clone(),
+            lb_id,
+            false,
+            None,
+            None,
+            centralized_audit.clone(),
+            Some(hop_telemetry.client_queue_occupancy.clone()),
+        );
+        for &server_idx in &server_indices {
+            load_balancer.outputs[server_idx]
+                .connect(Server::input, &server_mailboxes[server_idx]);
+        }
+        pending_lbs.push((load_balancer, Mailbox::new()));
+    }
+
+    for client_index in 0..n_clients {
+        let lb_id = client_index % n_lbs;
         let input = EventSource::new()
-            .connect(LoadBalancer::input, &lb_mailbox)
+            .connect(LoadBalancer::input, &pending_lbs[lb_id].1)
             .register(&mut bench);
         inputs.push(input);
     }
-    bench = bench.add_model(load_balancer, lb_mailbox, "central-load-balancer");
+
+    let mut lb_addresses = Vec::with_capacity(n_lbs);
+    for (lb_id, (load_balancer, lb_mailbox)) in pending_lbs.into_iter().enumerate() {
+        lb_addresses.push(lb_mailbox.address());
+        bench = bench.add_model(
+            load_balancer,
+            lb_mailbox,
+            &format!("central-load-balancer-{lb_id}"),
+        );
+    }
 
     for (i, server_mailbox) in server_mailboxes.into_iter().enumerate() {
-        let mut release_outputs = vec![Output::default()];
-        release_outputs[0].connect(LoadBalancer::release, &lb_address);
+        let lb_id = server_to_lb[i];
+        let lb_address = &lb_addresses[lb_id];
+
+        let mut release_outputs = vec![Output::default(); n_lbs];
+        release_outputs[lb_id].connect(LoadBalancer::release, lb_address);
 
         let mut server = Server::new(
             concurrency,
@@ -674,7 +718,7 @@ fn run_centralized_simulation(
         );
         server
             .pull_output
-            .connect(LoadBalancer::pull, &lb_address);
+            .connect(LoadBalancer::pull, lb_address);
         server.output.connect_sink(sink.clone());
         let pull_input = EventSource::new()
             .connect(Server::request_pull, &server_mailbox)
@@ -795,6 +839,7 @@ fn run_push_simulation(
             false,
             args.approx_sched,
             pull_audit.clone(),
+            None,
             Some(hop_telemetry.client_queue_occupancy.clone()),
         );
         for j in 0..client_lb_pool {
@@ -827,6 +872,7 @@ fn run_push_simulation(
             express_indices,
             express_lb_id,
             true,
+            None,
             None,
             None,
             Some(hop_telemetry.client_queue_occupancy.clone()),

@@ -153,16 +153,64 @@ for each server in server_indices:
 Each load balancer is assigned a subset of servers at startup via `--lb-subset-size` and `--lb-subset-policy`:
 
 - `0` (default) — all servers
-- `k > 0` — `min(k, servers)` servers per balancer
+- `k > 0` — `min(k, servers)` servers per balancer (semantics depend on policy; see below)
+
+How subsetting interacts with the load-balancing policy:
+
+| Policy family | Subsetting |
+|---------------|------------|
+| **Push** (`random`, `power-of-two`, `least-request`, `round-robin`) and **approx** | Per-client LB; leftovers allowed (`n % k` backends unused); `--lb-subset-policy` may be `deterministic` or `random` |
+| **Centralized** | Strict partition only; see [Centralized subsetting](#centralized-subsetting) below |
+| **Prequal** | Rejected (`--lb-subset-size > 0` is an error) |
+
+#### Push / approx subsetting
 
 **Subset policies** (`--lb-subset-policy`, default `deterministic`):
 
 | Policy | Behavior |
 |--------|----------|
-| **deterministic** | Partition clients into rounds of size `n // k`. Within each round, shuffle all server indices with a seed derived from the round number, then assign each client a disjoint slice of size `k`. Client id is the load balancer index (`0 .. clients-1`). |
-| **random** | Shuffle all server indices and take the first `k` (independent per load balancer). |
+| **deterministic** | Partition clients into rounds of size `n // k`. Within each round, shuffle all server indices with a seed derived from the round number, then assign each client a disjoint slice of size `k`. Client id is the load balancer index (`0 .. clients-1`). Leftover backends (`n % k`) are unused. |
+| **random** | Shuffle all server indices and take the first `k` (independent per load balancer; subsets may overlap). |
 
-The load-balancing policy only chooses among servers in this subset.
+Each client has its own load balancer. The load-balancing policy only chooses among servers in that LB's subset.
+
+#### Centralized subsetting
+
+Centralized subsetting is more restrictive than push/approx:
+
+| Constraint | Rule |
+|------------|------|
+| Partition | `k` must evenly divide `--servers` (e.g. 12 servers with `k=6` → 2 subsets; `k=5` is rejected) |
+| Subset count | `S = servers / k` |
+| Clients | `--clients` must be divisible by `S`; client `i` feeds LB `i % S` |
+| Subset policy | Only `deterministic` (`random` is rejected) |
+| Topology | One shared pull LB **per subset**; servers in a subset pull only from that LB |
+
+With `--lb-subset-size 0`, centralized keeps a single global dispatcher (all clients feed one queue; all servers pull from it).
+
+```mermaid
+flowchart LR
+  subgraph subset0 [Subset0]
+    C0["client 0"]
+    C2["client 2"]
+    LB0["central LB 0"]
+    S0["subset servers"]
+    C0 --> LB0
+    C2 --> LB0
+    S0 -->|"pull"| LB0
+    LB0 -->|"dispatch"| S0
+  end
+  subgraph subset1 [Subset1]
+    C1["client 1"]
+    C3["client 3"]
+    LB1["central LB 1"]
+    S1["subset servers"]
+    C1 --> LB1
+    C3 --> LB1
+    S1 -->|"pull"| LB1
+    LB1 -->|"dispatch"| S1
+  end
+```
 
 ### Policies
 
@@ -172,7 +220,7 @@ The load-balancing policy only chooses among servers in this subset.
 | **least-request** | `--lb-policy least-request` | Route to the server with lowest local inflight; random tie-break among minima |
 | **random** | `--lb-policy random` | Uniform random server from the subset (ignores load slice) |
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
-| **centralized** | `--lb-policy centralized` | Pull-based: global FIFO queue at one dispatcher; servers request work on spare capacity ([details below](#centralized-policy-pull-based)) |
+| **centralized** | `--lb-policy centralized` | Pull-based: FIFO queue(s) at central dispatcher(s); servers request work on spare capacity ([details below](#centralized-policy-pull-based)); [restricted subsetting](#centralized-subsetting) |
 | **approx** | `--lb-policy approx` + `--pull-policy` | Decentralized pull: per-client FIFO queues; `--pull-policy` selects pull-intent target ([details in approx-policy.md](approx-policy.md)) |
 | **prequal** | `--lb-policy prequal` | Decentralized push with async RIF probe pool; rejects `--lb-subset-size > 0` ([details in prequal-policy.md](prequal-policy.md)) |
 
@@ -181,6 +229,8 @@ Local inflight tracking runs for all push policies so switching among them does 
 ## Centralized policy (pull-based)
 
 With `--lb-policy centralized`, routing is **pull-based** instead of push-on-arrival. This is an architecture change, not a fifth `select()` algorithm — dispatch logic lives in queue and pull handlers on `LoadBalancer`, not in `LoadBalancePolicy::select()`.
+
+Without subsetting (`--lb-subset-size 0`), one global dispatcher owns the full server pool:
 
 ```mermaid
 flowchart LR
@@ -207,31 +257,33 @@ flowchart LR
   S1 -->|"release on complete"| CLB
 ```
 
+With `--lb-subset-size k > 0`, the pool is partitioned into `S = servers / k` disjoint subsets, each with its own shared central LB (see [Centralized subsetting](#centralized-subsetting)).
+
 ### Design choices
 
 | Choice | Decision | Rationale / implications |
 |--------|----------|--------------------------|
-| **Simulator scope** | `lb`: global flat pool | `ms`: one pull queue per downstream target (outbound only; ingress stays push P2C). See [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
+| **Simulator scope** | `lb`: flat pool (optionally partitioned) | `ms`: one pull queue per downstream target (outbound only; ingress stays push P2C). See [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Push vs pull** | Pull-based | Push policies call `select()` on arrival. Centralized queues tasks at the LB; servers initiate assignment. |
-| **Queue location** | Single global queue at one central `LoadBalancer` | Even with `--clients > 1`, all arrival sources feed the same dispatcher; per-client LBs are **not** created. |
-| **Multi-client semantics** | Arrivals split, routing unified | `--clients C` still creates C arrival sources and splits `--n` across them (aggregate rate unchanged). Routing is through one queue — this does **not** model multiple independent frontends with partial observability. |
-| **Subset routing** | Ignored when centralized | `--lb-subset-size` and `--lb-subset-policy` have no effect; all servers pull from the global queue. |
+| **Queue location** | One FIFO queue per subset LB | With `k = 0`, a single global queue. With `k > 0`, one queue per partition; clients with the same `i % S` share that queue. Per-client LBs are **not** created. |
+| **Multi-client semantics** | Arrivals split; routing shared per subset | `--clients C` creates C arrival sources and splits `--n` across them (aggregate rate unchanged). Without subsetting, all feed one queue. With subsetting, clients map to subset LBs via `i % S`. |
+| **Subset routing** | Strict partition when `k > 0` | See [Centralized subsetting](#centralized-subsetting): `k` must divide `n`, clients must be divisible by `S`, deterministic only. |
 | **Pull trigger** | Spare capacity | A server sends a pull whenever `in_flight < max_concurrency`. One pull requests one task; after each completion, one new pull is sent. At sim start, `concurrency` pulls per server are scheduled so the pool is warm. |
 | **Assignment order** | FCFS on both sides | Tasks dequeue from the front of the LB queue. Waiting pullers are tracked in FIFO order. First waiter gets the next task — no load comparison or random tie-break. |
 | **Server queueing** | Disabled | Regular servers never enqueue locally; all backlog lives at the central LB. Server `input` always starts service immediately. |
 | **Load visibility** | No load probes | Centralized does not use load values for routing (only `local_inflight` for release accounting). |
-| **Release lifecycle** | Same inflight accounting | `local_inflight` increments on dispatch (pull matched), decrements on `release` at completion. Single central LB (`lb_id = 0`) for all tasks. |
+| **Release lifecycle** | Same inflight accounting | `local_inflight` increments on dispatch (pull matched), decrements on `release` at completion. `lb_id` is the subset dispatcher index. |
 | **Express lane** | Not supported for client `--lb-policy centralized` | `--expresslane` cannot be combined with client `--lb-policy centralized`. Express lane uses an internal centralized express LB. |
 | **Policy trait** | `select()` unused | `LoadBalancePolicyKind::Centralized` exists for CLI parity; dispatch logic lives in `LoadBalancer` pull/queue handlers. |
 
 ### Port wiring (centralized)
 
-- **`LoadBalancer::input`** — receives `Task` from all arrival sources; enqueues and tries to match waiting pullers
-- **`LoadBalancer::pull`** — receives `usize` (server index); dispatches a queued task or records the server as waiting
+- **`LoadBalancer::input`** — receives `Task` from arrival sources mapped to this subset LB; enqueues and tries to match waiting pullers
+- **`LoadBalancer::pull`** — receives `PullRequest` (server index); dispatches a queued task or records the server as waiting
 - **`LoadBalancer::release`** — receives `usize` (server index) on task completion
-- **`LoadBalancer::outputs[j]`** → `Server::input`
-- **`Server::pull_output`** → `LoadBalancer::pull`
-- **`Server::release_outputs[0]`** → `LoadBalancer::release` (single central LB)
+- **`LoadBalancer::outputs[j]`** → `Server::input` (only for servers in this LB's subset)
+- **`Server::pull_output`** → owning subset `LoadBalancer::pull`
+- **`Server::release_outputs[lb_id]`** → owning subset `LoadBalancer::release`
 
 ### Task lifecycle (centralized)
 
@@ -394,8 +446,8 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Cross–load-balancer load visibility for non-prequal push policies (each LB sees only its own inflight counts)
 - Downstream queue depth for non-prequal push policies (prequal probes server `queue.len + in_flight`)
 - Connection limits or backpressure on load balancer outputs
-- Per-client partial observability under centralized (one global queue)
-- Subset routing under centralized or prequal
+- Per-client partial observability under centralized (shared queue per subset, not per client)
+- Subset routing under prequal
 - Load-probe-based server selection under centralized (assignment is pull-order FCFS)
 - Centralized policy in the `ms` simulator (per-downstream-target outbound pull layer)
 - Prequal policy in the `ms` simulator
@@ -409,8 +461,10 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 | `src/main.rs` | CLI, simulation assembly, arrival source, metrics |
 | `src/load_balancer.rs` | Routing, local inflight tracking, release handler, approx pull queues, prequal pool |
 | `src/server.rs` | Queueing, concurrency, completion, release notifications, approx pull drain, prequal probes |
-| `src/policy.rs` | Load-balancing algorithms, pull-policy / prequal validation |
+| `src/policy.rs` | Load-balancing algorithms, pull-policy / prequal / centralized-subset validation |
 | `src/approx.rs` | `PullIntent` / `PullRequest` wire types |
 | `src/prequal.rs` | `Probe` / `ProbeReply` wire types and candidate pool |
+| `src/lb_centralized_audit.rs` | Optional enqueue/dispatch audit for centralized subset invariants |
+| `src/subset.rs` | Server subset assignment (`deterministic` / `random`) |
 
 Approx policy details: [approx-policy.md](approx-policy.md). Prequal: [prequal-policy.md](prequal-policy.md).
