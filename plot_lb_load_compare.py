@@ -59,7 +59,7 @@ DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 CALIBRATION_N = 300_000
 SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
-SLO_VIOLATION_Y_MIN = 0.01
+SLO_VIOLATION_Y_MIN = 0.0
 SLO_VIOLATION_Y_MAX = 10.0
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
@@ -319,14 +319,10 @@ def plot_load_compare(
     series_styles = distinct_series_styles(len(series), style)
     for i, (label, y_values) in enumerate(series):
         line_style = series_styles[i]
-        plot_y = y_values
-        if metric_kind == "slo-violation":
-            # Log scale cannot plot non-positive values; clamp for display.
-            plot_y = [max(float(v), SLO_VIOLATION_Y_MIN) for v in y_values]
         plot_line(
             ax,
             load_values,
-            plot_y,
+            y_values,
             label=label,
             style=style,
             show_markers=True,
@@ -347,10 +343,10 @@ def plot_load_compare(
             xlabel="Load",
             ylabel=ylabel,
             title="",
-            log_y=True,
             ylim=(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX),
             auto_ticks=False,
         )
+        ax.set_yticks(np.arange(0, SLO_VIOLATION_Y_MAX + 0.1, 1))
         ax.set_ylim(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX)
     else:
         if all_y:
