@@ -57,6 +57,10 @@ from plotting_primitive import (
 
 DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
+CALIBRATION_N = 300_000
+SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
+SLO_VIOLATION_Y_MIN = 0.01
+SLO_VIOLATION_Y_MAX = 10.0
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("CQ", "centralized", 10, 10),
@@ -65,9 +69,9 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("RR", "round-robin", 10, 10),
     ExperimentConfig("R", "random", 10, 10),
     #ExperimentConfig("CL-1-LR", "least-request", 1, 10),
-    ExperimentConfig("C-P2C", "power-of-two", 1, 10),
-    ExperimentConfig("Approx-LR", "approx", 10, 10, pull_policy="least-request"),
-    ExperimentConfig("Approx-LR-FCFS", "approx", 10, 10, pull_policy="least-request", approx_sched="fcfs"),
+    #ExperimentConfig("C-P2C-5", "power-of-two", 5, 100),
+    ExperimentConfig("Approx", "approx", 10, 10, pull_policy="least-request"),
+    ExperimentConfig("Approx-FCFS", "approx", 10, 10, pull_policy="least-request", approx_sched="fcfs"),
     #ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
     #ExperimentConfig("Approx-R-FCFS", "approx", 10, 10, pull_policy="random", approx_sched="fcfs"),
     #ExperimentConfig("Prequal", "prequal", 10, 10),
@@ -97,6 +101,65 @@ def resolve_load_values(args: argparse.Namespace) -> list[float]:
         value_type=float,
         step_flag="--load-step",
     )
+
+
+def _log(message: str) -> None:
+    write = getattr(tqdm, "write", None)
+    if write is None:
+        print(message, file=sys.stderr)
+    else:
+        write(message)
+
+
+def slo_from_unloaded_latency(data: dict[str, Any]) -> float:
+    return SLO_UNLOADED_LATENCY_MULTIPLIER * float(data["unloaded_latency_p99"])
+
+
+def calibrate_slo(
+    binary: Path,
+    config: ExperimentConfig,
+    *,
+    load: float,
+    service_dist: str,
+    service_modes: list[float] | None,
+    service_mode_probs: list[float] | None,
+    seed: int | None,
+    clients_override: int | None = None,
+    servers_override: int | None = None,
+) -> float:
+    clients = clients_override if clients_override is not None else config.clients
+    servers = servers_override if servers_override is not None else config.servers
+    sim_kwargs: dict[str, Any] = {
+        "load": load,
+        "n": CALIBRATION_N,
+        "service_dist": service_dist,
+        "service_modes": service_modes,
+        "service_mode_probs": service_mode_probs,
+        "seed": seed,
+        "lb_policy": config.lb_policy,
+        "clients": clients,
+        "servers": servers,
+        "concurrency": config.concurrency,
+        "lb_subset_size": config.lb_subset_size,
+    }
+    if uses_pull_policy(config):
+        sim_kwargs["pull_policy"] = config.pull_policy
+        if config.approx_sched is not None:
+            sim_kwargs["approx_sched"] = config.approx_sched
+    if uses_express_lane(config):
+        sim_kwargs.update(
+            expresslane=True,
+            express_size=config.express_size,
+            express_del_th=config.express_del_th,
+            express_th=config.express_th,
+            ideal=config.ideal,
+        )
+    if uses_work_shedding(config):
+        sim_kwargs["shed_delay"] = config.shed_delay
+    data = run_simulation(binary, **sim_kwargs)
+    if not data["e2e"]:
+        raise SystemExit("no completed tasks during SLO calibration")
+    return slo_from_unloaded_latency(data)
 
 
 def format_run_summary(
@@ -135,7 +198,7 @@ def format_run_summary(
     if kind == "utilization":
         parts.append(f"utilization={metric_value:.1f}%")
     elif kind == "slo-violation":
-        parts.append(f"P(latency>SLO)={metric_value:.6f}")
+        parts.append(f"violations={metric_value:.2f}%")
     else:
         parts.append(f"p{int(pct)}={metric_value:.6f}s")
     parts.append(f"utilization={data['utilization_pct']:.1f}%")
@@ -194,6 +257,8 @@ def run_load_sweep(
             print("no completed tasks", file=sys.stderr)
             sys.exit(1)
         metric_value = extract_metric(data, metric, slo=slo)
+        if parse_metric(metric)[0] == "slo-violation":
+            metric_value *= 100.0
         idx = configs.index(config)
         series[idx][1].append(metric_value)
         tqdm.write(
@@ -250,13 +315,18 @@ def plot_load_compare(
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
 
+    metric_kind, _ = parse_metric(metric)
     series_styles = distinct_series_styles(len(series), style)
     for i, (label, y_values) in enumerate(series):
         line_style = series_styles[i]
+        plot_y = y_values
+        if metric_kind == "slo-violation":
+            # Log scale cannot plot non-positive values; clamp for display.
+            plot_y = [max(float(v), SLO_VIOLATION_Y_MIN) for v in y_values]
         plot_line(
             ax,
             load_values,
-            y_values,
+            plot_y,
             label=label,
             style=style,
             show_markers=True,
@@ -270,26 +340,38 @@ def plot_load_compare(
     ax.set_xlim(min(load_values), max(load_values))
 
     all_y = [v for _, ys in series for v in ys]
-    if all_y:
-        y_min = min(all_y)
-        y_max = 4 * y_min
-        y_floor = 0.0
-        y_step = _nice_axis_step(y_floor, y_max, min_ticks=5)
-        configure_y_axis_ticks(
-            ax,
-            y_data=all_y,
-            style=style,
-            ylim=(y_floor, y_max),
-            y_step=y_step,
+    if metric_kind == "slo-violation":
+        ylabel = "SLO Violations (%)"
+        grid.configure_labels(
+            pattern="leftmost_y_bottom_x",
+            xlabel="Load",
+            ylabel=ylabel,
+            title="",
+            log_y=True,
+            ylim=(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX),
+            auto_ticks=False,
         )
-        ax.set_ylim(y_floor, y_max)
-
-    grid.configure_labels(
-        pattern="leftmost_y_bottom_x",
-        xlabel="Load",
-        ylabel=metric_ylabel(metric),
-        title="",
-    )
+        ax.set_ylim(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX)
+    else:
+        if all_y:
+            y_min = min(all_y)
+            y_max = 4 * y_min
+            y_floor = 0.0
+            y_step = _nice_axis_step(y_floor, y_max, min_ticks=5)
+            configure_y_axis_ticks(
+                ax,
+                y_data=all_y,
+                style=style,
+                ylim=(y_floor, y_max),
+                y_step=y_step,
+            )
+            ax.set_ylim(y_floor, y_max)
+        grid.configure_labels(
+            pattern="leftmost_y_bottom_x",
+            xlabel="Load",
+            ylabel=metric_ylabel(metric),
+            title="",
+        )
     grid.add_shared_legend(position="top")
     grid.save(output_path)
 
@@ -389,7 +471,10 @@ def parse_args() -> argparse.Namespace:
         "--slo",
         type=float,
         default=None,
-        help="SLO latency threshold in seconds (required for --metric slo-violation)",
+        help=(
+            "SLO latency threshold in seconds (optional override; when omitted with "
+            "--metric slo-violation, auto-calibrate as 2 × unloaded latency p99)"
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -414,7 +499,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    parse_metric(args.metric)
+    metric_kind, _ = parse_metric(args.metric)
 
     configs = select_configs(DEFAULT_CONFIGS, args.config_index)
     load_values = resolve_load_values(args)
@@ -429,13 +514,33 @@ def main() -> None:
     if not binary.is_file():
         raise SystemExit(f"lb binary not found: {binary}")
 
+    slo = args.slo
+    if metric_kind == "slo-violation" and slo is None:
+        ref = configs[0]
+        slo = calibrate_slo(
+            binary,
+            ref,
+            load=load_values[0],
+            service_dist=args.service_dist,
+            service_modes=args.service_modes,
+            service_mode_probs=args.service_mode_probs,
+            seed=args.seed,
+            clients_override=args.clients,
+            servers_override=args.servers,
+        )
+        _log(
+            f"SLO={slo:.6f}s "
+            f"(calibrated with {ref.label}, n={CALIBRATION_N} processing p99 × "
+            f"{SLO_UNLOADED_LATENCY_MULTIPLIER:g})"
+        )
+
     base_kwargs: dict[str, Any] = {
         "n": args.n,
         "service_dist": args.service_dist,
         "service_modes": args.service_modes,
         "service_mode_probs": args.service_mode_probs,
         "seed": args.seed,
-        "slo": args.slo,
+        "slo": slo,
     }
 
     series = run_load_sweep(
@@ -444,7 +549,7 @@ def main() -> None:
         load_values,
         base_kwargs=base_kwargs,
         metric=args.metric,
-        slo=args.slo,
+        slo=slo,
         clients_override=args.clients,
         servers_override=args.servers,
     )

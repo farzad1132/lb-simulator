@@ -132,7 +132,7 @@ Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` 
 |----------|-------------|
 | lb push/approx `LoadBalancer` | Load balancer index (`0 .. clients-1`) |
 | lb centralized subset LB | Subset index (`0 .. S-1`) |
-| ms `EdgeBalancer` | Sorted API index (APIs ordered lexicographically) |
+| ms `EdgeBalancer` | n/a — always full entry replica pool (`k` ignored for ingress) |
 | ms `ReplicaBalancer` | `replica_idx` within the calling service |
 | ms centralized subset DownstreamBalancer | Subset index (`0 .. S-1`) per target |
 

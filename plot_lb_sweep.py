@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from plot_cdfs import (
     LB_POLICIES,
+    PULL_POLICIES,
     REPO_ROOT,
     ensure_release_binary,
     output_path_with_comment,
@@ -24,9 +25,7 @@ from plot_cdfs import (
 )
 from plotting_primitive import (
     ACM_COMPACT_HALF,
-    PlotStyle,
     SubplotGrid,
-    configure_y_axis_ticks,
     ecdf_probability,
     percentile,
     plot_line,
@@ -35,10 +34,34 @@ from plotting_primitive import (
 DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 HUMAN_PERCENTILES = (1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 99, 100)
+CALIBRATION_N = 300_000
+SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
+SLO_VIOLATION_Y_MIN = 0.01
+SLO_VIOLATION_Y_MAX = 10.0
 
 SWEEP_CHOICES = ("load", "clients", "servers", "concurrency", "lb-subset-size")
 SERIES_CHOICES = ("lb-policy",)
 METRIC_CHOICES = ("p99", "p50", "p90", "utilization", "slo-violation")
+
+POLICY_LEGEND_LABELS = {
+    "centralized": "CQ",
+    "random": "R",
+    "least-request": "LR",
+    "power-of-two": "P2C",
+    "round-robin": "RR",
+}
+PULL_POLICY_LEGEND_SUFFIX = {
+    "least-request": None,  # omitted from legend (default pull policy)
+    "random": "R",
+    "power-of-two": "P2C",
+    "round-robin": "RR",
+}
+APPROX_SCHED_LEGEND_SUFFIX = {
+    None: None,  # bound pulls
+    "fcfs": "FCFS",
+    "edf": "EDF",
+}
+APPROX_SCHED_CLI_CHOICES = ("bound", "fcfs", "edf")
 
 
 @dataclass(frozen=True)
@@ -49,6 +72,14 @@ class ParamSpec:
     fixed_default: float | int
     tick_label: Callable[[Any], str] | None = None
     use_index_x: bool = False
+
+
+@dataclass(frozen=True)
+class SeriesConfig:
+    label: str
+    lb_policy: str
+    pull_policy: str | None = None
+    approx_sched: str | None = None
 
 
 SWEEP_PARAMS: dict[str, ParamSpec] = {
@@ -238,8 +269,127 @@ def extract_metric(data: dict, metric: str, *, slo: float | None) -> float:
     return percentile(data["e2e"], pct)
 
 
-def series_label(series: str, value: Any) -> str:
-    return str(value)
+def policy_legend_label(lb_policy: str) -> str:
+    return POLICY_LEGEND_LABELS.get(lb_policy, lb_policy)
+
+
+def approx_legend_label(
+    pull_policy: str,
+    approx_sched: str | None,
+    *,
+    include_pull: bool,
+) -> str:
+    parts = ["Approx"]
+    if include_pull:
+        # Match load_compare: omit least-request; show short suffix for others.
+        if pull_policy in PULL_POLICY_LEGEND_SUFFIX:
+            pull_suffix = PULL_POLICY_LEGEND_SUFFIX[pull_policy]
+        else:
+            pull_suffix = pull_policy
+        if pull_suffix:
+            parts.append(pull_suffix)
+    sched_suffix = APPROX_SCHED_LEGEND_SUFFIX.get(
+        approx_sched,
+        str(approx_sched).upper() if approx_sched is not None else None,
+    )
+    if sched_suffix is not None:
+        parts.append(sched_suffix)
+    return "-".join(parts)
+
+
+def parse_approx_sched_cli(values: list[str] | None) -> list[str | None]:
+    """Map CLI approx-sched tokens to simulator values (`bound` → None)."""
+    if not values:
+        return [None]
+    out: list[str | None] = []
+    for value in values:
+        if value == "bound":
+            out.append(None)
+        else:
+            out.append(value)
+    return out
+
+
+def expand_series_configs(
+    lb_policies: list[str],
+    *,
+    pull_policies: list[str] | None,
+    approx_scheds: list[str] | None,
+) -> list[SeriesConfig]:
+    """Expand `approx` into pull-policy × approx-sched series; other policies stay 1:1."""
+    has_approx = "approx" in lb_policies
+    if has_approx and not pull_policies:
+        raise SystemExit("--pull-policy is required when --lb-policy includes approx")
+    if pull_policies and not has_approx:
+        raise SystemExit("--pull-policy is only valid when --lb-policy includes approx")
+    if approx_scheds and not has_approx:
+        raise SystemExit("--approx-sched is only valid when --lb-policy includes approx")
+
+    scheds = parse_approx_sched_cli(approx_scheds)
+    pulls = list(pull_policies) if pull_policies else []
+    include_pull = len(pulls) > 1
+
+    configs: list[SeriesConfig] = []
+    for policy in lb_policies:
+        if policy != "approx":
+            configs.append(
+                SeriesConfig(label=policy_legend_label(policy), lb_policy=policy)
+            )
+            continue
+        for pull_policy, approx_sched in product(pulls, scheds):
+            configs.append(
+                SeriesConfig(
+                    label=approx_legend_label(
+                        pull_policy,
+                        approx_sched,
+                        include_pull=include_pull,
+                    ),
+                    lb_policy="approx",
+                    pull_policy=pull_policy,
+                    approx_sched=approx_sched,
+                )
+            )
+
+    labels = [c.label for c in configs]
+    if len(labels) != len(set(labels)):
+        raise SystemExit(
+            "duplicate series labels after expanding approx combinations: "
+            + ", ".join(labels)
+        )
+    return configs
+
+
+def sim_kwargs_for_series(
+    base: dict[str, Any],
+    config: SeriesConfig,
+) -> dict[str, Any]:
+    out = {**base, "lb_policy": config.lb_policy}
+    if config.pull_policy is not None:
+        out["pull_policy"] = config.pull_policy
+    if config.approx_sched is not None:
+        out["approx_sched"] = config.approx_sched
+    return out
+
+
+def _log(message: str) -> None:
+    write = getattr(tqdm, "write", None)
+    if write is None:
+        print(message, file=sys.stderr)
+    else:
+        write(message)
+
+
+def slo_from_unloaded_latency(data: dict[str, Any]) -> float:
+    return SLO_UNLOADED_LATENCY_MULTIPLIER * float(data["unloaded_latency_p99"])
+
+
+def calibrate_slo(binary: Path, *, sim_kwargs: dict[str, Any]) -> float:
+    cal_kwargs = {k: v for k, v in sim_kwargs.items() if k != "slo"}
+    cal_kwargs["n"] = CALIBRATION_N
+    data = run_simulation(binary, **cal_kwargs)
+    if not data["e2e"]:
+        raise SystemExit("no completed tasks during SLO calibration")
+    return slo_from_unloaded_latency(data)
 
 
 def format_run_summary(
@@ -257,65 +407,19 @@ def format_run_summary(
         f"servers={sim_kwargs['servers']}",
         f"concurrency={sim_kwargs['concurrency']}",
     ]
+    if sim_kwargs.get("pull_policy") is not None:
+        parts.append(f"pull_policy={sim_kwargs['pull_policy']}")
+    if sim_kwargs.get("approx_sched") is not None:
+        parts.append(f"approx_sched={sim_kwargs['approx_sched']}")
     kind, pct = parse_metric(metric_name)
     if kind == "utilization":
         parts.append(f"utilization={metric_value:.1f}%")
     elif kind == "slo-violation":
-        parts.append(f"P(latency>SLO)={metric_value:.6f}")
+        parts.append(f"violations={metric_value:.2f}%")
     else:
         parts.append(f"p{int(pct)}={metric_value:.6f}s")
     parts.append(f"utilization={data['utilization_pct']:.1f}%")
     return "  ".join(parts)
-
-
-def _slo_violation_y_step(y_top: float, *, target_ticks: int = 5) -> float:
-    import math
-
-    if y_top <= 0:
-        return 1e-4
-    magnitude = 10 ** math.floor(math.log10(y_top))
-    nice_steps = [
-        magnitude * scale * mult
-        for scale in (1, 0.1, 0.01)
-        for mult in (1, 2, 5)
-    ]
-    best_step = nice_steps[0]
-    best_error = float("inf")
-    for candidate in nice_steps:
-        tick_count = y_top / candidate
-        if tick_count < 2:
-            continue
-        error = abs(tick_count - target_ticks)
-        if error < best_error:
-            best_error = error
-            best_step = candidate
-    return best_step
-
-
-def _configure_slo_violation_y_axis(
-    ax,
-    series: list[tuple[str, list[float]]],
-    style: PlotStyle,
-) -> None:
-    all_y = [v for _, ys in series for v in ys]
-    if not all_y or max(all_y) == 0.0:
-        ax.set_ylim(0.0, 1e-4)
-        ax.set_yticks([0.0])
-        ax.set_yticklabels(["0"], fontsize=style.font_size - 1)
-        return
-
-    y_max = min(1.0, max(all_y))
-    pad = style.axis_guard_fraction * y_max
-    y_top = min(1.0, y_max + pad)
-    y_step = _slo_violation_y_step(y_top)
-    configure_y_axis_ticks(
-        ax,
-        y_data=all_y,
-        style=style,
-        ylim=(0.0, y_top),
-        y_step=y_step,
-    )
-    ax.set_ylim(0.0, y_top)
 
 
 def default_output_path(sweep: str, metric: str) -> Path:
@@ -326,38 +430,37 @@ def default_output_path(sweep: str, metric: str) -> Path:
 
 def run_lb_sweep(
     binary: Path,
-    sweep: str,
     sweep_values: list[Any],
-    series_values: list[str],
+    series_configs: list[SeriesConfig],
     *,
     base_kwargs: dict[str, Any],
     sweep_spec: ParamSpec,
-    series_spec: ParamSpec,
     metric: str,
     slo: float | None,
     output_format: str,
 ) -> list[tuple[str, list[float]]]:
-    series: list[tuple[str, list[float]]] = [(str(v), []) for v in series_values]
-    series_index = {str(v): idx for idx, v in enumerate(series_values)}
-    pairs = list(product(series_values, sweep_values))
+    series: list[tuple[str, list[float]]] = [
+        (config.label, []) for config in series_configs
+    ]
+    pairs = list(product(enumerate(series_configs), sweep_values))
 
-    for series_val, sweep_val in tqdm(
+    for (idx, config), sweep_val in tqdm(
         pairs,
-        desc=f"{series_spec.name} × {sweep_spec.name} sweep",
+        desc=f"series × {sweep_spec.name} sweep",
         unit="run",
     ):
-        sim_kwargs = {
-            **base_kwargs,
-            sweep_spec.sim_key: sweep_val,
-            series_spec.sim_key: series_val,
-        }
+        sim_kwargs = sim_kwargs_for_series(
+            {**base_kwargs, sweep_spec.sim_key: sweep_val},
+            config,
+        )
         data = run_simulation(binary, **sim_kwargs)
         if not data["e2e"]:
             print("no completed tasks", file=sys.stderr)
             sys.exit(1)
         metric_value = extract_metric(data, metric, slo=slo)
-        label = series_label(series_spec.name, series_val)
-        series[series_index[label]][1].append(metric_value)
+        if parse_metric(metric)[0] == "slo-violation":
+            metric_value *= 100.0
+        series[idx][1].append(metric_value)
         summary = format_run_summary(
             sim_kwargs=sim_kwargs,
             metric_name=metric,
@@ -395,11 +498,16 @@ def plot_sweep(
         x_values = sweep_values
         tick_labels = [f"{v:g}" if isinstance(v, float) else str(v) for v in sweep_values]
 
+    metric_kind, _ = parse_metric(metric)
     for color_idx, (label, y_values) in enumerate(series):
+        plot_y = y_values
+        if metric_kind == "slo-violation":
+            # Log scale cannot plot non-positive values; clamp for display.
+            plot_y = [max(float(v), SLO_VIOLATION_Y_MIN) for v in y_values]
         plot_line(
             ax,
             x_values,
-            y_values,
+            plot_y,
             label=label,
             style=style,
             color_idx=color_idx,
@@ -411,16 +519,24 @@ def plot_sweep(
     if not sweep_spec.use_index_x and all(isinstance(v, (int, float)) for v in sweep_values):
         ax.set_xlim(min(sweep_values), max(sweep_values))
 
-    ylabel = metric_ylabel(metric)
-    if parse_metric(metric)[0] == "slo-violation":
-        _configure_slo_violation_y_axis(ax, series, style)
-
-    grid.configure_labels(
-        pattern="leftmost_y_bottom_x",
-        xlabel=sweep_spec.xlabel,
-        ylabel=ylabel,
-        title=title or "",
-    )
+    if metric_kind == "slo-violation":
+        grid.configure_labels(
+            pattern="leftmost_y_bottom_x",
+            xlabel=sweep_spec.xlabel,
+            ylabel="SLO Violations (%)",
+            title=title or "",
+            log_y=True,
+            ylim=(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX),
+            auto_ticks=False,
+        )
+        ax.set_ylim(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX)
+    else:
+        grid.configure_labels(
+            pattern="leftmost_y_bottom_x",
+            xlabel=sweep_spec.xlabel,
+            ylabel=metric_ylabel(metric),
+            title=title or "",
+        )
     grid.add_shared_legend(position="top")
     grid.save(output_path)
 
@@ -558,10 +674,36 @@ def parse_args() -> argparse.Namespace:
         help="LB policies to compare when --series lb-policy (default: all)",
     )
     parser.add_argument(
+        "--pull-policy",
+        choices=PULL_POLICIES,
+        nargs="+",
+        default=None,
+        help=(
+            "Pull-intent policy/policies for approx (required when --lb-policy "
+            "includes approx). Multiple values expand approx into one series each "
+            "(cartesian product with --approx-sched)."
+        ),
+    )
+    parser.add_argument(
+        "--approx-sched",
+        choices=APPROX_SCHED_CLI_CHOICES,
+        nargs="+",
+        default=None,
+        help=(
+            "Approx schedulers to include for each pull policy: bound (default if "
+            "omitted), fcfs, edf. Multiple values expand approx into one series each "
+            "(cartesian product with --pull-policy). "
+            "Note: edf is only supported by the ms simulator."
+        ),
+    )
+    parser.add_argument(
         "--slo",
         type=float,
         default=None,
-        help="SLO latency threshold in seconds (required for --metric slo-violation)",
+        help=(
+            "SLO latency threshold in seconds (optional override; when omitted with "
+            "--metric slo-violation, auto-calibrate as 2 × unloaded latency p99)"
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -583,21 +725,24 @@ def main() -> None:
     if args.sweep == args.series:
         raise SystemExit("--sweep and --series must name different parameters")
 
-    parse_metric(args.metric)
+    metric_kind, _ = parse_metric(args.metric)
 
     sweep_spec = SWEEP_PARAMS[args.sweep]
-    series_spec = SERIES_PARAMS[args.series]
 
     sweep_values = resolve_sweep_values(args, args.sweep)
     if not sweep_values:
         raise SystemExit(f"no values in sweep range for {args.sweep}")
 
     if args.series == "lb-policy":
-        series_values = list(args.lb_policy)
+        series_configs = expand_series_configs(
+            list(args.lb_policy),
+            pull_policies=args.pull_policy,
+            approx_scheds=args.approx_sched,
+        )
     else:
         raise SystemExit(f"unsupported series parameter: {args.series}")
 
-    if "prequal" in series_values:
+    if any(c.lb_policy == "prequal" for c in series_configs):
         if args.sweep == "lb-subset-size":
             raise SystemExit(
                 "--lb-policy prequal is incompatible with --sweep lb-subset-size"
@@ -617,16 +762,29 @@ def main() -> None:
         raise SystemExit(f"lb binary not found: {binary}")
 
     base_kwargs = base_sim_kwargs(args, args.sweep)
+    slo = args.slo
+    if metric_kind == "slo-violation" and slo is None:
+        ref = series_configs[0]
+        cal_kwargs = sim_kwargs_for_series(
+            {**base_kwargs, sweep_spec.sim_key: sweep_values[0]},
+            ref,
+        )
+        slo = calibrate_slo(binary, sim_kwargs=cal_kwargs)
+        _log(
+            f"SLO={slo:.6f}s "
+            f"(calibrated with {ref.label}, n={CALIBRATION_N} processing p99 × "
+            f"{SLO_UNLOADED_LATENCY_MULTIPLIER:g})"
+        )
+    base_kwargs["slo"] = slo
+
     series = run_lb_sweep(
         binary,
-        args.sweep,
         sweep_values,
-        series_values,
+        series_configs,
         base_kwargs=base_kwargs,
         sweep_spec=sweep_spec,
-        series_spec=series_spec,
         metric=args.metric,
-        slo=args.slo,
+        slo=slo,
         output_format=args.format,
     )
 

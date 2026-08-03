@@ -620,20 +620,12 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let mut apis: Vec<_> = graph.entrypoints.keys().cloned().collect();
     apis.sort();
-    for (api_index, api) in apis.iter().enumerate() {
+    // Edge always sees the full entry pool; `--lb-subset-size` applies to outbound LBs only.
+    for api in &apis {
         let entry_endpoint = &graph.entrypoints[api];
         let entry_microservice = microservice_for_endpoint(graph.as_ref(), entry_endpoint)?;
         let n_servers = graph.microservices[&entry_microservice].replicas as usize;
-        let server_indices = if use_shared_downstream {
-            (0..n_servers).collect()
-        } else {
-            subset::assign_subset(
-                args.lb_subset_policy,
-                n_servers,
-                api_index,
-                args.lb_subset_size,
-            )
-        };
+        let server_indices: Vec<usize> = (0..n_servers).collect();
         if args.verbose >= 1 {
             eprintln!("api {api} subset: {server_indices:?}");
         }

@@ -59,13 +59,13 @@ DEFAULT_BINARY = REPO_ROOT / "target" / "release" / "lb"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
-    ExperimentConfig("CQ", "centralized", 96, 24),
-    ExperimentConfig("P2C", "power-of-two", 96, 24),
-    ExperimentConfig("LR", "least-request", 96, 24),
-    ExperimentConfig("R", "random", 96, 24),
-    ExperimentConfig("RR", "round-robin", 96, 24),
-    ExperimentConfig("Approx", "approx", 96, 24, pull_policy="least-request"),
-    ExperimentConfig("Approx-FCFS", "approx", 96, 24, pull_policy="least-request", approx_sched="fcfs"),
+    ExperimentConfig("CQ", "centralized", 20, 100),
+    ExperimentConfig("P2C", "power-of-two", 20, 100),
+    ExperimentConfig("LR", "least-request", 20, 100),
+    ExperimentConfig("R", "random", 20, 100),
+    ExperimentConfig("RR", "round-robin", 20, 100),
+    ExperimentConfig("Approx", "approx", 20, 100, pull_policy="least-request"),
+    ExperimentConfig("Approx-FCFS", "approx", 20, 100, pull_policy="least-request", approx_sched="fcfs"),
 ]
 
 

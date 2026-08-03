@@ -134,14 +134,14 @@ User ingress is handled separately: one `EdgeBalancer` per API in the callgraph,
 
 ### Replica subsetting
 
-When `--lb-subset-size k > 0`, each balancer only routes among `min(k, replicas)` targets. Subset assignment is controlled by `--lb-subset-policy` (default `deterministic`):
+When `--lb-subset-size k > 0`, **outbound** balancers only route among `min(k, replicas)` targets. Subset assignment is controlled by `--lb-subset-policy` (default `deterministic`):
 
-- **EdgeBalancer:** client id is the API index (APIs sorted lexicographically).
+- **EdgeBalancer:** always uses the full entry-service replica pool (`k` is ignored for ingress). There is one edge LB per API; subsetting ingress would starve most entry replicas.
 - **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
 
 **Not supported with `prequal`, `cl`, `cl-lr`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. Those policies require all replicas (ingress and outbound).
 
-**Centralized** accepts restricted partition subsetting (same constraints as lb): deterministic only; `k` must divide each downstream target's replica count; each caller's replica count must be divisible by `S = target_replicas / k`. With `k > 0`, each downstream target is partitioned into `S` shared pull `DownstreamBalancer`s; caller replica `i` feeds balancer `i % S`; target replicas pull only from their owning balancer. With `k = 0`, one pull balancer per target (full pool).
+**Centralized** accepts restricted partition subsetting (same constraints as lb): deterministic only; `k` must divide each downstream target's replica count; each caller's replica count must be divisible by `S = target_replicas / k`. With `k > 0`, each downstream target is partitioned into `S` shared pull `DownstreamBalancer`s; caller replica `i` feeds balancer `i % S`; target replicas pull only from their owning balancer. With `k = 0`, one pull balancer per target (full pool). Ingress stays full-pool push P2C on `EdgeBalancer`.
 
 See [lb-simulation.md](lb-simulation.md#server-subset) for the deterministic algorithm and [Centralized subsetting](lb-simulation.md#centralized-subsetting).
 

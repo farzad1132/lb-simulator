@@ -573,6 +573,7 @@ def plot_heatmap(
     colorbar_label: str = "",
     annotate: bool = True,
     annotation_fmt: str = "{:.1f}%",
+    show_colorbar: bool = True,
 ):
     """Plot an annotated heatmap on an existing primitive-managed axis."""
     image = ax.imshow(data, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
@@ -599,10 +600,11 @@ def plot_heatmap(
                     fontsize=style.font_size - 1,
                 )
 
-    cbar = ax.figure.colorbar(image, ax=ax)
-    if colorbar_label:
-        cbar.set_label(colorbar_label, fontsize=style.font_size)
-    cbar.ax.tick_params(labelsize=style.font_size - 1)
+    if show_colorbar:
+        cbar = ax.figure.colorbar(image, ax=ax)
+        if colorbar_label:
+            cbar.set_label(colorbar_label, fontsize=style.font_size)
+        cbar.ax.tick_params(labelsize=style.font_size - 1)
     return image
 
 

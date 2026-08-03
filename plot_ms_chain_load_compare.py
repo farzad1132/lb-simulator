@@ -62,7 +62,7 @@ CHAIN_FIXTURES = {
         REPO_ROOT / "tests" / "chain" / "10" / "load.json",
     ),
 }
-DEFAULT_RPS_PER_LOAD_LEVEL = 10_000.0
+DEFAULT_RPS = 10_000.0
 CALIBRATION_N = 300_000
 SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
 
@@ -75,6 +75,8 @@ class MsExperimentConfig:
     pull_policy: str | None = None
     approx_sched: str | None = None
     scheduling: str = "fifo"
+    scale: int | None = None
+    rps: float | None = None  # base rate; simulator rps = load * rps
 
 
 # Placeholder configs — edit to compare the policies you care about.
@@ -85,6 +87,9 @@ DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     #MsExperimentConfig("P2C-K10", "power-of-two", lb_subset_size=10),
     #MsExperimentConfig("P2C-K20", "power-of-two", lb_subset_size=20),
     MsExperimentConfig("P2C", "power-of-two"),
+    MsExperimentConfig("LR", "least-request"),
+    MsExperimentConfig("RR", "round-robin"),
+    MsExperimentConfig("R", "random"),
     #MsExperimentConfig("CL", "cl"),
     MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
     #MsExperimentConfig("Approx-K10", "approx", pull_policy="least-request", lb_subset_size=10),
@@ -92,9 +97,14 @@ DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     #MsExperimentConfig("Approx-FCFS-K10", "approx", pull_policy="least-request", approx_sched="fcfs", lb_subset_size=10),
     #MsExperimentConfig("Approx-EDF-K10", "approx", pull_policy="least-request", approx_sched="edf", lb_subset_size=10),
     #MsExperimentConfig("Approx-EDF-K20", "approx", pull_policy="least-request", approx_sched="edf", lb_subset_size=20),
+    #MsExperimentConfig("Approx-EDF-R100-K10", "approx", pull_policy="least-request", approx_sched="edf", scale=90, rps=100_100, lb_subset_size=10),
     MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
     
 ]
+
+
+def resolve_config_rps(config: MsExperimentConfig) -> float:
+    return DEFAULT_RPS if config.rps is None else config.rps
 
 
 def validate_ms_config(config: MsExperimentConfig) -> None:
@@ -111,6 +121,10 @@ def validate_ms_config(config: MsExperimentConfig) -> None:
         raise SystemExit(
             f"config {label!r}: approx_sched is only valid when lb_policy is approx"
         )
+    if config.scale is not None and config.scale < 0:
+        raise SystemExit(f"config {label!r}: scale must be >= 0 (got {config.scale})")
+    if config.rps is not None and config.rps <= 0:
+        raise SystemExit(f"config {label!r}: rps must be > 0 (got {config.rps})")
     validate_prequal_subset(config.lb_policy, config.lb_subset_size)
 
 
@@ -119,6 +133,8 @@ def select_configs(
     config_index: list[int] | None,
     *,
     lb_subset_size: int | None = None,
+    scale: int | None = None,
+    rps: float | None = None,
 ) -> list[MsExperimentConfig]:
     if config_index is None:
         selected = list(configs)
@@ -136,6 +152,14 @@ def select_configs(
         selected = [
             replace(config, lb_subset_size=lb_subset_size) for config in selected
         ]
+    if scale is not None:
+        if scale < 0:
+            raise SystemExit(f"--scale must be >= 0 (got {scale})")
+        selected = [replace(config, scale=scale) for config in selected]
+    if rps is not None:
+        if rps <= 0:
+            raise SystemExit(f"--rps must be > 0 (got {rps})")
+        selected = [replace(config, rps=rps) for config in selected]
     for config in selected:
         validate_ms_config(config)
     return selected
@@ -178,7 +202,6 @@ def calibrate_topology_slo(
     config: MsExperimentConfig,
     seed: int | None,
     service_dist: str,
-    scale: int | None,
 ) -> float:
     data = run_ms_simulation(
         binary,
@@ -192,7 +215,7 @@ def calibrate_topology_slo(
         seed=seed,
         service_dist=service_dist,
         approx_sched=config.approx_sched,
-        scale=scale,
+        scale=config.scale,
     )
     return slo_from_unloaded_latency_ms(api_stats(data, api))
 
@@ -224,6 +247,8 @@ def format_run_summary(
         parts.append(f"pull_policy={config.pull_policy}")
     if config.approx_sched is not None:
         parts.append(f"approx_sched={config.approx_sched}")
+    if config.scale is not None:
+        parts.append(f"scale={config.scale}")
     parts.append(f"rps={rps:g}")
     parts.append(f"SLO={slo_ms:.4f}ms")
     parts.append(f"utilization={utilization_pct:.1f}%")
@@ -239,12 +264,10 @@ def run_load_compare_sweep(
     callgraph: Path,
     load_file: Path,
     api: str,
-    slo_ms: float,
-    rps_per_load_level: float,
+    slo_by_label: dict[str, float],
     n: int,
     seed: int | None,
     service_dist: str,
-    scale: int | None,
 ) -> list[tuple[str, list[float]]]:
     """Return (label, SLO violation %) per config; x is shared loads."""
     series: list[tuple[str, list[float]]] = [
@@ -253,7 +276,8 @@ def run_load_compare_sweep(
     pairs = list(product(configs, loads))
 
     for config, load in tqdm(pairs, desc="config × load", unit="run"):
-        rps = load * rps_per_load_level
+        rps = load * resolve_config_rps(config)
+        slo_ms = slo_by_label[config.label]
         data = run_ms_simulation(
             binary,
             callgraph=callgraph,
@@ -268,7 +292,7 @@ def run_load_compare_sweep(
             slo_ms=slo_ms,
             service_dist=service_dist,
             approx_sched=config.approx_sched,
-            scale=scale,
+            scale=config.scale,
         )
         violation_pct = api_stats(data, api)["prob_latency_gt_slo"] * 100.0
         utilization_pct = average_utilization_pct(data)
@@ -388,8 +412,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Add this many cpu cores and replicas to every microservice "
-            "(passed through to ms --scale)"
+            "Override scale for all configs "
+            "(add this many cpu cores and replicas to every microservice)"
         ),
     )
     parser.add_argument(
@@ -424,9 +448,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--load-max", type=float, default=0.9)
     parser.add_argument("--load-step", type=float, default=0.1)
     parser.add_argument(
-        "--rps-per-load-level",
+        "--rps",
         type=float,
-        default=DEFAULT_RPS_PER_LOAD_LEVEL,
+        default=None,
+        help=(
+            f"Override base rps for all configs "
+            f"(simulator rps = load × rps; default per config or {DEFAULT_RPS:g})"
+        ),
     )
     parser.add_argument("--n", type=int, default=100_000)
     parser.add_argument(
@@ -453,33 +481,33 @@ def main() -> None:
         DEFAULT_CONFIGS,
         args.config_index,
         lb_subset_size=args.lb_subset_size,
+        scale=args.scale,
+        rps=args.rps,
     )
     loads = load_values(args.load_min, args.load_max, args.load_step)
     if not loads:
         raise SystemExit("no load values in sweep range")
 
     callgraph, load_file = resolve_fixtures(args)
-    if args.scale is not None and args.scale < 0:
-        raise SystemExit(f"--scale must be >= 0 (got {args.scale})")
     binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="ms")
 
-    # Shared SLO for all configs: calibrate once using the first config.
-    ref = configs[0]
-    slo_ms = calibrate_topology_slo(
-        binary,
-        callgraph=callgraph,
-        load_file=load_file,
-        api=args.api,
-        config=ref,
-        seed=args.seed,
-        service_dist=args.service_dist,
-        scale=args.scale,
-    )
-    _log(
-        f"chain{args.chain} SLO={slo_ms:.4f}ms "
-        f"(calibrated with {ref.label}, n={CALIBRATION_N} processing p99 × "
-        f"{SLO_UNLOADED_LATENCY_MULTIPLIER:g})"
-    )
+    slo_by_label: dict[str, float] = {}
+    for config in configs:
+        slo_ms = calibrate_topology_slo(
+            binary,
+            callgraph=callgraph,
+            load_file=load_file,
+            api=args.api,
+            config=config,
+            seed=args.seed,
+            service_dist=args.service_dist,
+        )
+        slo_by_label[config.label] = slo_ms
+        _log(
+            f"chain{args.chain} {config.label} SLO={slo_ms:.4f}ms "
+            f"(n={CALIBRATION_N} processing p99 × "
+            f"{SLO_UNLOADED_LATENCY_MULTIPLIER:g})"
+        )
 
     series = run_load_compare_sweep(
         binary,
@@ -488,12 +516,10 @@ def main() -> None:
         callgraph=callgraph,
         load_file=load_file,
         api=args.api,
-        slo_ms=slo_ms,
-        rps_per_load_level=args.rps_per_load_level,
+        slo_by_label=slo_by_label,
         n=args.n,
         seed=args.seed,
         service_dist=args.service_dist,
-        scale=args.scale,
     )
 
     output_path = args.output or default_output_path(

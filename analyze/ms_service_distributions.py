@@ -87,9 +87,12 @@ def callgraph_output_slug(callgraph: Path) -> str:
     return "_".join(parts)
 
 
-def default_output_path(callgraph: Path) -> Path:
+def default_output_path(callgraph: Path, *, scale: int | None = None) -> Path:
     slug = callgraph_output_slug(callgraph)
-    return OUTPUT_DIR / f"{OUTPUT_BASENAME}_{slug}.pdf"
+    name = f"{OUTPUT_BASENAME}_{slug}"
+    if scale is not None and scale != 0:
+        name += f"_scale{scale}"
+    return OUTPUT_DIR / f"{name}.pdf"
 
 
 def microservice_order(data: dict) -> list[str]:
@@ -644,6 +647,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to load.json (default: load.json beside --callgraph)",
     )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        default=None,
+        help=(
+            "Add this many cpu cores and replicas to every microservice "
+            "(passed through to ms --scale)"
+        ),
+    )
     parser.add_argument("--n", type=int, default=100_000_0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--rps", type=float, default=None)
@@ -697,6 +709,8 @@ def main() -> None:
         raise SystemExit(f"callgraph not found: {callgraph}")
     if not load_file.is_file():
         raise SystemExit(f"load file not found: {load_file}")
+    if args.scale is not None and args.scale < 0:
+        raise SystemExit(f"--scale must be >= 0 (got {args.scale})")
     if args.lb_policy == "approx" and args.pull_policy is None:
         raise SystemExit("--pull-policy is required when --lb-policy approx")
     if args.lb_policy != "approx" and args.pull_policy is not None:
@@ -725,6 +739,7 @@ def main() -> None:
         scheduling=args.scheduling,
         service_dist=args.service_dist,
         approx_sched=args.approx_sched,
+        scale=args.scale,
     )
     if "by_microservice" not in data:
         raise SystemExit("ms JSON missing by_microservice; rebuild the ms binary")
@@ -753,7 +768,7 @@ def main() -> None:
                 "rebuild the ms binary"
             )
 
-    output_base = args.output or default_output_path(callgraph)
+    output_base = args.output or default_output_path(callgraph, scale=args.scale)
     output = output_path_with_comment(output_base, args.comment)
     plot_distributions(data, microservices=microservice_order(data), output=output)
 
