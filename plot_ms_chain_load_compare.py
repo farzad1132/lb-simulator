@@ -312,7 +312,7 @@ def run_load_compare_sweep(
 
 
 Y_AXIS_MAX = 30.0
-Y_AXIS_MIN = 0.01
+Y_AXIS_MIN = 0.0
 
 
 def plot_load_compare(
@@ -328,12 +328,10 @@ def plot_load_compare(
     series_styles = distinct_series_styles(len(series), style)
     for i, (label, y_values) in enumerate(series):
         line_style = series_styles[i]
-        # Log scale cannot plot non-positive values; clamp for display.
-        plot_y = [max(float(v), Y_AXIS_MIN) for v in y_values]
         plot_line(
             ax,
             loads,
-            plot_y,
+            y_values,
             label=label,
             style=style,
             show_markers=True,
@@ -347,13 +345,13 @@ def plot_load_compare(
         xlabel="Load",
         ylabel="% of SLO violations",
         title="",
-        log_y=True,
         ylim=(Y_AXIS_MIN, Y_AXIS_MAX),
         auto_ticks=False,
     )
     ax.set_xticks(loads)
     ax.set_xticklabels([f"{load:g}" for load in loads])
     ax.set_xlim(min(loads), max(loads))
+    ax.set_yticks(np.arange(0, Y_AXIS_MAX + 0.1, 5))
     ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
 
     grid.add_shared_legend(position="top")
