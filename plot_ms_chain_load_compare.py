@@ -74,9 +74,14 @@ class MsExperimentConfig:
     lb_subset_size: int = 0
     pull_policy: str | None = None
     approx_sched: str | None = None
+    approx_share: int = 1  # replicas per sidecar; only for approx-share
     scheduling: str = "fifo"
     scale: int | None = None
     rps: float | None = None  # base rate; simulator rps = load * rps
+
+
+def uses_approx_protocol(config: MsExperimentConfig) -> bool:
+    return config.lb_policy in ("approx", "approx-share")
 
 
 # Placeholder configs — edit to compare the policies you care about.
@@ -88,18 +93,25 @@ DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     #MsExperimentConfig("P2C-K20", "power-of-two", lb_subset_size=20),
     MsExperimentConfig("P2C", "power-of-two"),
     MsExperimentConfig("LR", "least-request"),
-    MsExperimentConfig("RR", "round-robin"),
+    #MsExperimentConfig("RR", "round-robin"),
     MsExperimentConfig("R", "random"),
-    #MsExperimentConfig("CL", "cl"),
+    MsExperimentConfig("CL", "cl"),
     MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
+    MsExperimentConfig("Approx-S2", "approx-share", pull_policy="least-request", approx_share=2),
     #MsExperimentConfig("Approx-K10", "approx", pull_policy="least-request", lb_subset_size=10),
     MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs",),
+    MsExperimentConfig("Approx-FCFS-S2", "approx-share", pull_policy="least-request", approx_sched="fcfs", approx_share=2),
     #MsExperimentConfig("Approx-FCFS-K10", "approx", pull_policy="least-request", approx_sched="fcfs", lb_subset_size=10),
     #MsExperimentConfig("Approx-EDF-K10", "approx", pull_policy="least-request", approx_sched="edf", lb_subset_size=10),
     #MsExperimentConfig("Approx-EDF-K20", "approx", pull_policy="least-request", approx_sched="edf", lb_subset_size=20),
     #MsExperimentConfig("Approx-EDF-R100-K10", "approx", pull_policy="least-request", approx_sched="edf", scale=90, rps=100_100, lb_subset_size=10),
     MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
-    
+    MsExperimentConfig("Approx-EDF-S2", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=2),
+    #MsExperimentConfig("Approx-EDF-S3", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=3),
+    #MsExperimentConfig("ApproxShare-1", "approx-share", pull_policy="least-request", approx_share=1),
+    #MsExperimentConfig("ApproxShare-EDF-S1", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=1),
+    #MsExperimentConfig("ApproxShare-EDF-S2", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=2),
+    #MsExperimentConfig("ApproxShare-EDF-S5", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=5),
 ]
 
 
@@ -109,17 +121,29 @@ def resolve_config_rps(config: MsExperimentConfig) -> float:
 
 def validate_ms_config(config: MsExperimentConfig) -> None:
     label = config.label
-    if config.lb_policy == "approx" and config.pull_policy is None:
+    if uses_approx_protocol(config) and config.pull_policy is None:
         raise SystemExit(
-            f"config {label!r}: pull_policy is required when lb_policy is approx"
+            f"config {label!r}: pull_policy is required when lb_policy is "
+            f"{config.lb_policy}"
         )
-    if config.lb_policy != "approx" and config.pull_policy is not None:
+    if not uses_approx_protocol(config) and config.pull_policy is not None:
         raise SystemExit(
-            f"config {label!r}: pull_policy is only valid when lb_policy is approx"
+            f"config {label!r}: pull_policy is only valid when lb_policy is "
+            "approx or approx-share"
         )
-    if config.approx_sched is not None and config.lb_policy != "approx":
+    if config.approx_sched is not None and not uses_approx_protocol(config):
         raise SystemExit(
-            f"config {label!r}: approx_sched is only valid when lb_policy is approx"
+            f"config {label!r}: approx_sched is only valid when lb_policy is "
+            "approx or approx-share"
+        )
+    if config.lb_policy == "approx-share":
+        if config.approx_share < 1:
+            raise SystemExit(
+                f"config {label!r}: approx_share must be >= 1 (got {config.approx_share})"
+            )
+    elif config.approx_share != 1:
+        raise SystemExit(
+            f"config {label!r}: approx_share is only valid when lb_policy is approx-share"
         )
     if config.scale is not None and config.scale < 0:
         raise SystemExit(f"config {label!r}: scale must be >= 0 (got {config.scale})")
@@ -215,6 +239,9 @@ def calibrate_topology_slo(
         seed=seed,
         service_dist=service_dist,
         approx_sched=config.approx_sched,
+        approx_share=(
+            config.approx_share if config.lb_policy == "approx-share" else None
+        ),
         scale=config.scale,
     )
     return slo_from_unloaded_latency_ms(api_stats(data, api))
@@ -247,6 +274,8 @@ def format_run_summary(
         parts.append(f"pull_policy={config.pull_policy}")
     if config.approx_sched is not None:
         parts.append(f"approx_sched={config.approx_sched}")
+    if config.lb_policy == "approx-share":
+        parts.append(f"approx_share={config.approx_share}")
     if config.scale is not None:
         parts.append(f"scale={config.scale}")
     parts.append(f"rps={rps:g}")
@@ -292,6 +321,9 @@ def run_load_compare_sweep(
             slo_ms=slo_ms,
             service_dist=service_dist,
             approx_sched=config.approx_sched,
+            approx_share=(
+                config.approx_share if config.lb_policy == "approx-share" else None
+            ),
             scale=config.scale,
         )
         violation_pct = api_stats(data, api)["prob_latency_gt_slo"] * 100.0
@@ -311,7 +343,7 @@ def run_load_compare_sweep(
     return series
 
 
-Y_AXIS_MAX = 30.0
+Y_AXIS_MAX = 10.0
 Y_AXIS_MIN = 0.0
 
 
@@ -351,7 +383,7 @@ def plot_load_compare(
     ax.set_xticks(loads)
     ax.set_xticklabels([f"{load:g}" for load in loads])
     ax.set_xlim(min(loads), max(loads))
-    ax.set_yticks(np.arange(0, Y_AXIS_MAX + 0.1, 5))
+    ax.set_yticks(np.arange(0, Y_AXIS_MAX + 0.1, 1))
     ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
 
     grid.add_shared_legend(position="top")

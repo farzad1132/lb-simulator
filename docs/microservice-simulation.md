@@ -114,8 +114,9 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Push routing to entry replicas; honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `prequal` |
-| **ReplicaBalancer** | one per server (default, `approx`, and `prequal` policies) | Outbound only: push dispatch (default policies), decentralized pull-intent queues (`approx`), or async RIF probe pools (`prequal`) |
+| **EdgeBalancer** | one per API | Push routing to entry replicas (most policies) or entry **sidecars** (`approx-share`); honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `approx-share` / `prequal` |
+| **ReplicaBalancer** | one per server (default, `approx`, and `prequal`); one per sidecar group (`approx-share`) | Outbound only: push dispatch (default policies), decentralized pull-intent queues (`approx` / `approx-share`), or async RIF probe pools (`prequal`) |
+| **ApproxServerSidecar** | one per sidecar group (`approx-share`) | Dual-mode: ingress fan-out to least-occupancy owned replica (`N>1`); pull approx-share intent queue for inter-service |
 | **DownstreamBalancer** | one per downstream target (`cl`, `cl-lr`, `corr`); one per subset of each target (`centralized` with `k > 0`, else one per target) | Shared outbound LB: push P2C (`cl`), push least-request (`cl-lr`), pull FCFS (`centralized`), or experimental push (`corr`) |
 | **OutboundGateway** | one per server (`cl`, `cl-lr`, `centralized`, `corr`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
 | **Replica** (server) | `replicas` per microservice | Configurable queue (`fifo` default, `edf` optional; see [scheduling.md](scheduling.md)), local processing, nested dispatch/return |
@@ -126,17 +127,18 @@ A callgraph microservice node becomes:
 
 - `replicas` × `Replica` (server) models, each with `max_concurrency = cpu / replicas`
 - Default push policies, `approx`, and `prequal`: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
+- `--lb-policy approx-share`: `ceil(replicas / N)` shared client `ReplicaBalancer`s and server `ApproxServerSidecar`s (`N = --approx-share`)
 - `--lb-policy cl`, `cl-lr`, `centralized`, or `corr`: one `DownstreamBalancer` per downstream microservice target (or `S` partitioned balancers per target when `centralized` and `k > 0`), plus `replicas` × `OutboundGateway` forwarders
 
 All interfaces of a microservice share the same server pool. The queue is per-server, not per-interface.
 
-User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-microservice servers.
+User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-microservice servers (or entry sidecars under `approx-share`).
 
 ### Replica subsetting
 
 When `--lb-subset-size k > 0`, **outbound** balancers only route among `min(k, replicas)` targets. Subset assignment is controlled by `--lb-subset-policy` (default `deterministic`):
 
-- **EdgeBalancer:** always uses the full entry-service replica pool (`k` is ignored for ingress). There is one edge LB per API; subsetting ingress would starve most entry replicas.
+- **EdgeBalancer:** always uses the full entry-service pool (`k` is ignored for ingress) — all replicas, or all entry sidecars under `approx-share`. There is one edge LB per API; subsetting ingress would starve most entry targets.
 - **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
 
 **Not supported with `prequal`, `cl`, `cl-lr`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. Those policies require all replicas (ingress and outbound).
@@ -200,8 +202,9 @@ The **EdgeBalancer** handles **user ingress only**. It always uses **push** rout
 
 | `--lb-policy` | EdgeBalancer algorithm |
 |---------------|------------------------|
-| `random`, `power-of-two`, `least-request`, `round-robin` | Honors `--lb-policy` |
-| `cl`, `cl-lr`, `centralized`, `corr`, `approx`, `prequal` | Always **power-of-two** (the flag changes outbound architecture only) |
+| `random`, `power-of-two`, `least-request`, `round-robin` | Honors `--lb-policy` (targets = entry replicas) |
+| `cl`, `cl-lr`, `centralized`, `corr`, `approx`, `prequal` | Always **power-of-two** over entry replicas (the flag changes outbound architecture only) |
+| `approx-share` | Always **power-of-two** over entry **sidecars** (`N>1`) or entry replicas (`N=1`); sidecar then joins least-occupancy replica when `N>1` |
 
 Outbound RPC routing and returns are handled separately (see below).
 
@@ -267,6 +270,17 @@ With `--lb-subset-size k > 0`, each downstream target is partitioned into `S = r
 Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are **bound** by `request_id` by default (omit `--approx-sched`); optional **`--approx-sched fcfs`**, **`edf`**, or **`edf+`** pops the queue head per `(rb_id, target)` (`edf+` also EDF-orders the replica intent queue) — see [approx-policy.md § Unbound pull modes](approx-policy.md#unbound-pull-modes---approx-sched).
 
 Full documentation: **[approx-policy.md](approx-policy.md)**.
+
+### Approx-share policy (dual-mode sidecar)
+
+`--lb-policy approx-share` groups replicas behind shared sidecars (`N = --approx-share`, default `1`; `n_sidecars = ceil(replicas / N)`). Each `ApproxServerSidecar` is **dual-mode**:
+
+- **Push:** ingress enqueues on a replica local queue (shared with `DownstreamReturn`). `N=1`: edge → replica. `N>1`: edge P2C among entry sidecars, then least-occupancy owned replica (`queue + in_flight`).
+- **Pull:** approx-share intent protocol among target sidecars (`--pull-policy`, optional `--approx-sched`).
+
+Client-side outbound queues are also shared per sidecar group. With `N = 1` the topology stays close to approx. `--lb-subset-size > 0` is rejected. `lb --lb-policy approx-share` is rejected at startup.
+
+Full documentation: **[approx-policy.md § Approx-share](approx-policy.md#approx-share-ms-only)**.
 
 ### Prequal policy (decentralized outbound probe pool)
 
@@ -366,7 +380,7 @@ The chain SLO heatmap (`plot_ms_chain_slo_heatmap.py`) does **not** use fixture 
 | Metric | Definition |
 |--------|------------|
 | **server_utilization_pct** | `busy_time[ms][s] / (observation_time × (cpu[ms] / replicas[ms])) × 100` |
-| **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server, plus caller-side outbound LB queue depth under pull policies. Under `--lb-policy centralized`, each caller replica is credited with its own items waiting in the shared `DownstreamBalancer.queue` (identified via `hop.caller`). Under `--lb-policy approx`, each caller replica adds the sum of its `ReplicaBalancer.outbound_queues` depths. |
+| **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server, plus caller-side outbound LB queue depth under pull policies. Under `--lb-policy centralized`, each caller replica is credited with its own items waiting in the shared `DownstreamBalancer.queue` (identified via `hop.caller`). Under `--lb-policy approx`, each caller replica adds the sum of its `ReplicaBalancer.outbound_queues` depths. Under `--lb-policy approx-share`, each sidecar's outbound queue depth is split evenly across its owned replicas (`share=1` credits the single replica in full). Ingress sits on the replica queue. Pull intent queues are not counted. |
 
 `busy_time[ms][s]` is the sum of local hop durations executed on server `s` of microservice `ms`. Per-server utilization uses that server's concurrency slots (`cpu / replicas`) as capacity. When all servers have equal capacity, the microservice-level overall utilization equals the average of per-server utilizations.
 

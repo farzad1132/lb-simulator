@@ -27,6 +27,7 @@ fn chain3_approx_args(n: u32, seed: u64, audit: Option<std::sync::Arc<ApproxPull
         pull_audit: audit,
         centralized_audit: None,
         approx_sched: None,
+        approx_share: 1,
     }
 }
 
@@ -91,6 +92,7 @@ fn ms_approx_pull_invariants_with_power_of_two_pull_policy() {
         pull_audit: Some(audit.clone()),
         centralized_audit: None,
         approx_sched: None,
+        approx_share: 1,
     })
     .unwrap()
     .expect("simulation should complete");

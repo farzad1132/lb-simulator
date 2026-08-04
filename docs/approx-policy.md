@@ -236,7 +236,7 @@ Use unbound modes to model decentralized pull where the server cannot rely on in
 
 ### Outbound queue scheduling (`--approx-sched`)
 
-Independent of server-side `[--scheduling](scheduling.md)`. Requires `--lb-policy approx`.
+Independent of server-side `[--scheduling](scheduling.md)`. Requires `--lb-policy approx` or `approx-share`.
 
 
 | Flag             | Default  | Values                 | Description                                                                                      |
@@ -299,22 +299,56 @@ Under correct concurrency enforcement, approx and push policies produce **simila
 
 The regression test `lb_all_policies_similar_with_single_server` in `[tests/lb_policy_equivalence.rs](../tests/lb_policy_equivalence.rs)` checks this under overload with constant arrivals and service times.
 
+## Approx-share (ms only)
+
+`--lb-policy approx-share` groups replicas behind shared **sidecars** (like a service-mesh sidecar shared by a few application instances). Each server sidecar is **dual-mode**:
+
+| Mode | When | Semantics |
+|------|------|-----------|
+| **Push** | User ingress via `EdgeBalancer` | Enqueue on a replica's local queue (same FIFO/EDF queue as `DownstreamReturn`). `N=1`: edge → replica directly. `N>1`: edge → entry sidecar → least-occupancy owned replica (`queue.len() + in_flight`). |
+| **Pull** | Inter-service under approx-share | **Approx-share** protocol: shared intent queue, `--pull-policy` selects among target sidecars, bound/unbound via `--approx-sched`. |
+
+Pull admission uses per-replica occupancy + `pending_pulls` vs concurrency. Ingress does not use a sidecar wait queue.
+
+| Flag | Meaning |
+|------|---------|
+| `--approx-share N` | Replicas per sidecar (default `1`) |
+| `--pull-policy` | **Required**; selects among **target sidecars** on `pull_intent_load` |
+| `--approx-sched` | Same bound / unbound modes as approx |
+
+For a microservice with `R` replicas and share `N`:
+
+- `n_sidecars = ceil(R / N)`
+- sidecar `i` owns replicas `[i*N, min((i+1)*N, R))` (last group may be smaller)
+
+**Client sidecar:** one shared `ReplicaBalancer` per group — shared outbound request queue and intent pushing.
+
+**Server sidecar (`ApproxServerSidecar`):**
+
+- **Push (ingress):** for `N>1`, pick the owned replica with least `queue.len() + in_flight` (ties → lowest index) and enqueue there as ordinary `Upstream`. For `N=1`, edge wires directly to the replica (sidecar handles pull only). Occupancy is reported from each replica so join-the-shortest stays current.
+- **Pull (approx-share):** shared intent queue per group. A pull runs when a group replica has spare capacity; that same replica receives the work. Idle replicas are scanned in ascending index order.
+
+**Ingress** for `N>1` is push P2C among **entry sidecars** (not individual replicas); edge release / inflight accounting uses sidecar ids. With `--approx-share 1`, topology degenerates to one sidecar per replica and stays close to `approx` (same pull protocol and audit invariants; ingress joins each replica's local queue like approx). `--lb-subset-size > 0` is rejected with `approx-share`. The `lb` binary rejects `--lb-policy approx-share`.
+
 ## CLI flags
 
 
 | Flag                 | Required | Description                                                                                                                                                      |
 | -------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--lb-policy approx` | —        | Enable approx                                                                                                                                                    |
-| `--pull-policy`      | **Yes**  | Server selection for pull intents: `random`, `power-of-two`, `least-request`, `round-robin`. Reuses push policy implementations on the `pull_intent_load` slice. |
-| `--approx-sched`     | No       | Omit for bound 1:1 pulls. `fcfs`: unbound FCFS head. `edf`: unbound EDF outbound head (`ms` **only**). `edf+`: EDF outbound + EDF intent queue (`ms` **only**). Requires `approx`. Independent of `--scheduling`. |
-| `--lb-subset-size`   | No       | Supported (same as push); restricts `--pull-policy` choices                                                                                                      |
+| `--lb-policy approx-share` | —   | Enable shared-sidecar approx (`ms` **only**)                                                                                                                     |
+| `--approx-share`     | No       | Replicas per sidecar with `approx-share` (default `1`)                                                                                                           |
+| `--pull-policy`      | **Yes**  | Server/sidecar selection for pull intents: `random`, `power-of-two`, `least-request`, `round-robin`. Reuses push policy implementations on the `pull_intent_load` slice. |
+| `--approx-sched`     | No       | Omit for bound 1:1 pulls. `fcfs`: unbound FCFS head. `edf`: unbound EDF outbound head (`ms` **only**). `edf+`: EDF outbound + EDF intent queue (`ms` **only**). Requires `approx` or `approx-share`. Independent of `--scheduling`. |
+| `--lb-subset-size`   | No       | Supported with `approx` (same as push); **not** supported with `approx-share`                                                                                    |
 
 
 Validation (`[src/policy.rs](../src/policy.rs)`):
 
-- `--pull-policy` required with `approx`; forbidden with other `--lb-policy` values
-- `--approx-sched` only with `approx` (`lb` and `ms` binaries)
+- `--pull-policy` required with `approx` or `approx-share`; forbidden with other `--lb-policy` values
+- `--approx-sched` only with `approx` or `approx-share`
 - `--approx-sched edf` / `edf+` only on the `ms` binary
+- `--approx-share` only with `approx-share` (must be `>= 1`); default `1` is allowed on other policies without passing the flag
 
 
 
@@ -371,16 +405,18 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 | `[src/load_balancer.rs](../src/load_balancer.rs)`                     | Client queue, pull intents, pull handler (bound and unbound)                                               |
 | `[src/server.rs](../src/server.rs)`                                   | Intent queue, `pending_pulls`, drain, approx `input`                                                       |
 | `[src/lb_pull_audit.rs](../src/lb_pull_audit.rs)`                     | Trace recorder for approx pull events; `validate_bound()` / `validate_no_bind()`                           |
-| `[src/microservice/balancer.rs](../src/microservice/balancer.rs)`     | `ReplicaBalancer` approx outbound (bound and unbound)                                                      |
-| `[src/microservice/replica.rs](../src/microservice/replica.rs)`       | Replica-side pull drain and `pending_pulls`                                                                |
+| `[src/microservice/balancer.rs](../src/microservice/balancer.rs)`     | `ReplicaBalancer` approx / approx-share outbound (bound and unbound)                                       |
+| `[src/microservice/replica.rs](../src/microservice/replica.rs)`       | Replica-side pull drain (`approx`) and sidecar occupancy/pull capacity notify (`approx-share`)               |
+| `[src/microservice/sidecar.rs](../src/microservice/sidecar.rs)`       | Dual-mode `ApproxServerSidecar` (least-occupancy ingress + pull approx-share) and grouping helpers         |
 | `[src/approx_audit.rs](../src/approx_audit.rs)`                       | Trace recorder for `ms` approx pulls; `validate_bound()` / `validate_no_bind()` / `validate_no_bind_edf()` / `validate_no_bind_edf_plus()` |
 | `[tests/lb_approx.rs](../tests/lb_approx.rs)`                         | Approx CLI validation and completion tests                                                                 |
 | `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`           | Trace-based `--approx-sched fcfs` invariant tests (`lb`)                                                   |
 | `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`           | Trace-based `--approx-sched fcfs` invariant tests (`ms`)                                                   |
 | `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`   | Trace-based `--approx-sched edf` invariant tests (`ms`)                                                    |
 | `[tests/ms_no_bind_edf_plus_audit.rs](../tests/ms_no_bind_edf_plus_audit.rs)` | Trace-based `--approx-sched edf+` invariant tests (`ms`)                                            |
+| `[tests/ms_approx_share_audit.rs](../tests/ms_approx_share_audit.rs)` | Trace-based topology, share=1≈approx, and share>1 least-occupancy balance tests                            |
 | `[tests/lb_policy_equivalence.rs](../tests/lb_policy_equivalence.rs)` | Cross-policy latency equivalence (1 client / 1 server)                                                     |
-| `[tests/ms_approx.rs](../tests/ms_approx.rs)`                         | `ms` approx integration tests                                                                              |
+| `[tests/ms_approx.rs](../tests/ms_approx.rs)`                         | `ms` approx / approx-share CLI integration tests                                                           |
 
 
 
@@ -395,6 +431,7 @@ cargo test ms_no_bind_edf_audit --release
 cargo test ms_no_bind_edf_plus_audit --release
 cargo test lb_all_policies_similar_with_single_server --release
 cargo test ms_approx --release
+cargo test ms_approx_share_audit --release
 ```
 
 Manual sanity check (approx vs random should show comparable e2e under the same load):

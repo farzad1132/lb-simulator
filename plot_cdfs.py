@@ -46,6 +46,7 @@ MS_LB_POLICIES = (
     "round-robin",
     "centralized",
     "approx",
+    "approx-share",
     "prequal",
     "cl",
     "cl-lr",
@@ -332,6 +333,7 @@ def run_ms_simulation(
     scheduling: str = "fifo",
     service_dist: str = "exp",
     approx_sched: str | None = None,
+    approx_share: int | None = None,
     scale: int | None = None,
 ) -> dict:
     cmd = [
@@ -363,6 +365,8 @@ def run_ms_simulation(
         cmd.extend(["--slo-ms", str(slo_ms)])
     if approx_sched is not None:
         cmd.extend(["--approx-sched", approx_sched])
+    if approx_share is not None:
+        cmd.extend(["--approx-share", str(approx_share)])
     if scale is not None and scale != 0:
         cmd.extend(["--scale", str(scale)])
     result = run_subprocess(cmd, label="simulator")
@@ -507,6 +511,8 @@ def validate_lb_args(args: argparse.Namespace) -> None:
 def validate_prequal_subset(lb_policy: str, lb_subset_size: int) -> None:
     if lb_policy == "prequal" and lb_subset_size > 0:
         raise SystemExit("--lb-subset-size is not supported with --lb-policy prequal")
+    if lb_policy == "approx-share" and lb_subset_size > 0:
+        raise SystemExit("--lb-subset-size is not supported with --lb-policy approx-share")
 
 
 def validate_ms_args(args: argparse.Namespace) -> None:

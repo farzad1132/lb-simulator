@@ -34,6 +34,7 @@ fn approx_args(
         pull_audit: audit,
         centralized_audit: None,
         approx_sched,
+        approx_share: 1,
     }
 }
 

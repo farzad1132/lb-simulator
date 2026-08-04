@@ -72,6 +72,7 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     #ExperimentConfig("C-P2C-5", "power-of-two", 5, 100),
     ExperimentConfig("Approx", "approx", 10, 10, pull_policy="least-request"),
     ExperimentConfig("Approx-FCFS", "approx", 10, 10, pull_policy="least-request", approx_sched="fcfs"),
+    ExperimentConfig("CL-Approx-S2", "approx", 5, 5, concurrency=2, pull_policy="least-request", approx_sched="fcfs"),
     #ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
     #ExperimentConfig("Approx-R-FCFS", "approx", 10, 10, pull_policy="random", approx_sched="fcfs"),
     #ExperimentConfig("Prequal", "prequal", 10, 10),

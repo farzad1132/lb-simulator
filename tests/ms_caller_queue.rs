@@ -32,6 +32,7 @@ fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsA
         pull_audit: None,
         centralized_audit: None,
         approx_sched: None,
+        approx_share: 1,
     }
 }
 
@@ -143,6 +144,7 @@ fn f1_nested_callgraph_completes() {
         pull_audit: None,
         centralized_audit: None,
         approx_sched: None,
+        approx_share: 1,
     })
     .unwrap()
     .expect("stats");

@@ -215,6 +215,59 @@ impl ApproxPullAudit {
             .collect()
     }
 
+    /// `(target_ms, target_server)` from IntentSent (server or sidecar index).
+    pub fn intent_sent_targets(&self) -> Vec<(String, usize)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ApproxPullEventKind::IntentSent {
+                    target_ms,
+                    target_server,
+                    ..
+                } => Some((target_ms.clone(), *target_server)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `(target_ms, pull_from_server, handler_server)` from PullFulfilled.
+    pub fn pull_fulfilled_topology(&self) -> Vec<(String, usize, usize)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ApproxPullEventKind::PullFulfilled {
+                    target_ms,
+                    pull_from_server,
+                    handler_server,
+                    ..
+                } => Some((target_ms.clone(), *pull_from_server, *handler_server)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Ordered `(downstream_ms, downstream_server/sidecar, request_id)` IntentDrained events.
+    pub fn intent_drained_topology(&self) -> Vec<(String, usize, u64)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ApproxPullEventKind::IntentDrained {
+                    downstream_ms,
+                    downstream_server,
+                    request_id,
+                    ..
+                } => Some((downstream_ms.clone(), *downstream_server, *request_id)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Shared invariants for bound and no-bind approx runs (depth/capacity/counts only).
     pub fn validate_common(&self) -> Result<(), String> {
         let events = self.events.lock().unwrap();

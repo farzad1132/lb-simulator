@@ -95,7 +95,10 @@ fn select_corr_replica(server_indices: &[usize], local_inflight: &[u32], rank: u
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicaPull {
     pub target_microservice: String,
+    /// Concrete downstream replica that will serve the pulled call.
     pub server_idx: usize,
+    /// Index into the caller's `pull_intent_load` / intent outputs (replica or sidecar).
+    pub intent_target_idx: usize,
     pub request_id: u64,
 }
 
@@ -293,7 +296,7 @@ impl ReplicaBalancer {
     }
 
     fn sample_outbound_queue_occupancy(&self, now: MonotonicTime) {
-        if !self.lb_policy.is_approx() {
+        if !self.lb_policy.uses_approx_protocol() {
             return;
         }
         let key = (self.microservice_id.clone(), self.server_idx);
@@ -397,7 +400,7 @@ impl ReplicaBalancer {
             inflight[server_idx] += 1;
         }
 
-        if self.lb_policy.is_approx() {
+        if self.lb_policy.uses_approx_protocol() {
             call.hop.slot_release = Some(OutboundRelease {
                 target_microservice: target.to_string(),
                 target_server: server_idx,
@@ -532,7 +535,7 @@ impl ReplicaBalancer {
             return;
         }
 
-        if self.lb_policy.is_approx() {
+        if self.lb_policy.uses_approx_protocol() {
             if let Some(tracer) = &self.tracer {
                 tracer.log(
                     call.hop.trace,
@@ -614,11 +617,12 @@ impl ReplicaBalancer {
     }
 
     pub async fn pull(&mut self, pull: ReplicaPull, cx: &Context<Self>) {
-        if !self.lb_policy.is_approx() {
+        if !self.lb_policy.uses_approx_protocol() {
             return;
         }
         let target = pull.target_microservice;
         let server_idx = pull.server_idx;
+        let intent_target_idx = pull.intent_target_idx;
 
         let Some(queue) = self.outbound_queues.get_mut(&target) else {
             fatal_pull_abort(
@@ -668,7 +672,7 @@ impl ReplicaBalancer {
         let pulled_request_id = call.hop.request_id;
 
         self.sample_outbound_queue_occupancy(cx.time());
-        self.release_pull_intent_load(&target, server_idx);
+        self.release_pull_intent_load(&target, intent_target_idx);
         if let Some(audit) = &self.pull_audit {
             audit.record_pull_fulfilled(
                 self.rb_id,

@@ -33,6 +33,7 @@ fn chain3_centralized_args(
         pull_audit: None,
         centralized_audit: audit,
         approx_sched: None,
+        approx_share: 1,
     }
 }
 

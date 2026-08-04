@@ -3,8 +3,11 @@ mod callgraph;
 mod hop;
 mod microservice_stats;
 mod replica;
+mod sidecar;
 mod simulate;
 mod trace;
+
+pub use sidecar::{n_sidecars, sidecar_id, sidecar_replicas};
 
 pub use callgraph::{ApiLoad, CallGraph, LoadSpec, MsServiceDistribution};
 pub use microservice_stats::MicroserviceStats;

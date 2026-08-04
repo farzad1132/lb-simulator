@@ -158,6 +158,8 @@ pub enum LoadBalancePolicyKind {
     Centralized,
     #[value(name = "approx")]
     Approx,
+    #[value(name = "approx-share")]
+    ApproxShare,
     #[value(name = "prequal")]
     Prequal,
     #[value(name = "cl")]
@@ -179,7 +181,7 @@ impl LoadBalancePolicyKind {
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized => Box::new(CentralizedPolicy),
-            Self::Approx => Box::new(ApproxPolicy),
+            Self::Approx | Self::ApproxShare => Box::new(ApproxPolicy),
             Self::Prequal => Box::new(PrequalPolicy),
             Self::Cl | Self::ClLr | Self::Corr => Box::new(PowerOfTwoPolicy),
         }
@@ -193,12 +195,21 @@ impl LoadBalancePolicyKind {
         matches!(self, Self::Approx)
     }
 
+    pub fn is_approx_share(self) -> bool {
+        matches!(self, Self::ApproxShare)
+    }
+
+    /// Approx pull-intent protocol (decentralized or shared-sidecar).
+    pub fn uses_approx_protocol(self) -> bool {
+        matches!(self, Self::Approx | Self::ApproxShare)
+    }
+
     pub fn is_prequal(self) -> bool {
         matches!(self, Self::Prequal)
     }
 
     pub fn is_pull_based(self) -> bool {
-        matches!(self, Self::Centralized | Self::Approx)
+        matches!(self, Self::Centralized | Self::Approx | Self::ApproxShare)
     }
 
     pub fn is_cl(self) -> bool {
@@ -210,7 +221,10 @@ impl LoadBalancePolicyKind {
     }
 
     pub fn is_ms_only(self) -> bool {
-        matches!(self, Self::Cl | Self::ClLr | Self::Corr)
+        matches!(
+            self,
+            Self::Cl | Self::ClLr | Self::Corr | Self::ApproxShare
+        )
     }
 
     pub fn uses_shared_downstream(self) -> bool {
@@ -222,9 +236,13 @@ impl LoadBalancePolicyKind {
 
     pub fn ingress_policy(self) -> Box<dyn LoadBalancePolicy> {
         match self {
-            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr | Self::Approx | Self::Prequal => {
-                Box::new(PowerOfTwoPolicy)
-            }
+            Self::Cl
+            | Self::ClLr
+            | Self::Centralized
+            | Self::Corr
+            | Self::Approx
+            | Self::ApproxShare
+            | Self::Prequal => Box::new(PowerOfTwoPolicy),
             other => other.build(),
         }
     }
@@ -242,9 +260,13 @@ pub fn validate_pull_policy(
     lb_policy: LoadBalancePolicyKind,
     pull_policy: Option<PullPolicyKind>,
 ) -> Result<(), String> {
-    match (lb_policy.is_approx(), pull_policy) {
-        (true, None) => Err("--pull-policy is required with --lb-policy approx".into()),
-        (false, Some(_)) => Err("--pull-policy is only valid with --lb-policy approx".into()),
+    match (lb_policy.uses_approx_protocol(), pull_policy) {
+        (true, None) => Err(
+            "--pull-policy is required with --lb-policy approx or approx-share".into(),
+        ),
+        (false, Some(_)) => Err(
+            "--pull-policy is only valid with --lb-policy approx or approx-share".into(),
+        ),
         _ => Ok(()),
     }
 }
@@ -257,11 +279,29 @@ pub fn validate_approx_sched(
     let Some(approx_sched) = approx_sched else {
         return Ok(());
     };
-    if !lb_policy.is_approx() {
-        return Err("--approx-sched is only valid with --lb-policy approx".into());
+    if !lb_policy.uses_approx_protocol() {
+        return Err(
+            "--approx-sched is only valid with --lb-policy approx or approx-share".into(),
+        );
     }
     if approx_sched.requires_ms() && !allow_edf {
         return Err("--approx-sched edf/edf+ is only supported by the ms simulator".into());
+    }
+    Ok(())
+}
+
+pub fn validate_approx_share(
+    lb_policy: LoadBalancePolicyKind,
+    approx_share: u32,
+) -> Result<(), String> {
+    if lb_policy.is_approx_share() {
+        if approx_share == 0 {
+            return Err("--approx-share must be >= 1 with --lb-policy approx-share".into());
+        }
+        return Ok(());
+    }
+    if approx_share != 1 {
+        return Err("--approx-share is only valid with --lb-policy approx-share".into());
     }
     Ok(())
 }
@@ -272,6 +312,9 @@ pub fn validate_prequal_subset(
 ) -> Result<(), String> {
     if lb_policy.is_prequal() && lb_subset_size > 0 {
         return Err("--lb-subset-size is not supported with --lb-policy prequal".into());
+    }
+    if lb_policy.is_approx_share() && lb_subset_size > 0 {
+        return Err("--lb-subset-size is not supported with --lb-policy approx-share".into());
     }
     Ok(())
 }
@@ -329,6 +372,10 @@ mod tests {
     #[test]
     fn approx_policy_kind_is_approx() {
         assert!(LoadBalancePolicyKind::Approx.is_approx());
+        assert!(!LoadBalancePolicyKind::ApproxShare.is_approx());
+        assert!(LoadBalancePolicyKind::Approx.uses_approx_protocol());
+        assert!(LoadBalancePolicyKind::ApproxShare.uses_approx_protocol());
+        assert!(LoadBalancePolicyKind::ApproxShare.is_approx_share());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_approx());
     }
 
@@ -498,12 +545,28 @@ mod tests {
     }
 
     #[test]
-    fn is_ms_only_for_cl_cl_lr_and_corr() {
+    fn is_ms_only_for_cl_cl_lr_corr_and_approx_share() {
         assert!(LoadBalancePolicyKind::Cl.is_ms_only());
         assert!(LoadBalancePolicyKind::ClLr.is_ms_only());
         assert!(LoadBalancePolicyKind::Corr.is_ms_only());
+        assert!(LoadBalancePolicyKind::ApproxShare.is_ms_only());
+        assert!(!LoadBalancePolicyKind::Approx.is_ms_only());
         assert!(!LoadBalancePolicyKind::Centralized.is_ms_only());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_ms_only());
+    }
+
+    #[test]
+    fn validate_approx_share_rules() {
+        assert!(validate_approx_share(LoadBalancePolicyKind::ApproxShare, 1).is_ok());
+        assert!(validate_approx_share(LoadBalancePolicyKind::ApproxShare, 3).is_ok());
+        let err = validate_approx_share(LoadBalancePolicyKind::ApproxShare, 0).unwrap_err();
+        assert!(err.contains("must be >= 1"));
+        assert!(validate_approx_share(LoadBalancePolicyKind::Approx, 1).is_ok());
+        let err = validate_approx_share(LoadBalancePolicyKind::Approx, 2).unwrap_err();
+        assert!(err.contains("only valid with --lb-policy approx-share"));
+        assert!(validate_prequal_subset(LoadBalancePolicyKind::ApproxShare, 0).is_ok());
+        let err = validate_prequal_subset(LoadBalancePolicyKind::ApproxShare, 3).unwrap_err();
+        assert!(err.contains("--lb-subset-size is not supported"));
     }
 
     #[test]
@@ -535,7 +598,7 @@ mod tests {
         )
         .is_ok());
         assert!(validate_approx_sched(
-            LoadBalancePolicyKind::Approx,
+            LoadBalancePolicyKind::ApproxShare,
             Some(ApproxSchedKind::EdfPlus),
             true,
         )

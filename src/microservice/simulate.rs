@@ -22,12 +22,14 @@ use super::hop::{
 use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
 use crate::occupancy::OccupancyAccumulator;
 use super::replica::{Replica, ReplicaConfig};
+use super::sidecar::{n_sidecars, sidecar_replicas, ApproxServerSidecar};
 use super::trace::MsTracer;
 use crate::approx_audit::ApproxPullAudit;
 use crate::ms_centralized_audit::MsCentralizedAudit;
 use crate::policy::{
-    validate_approx_sched, validate_centralized_subset, validate_prequal_subset,
-    validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    validate_approx_sched, validate_approx_share, validate_centralized_subset,
+    validate_prequal_subset, validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind,
+    PullPolicyKind,
 };
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
@@ -70,6 +72,8 @@ pub struct MsArgs {
     pub centralized_audit: Option<Arc<MsCentralizedAudit>>,
     /// Approx outbound pull scheduling: None = bound 1:1; Some(Fcfs|Edf|EdfPlus) = unbound queue head.
     pub approx_sched: Option<ApproxSchedKind>,
+    /// Replicas per shared approx sidecar (`approx-share` only). Default 1.
+    pub approx_share: u32,
 }
 
 #[derive(Serialize)]
@@ -320,6 +324,8 @@ fn calculate_stats(
     busy_time: &HashMap<String, HashMap<usize, Duration>>,
     replica_occupancy: &mut HashMap<String, HashMap<usize, OccupancyAccumulator>>,
     caller_lb_queue_occupancy: &mut HashMap<(String, usize), OccupancyAccumulator>,
+    lb_policy: LoadBalancePolicyKind,
+    approx_share: u32,
     graph: &CallGraph,
     load: &LoadSpec,
     sim_start: MonotonicTime,
@@ -396,7 +402,24 @@ fn calculate_stats(
 
     for ((ms, server), acc) in caller_lb_queue_occupancy {
         let lb_avg = acc.finalize(sim_end, sim_start);
-        if let Some(servers) = server_avg_queue_inflight.get_mut(ms) {
+        if lb_policy.is_approx_share() {
+            // Key is sidecar id; split evenly across owned replicas.
+            let n_servers = graph
+                .microservices
+                .get(ms)
+                .map(|s| s.replicas as usize)
+                .unwrap_or(0);
+            let owned = sidecar_replicas(*server, n_servers, approx_share.max(1));
+            if owned.is_empty() {
+                continue;
+            }
+            let share_each = lb_avg / owned.len() as f64;
+            if let Some(servers) = server_avg_queue_inflight.get_mut(ms) {
+                for rid in owned {
+                    *servers.entry(rid).or_insert(0.0) += share_each;
+                }
+            }
+        } else if let Some(servers) = server_avg_queue_inflight.get_mut(ms) {
             if let Some(avg) = servers.get_mut(server) {
                 *avg += lb_avg;
             } else {
@@ -491,6 +514,7 @@ fn validate_ms_shared_subset(
 pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     validate_pull_policy(args.lb_policy, args.pull_policy)?;
     validate_approx_sched(args.lb_policy, args.approx_sched, true)?;
+    validate_approx_share(args.lb_policy, args.approx_share)?;
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)?;
     rng::enter_run(args.seed);
     let result = run_inner(args);
@@ -607,9 +631,19 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         server_idx: usize,
     }
 
+    struct PendingApproxServerSidecar {
+        sidecar: ApproxServerSidecar,
+        mailbox: Mailbox<ApproxServerSidecar>,
+        microservice_id: String,
+        sidecar_id: usize,
+    }
+
     let use_shared_downstream = args.lb_policy.uses_shared_downstream();
     let is_approx = args.lb_policy.is_approx();
+    let is_approx_share = args.lb_policy.is_approx_share();
+    let uses_approx_protocol = args.lb_policy.uses_approx_protocol();
     let is_prequal = args.lb_policy.is_prequal();
+    let approx_share = args.approx_share.max(1);
     let pull_audit = args.pull_audit.clone();
     let centralized_audit = args.centralized_audit.clone();
 
@@ -620,12 +654,18 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let mut apis: Vec<_> = graph.entrypoints.keys().cloned().collect();
     apis.sort();
-    // Edge always sees the full entry pool; `--lb-subset-size` applies to outbound LBs only.
+    // Edge: full entry replica pool, or entry sidecars under approx-share (N>1).
+    // `--lb-subset-size` applies to outbound LBs only.
     for api in &apis {
         let entry_endpoint = &graph.entrypoints[api];
         let entry_microservice = microservice_for_endpoint(graph.as_ref(), entry_endpoint)?;
-        let n_servers = graph.microservices[&entry_microservice].replicas as usize;
-        let server_indices: Vec<usize> = (0..n_servers).collect();
+        let n_replicas = graph.microservices[&entry_microservice].replicas as usize;
+        let n_targets = if is_approx_share {
+            n_sidecars(n_replicas, approx_share)
+        } else {
+            n_replicas
+        };
+        let server_indices: Vec<usize> = (0..n_targets).collect();
         if args.verbose >= 1 {
             eprintln!("api {api} subset: {server_indices:?}");
         }
@@ -634,7 +674,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             args.lb_policy.ingress_policy(),
             args.lb_policy,
             api.clone(),
-            n_servers,
+            n_targets,
             server_indices.clone(),
             tracer.clone(),
         );
@@ -655,23 +695,28 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         });
     }
 
-    for pending in &mut pending_edge_balancers {
-        for &server_idx in &pending.server_indices {
-            if let Some(mb) =
-                server_mailboxes.get(&(pending.entry_microservice.clone(), server_idx))
-            {
-                pending.balancer.outputs[server_idx].connect(Replica::input, mb);
+    // Non-share: edge → replicas. Approx-share edge → sidecars is wired after sidecars exist.
+    if !is_approx_share {
+        for pending in &mut pending_edge_balancers {
+            for &server_idx in &pending.server_indices {
+                if let Some(mb) =
+                    server_mailboxes.get(&(pending.entry_microservice.clone(), server_idx))
+                {
+                    pending.balancer.outputs[server_idx].connect(Replica::input, mb);
+                }
             }
         }
     }
 
     let mut pending_replica_balancers: Vec<PendingReplicaBalancer> = Vec::new();
+    let mut pending_approx_sidecars: Vec<PendingApproxServerSidecar> = Vec::new();
     let mut replica_balancer_outbound: HashMap<(String, usize), Output<OutboundCall>> =
         HashMap::new();
     let mut replica_balancer_addresses: HashMap<
         (String, usize),
         nexosim::simulation::Address<ReplicaBalancer>,
     > = HashMap::new();
+    let mut replica_to_sidecar: HashMap<(String, usize), usize> = HashMap::new();
 
     let mut pending_downstream_balancers: Vec<PendingDownstreamBalancer> = Vec::new();
     let mut pending_outbound_gateways: Vec<PendingOutboundGateway> = Vec::new();
@@ -803,7 +848,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             }
         }
     } else {
-        let resolved_pull_policy = if is_approx {
+        let resolved_pull_policy = if uses_approx_protocol {
             Some(
                 args.pull_policy
                     .expect("pull_policy validated before simulation"),
@@ -813,71 +858,168 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         };
         let mut next_rb_id = 0usize;
 
-        for microservice_id in &graph.microservice_order {
-            let n_servers = graph.microservices[microservice_id].replicas as usize;
-
-            for server_idx in 0..n_servers {
-                let mut downstream_indices = HashMap::new();
-                for target in downstream_targets(&graph, microservice_id) {
-                    let target_servers = graph.microservices[&target].replicas as usize;
-                    let indices = subset::assign_subset(
-                        args.lb_subset_policy,
-                        target_servers,
-                        server_idx,
-                        args.lb_subset_size,
-                    );
+        if is_approx_share {
+            // Server sidecars (shared intent queues).
+            for microservice_id in &graph.microservice_order {
+                let n_servers = graph.microservices[microservice_id].replicas as usize;
+                let concurrency =
+                    (graph.microservices[microservice_id].cpu / n_servers.max(1) as u32).max(1);
+                let n_sc = n_sidecars(n_servers, approx_share);
+                for sc_id in 0..n_sc {
+                    let replica_indices = sidecar_replicas(sc_id, n_servers, approx_share);
                     if args.verbose >= 1 {
                         eprintln!(
-                            "server {microservice_id}/{server_idx} -> {target} subset: {indices:?}"
+                            "approx-share server sidecar {microservice_id}/{sc_id} replicas={replica_indices:?}"
                         );
                     }
-                    downstream_indices.insert(target.clone(), indices);
+                    for &rid in &replica_indices {
+                        replica_to_sidecar.insert((microservice_id.clone(), rid), sc_id);
+                    }
+                    let sidecar = ApproxServerSidecar::new(
+                        microservice_id.clone(),
+                        sc_id,
+                        replica_indices.clone(),
+                        concurrency,
+                        pull_audit.clone(),
+                        args.approx_sched,
+                    );
+                    let mailbox = Mailbox::new();
+                    pending_approx_sidecars.push(PendingApproxServerSidecar {
+                        sidecar,
+                        mailbox,
+                        microservice_id: microservice_id.clone(),
+                        sidecar_id: sc_id,
+                    });
                 }
+            }
 
-                let (policy, lb_policy) = if is_approx {
-                    (
-                        resolved_pull_policy
-                            .expect("pull_policy validated before simulation")
-                            .build(),
-                        LoadBalancePolicyKind::Approx,
-                    )
-                } else {
-                    (args.lb_policy.build(), args.lb_policy)
-                };
+            // Client sidecars (shared outbound ReplicaBalancers).
+            for microservice_id in &graph.microservice_order {
+                let n_servers = graph.microservices[microservice_id].replicas as usize;
+                let n_sc = n_sidecars(n_servers, approx_share);
+                for sc_id in 0..n_sc {
+                    let owned = sidecar_replicas(sc_id, n_servers, approx_share);
+                    let mut downstream_indices = HashMap::new();
+                    for target in downstream_targets(&graph, microservice_id) {
+                        let target_servers = graph.microservices[&target].replicas as usize;
+                        let n_target_sc = n_sidecars(target_servers, approx_share);
+                        let indices: Vec<usize> = (0..n_target_sc).collect();
+                        if args.verbose >= 1 {
+                            eprintln!(
+                                "approx-share client sidecar {microservice_id}/{sc_id} -> {target} sidecars: {indices:?}"
+                            );
+                        }
+                        downstream_indices.insert(target.clone(), indices);
+                    }
 
-                let rb_id = next_rb_id;
-                next_rb_id += 1;
+                    let policy = resolved_pull_policy
+                        .expect("pull_policy validated before simulation")
+                        .build();
+                    let rb_id = next_rb_id;
+                    next_rb_id += 1;
 
-                let balancer = ReplicaBalancer::new(
-                    policy,
-                    lb_policy,
-                    rb_id,
-                    microservice_id.clone(),
-                    server_idx,
-                    downstream_indices.clone(),
-                    &microservice_server_counts,
-                    tracer.clone(),
-                    pull_audit.clone(),
-                    args.approx_sched,
-                    caller_lb_queue_occupancy.clone(),
-                );
-                let mailbox = Mailbox::new();
-                let address = mailbox.address();
+                    let balancer = ReplicaBalancer::new(
+                        policy,
+                        LoadBalancePolicyKind::ApproxShare,
+                        rb_id,
+                        microservice_id.clone(),
+                        sc_id,
+                        downstream_indices.clone(),
+                        &microservice_server_counts,
+                        tracer.clone(),
+                        pull_audit.clone(),
+                        args.approx_sched,
+                        caller_lb_queue_occupancy.clone(),
+                    );
+                    let mailbox = Mailbox::new();
+                    let address = mailbox.address();
 
-                let mut outbound = Output::default();
-                outbound.connect(ReplicaBalancer::outbound, &mailbox);
-                replica_balancer_outbound.insert((microservice_id.clone(), server_idx), outbound);
-                replica_balancer_addresses
-                    .insert((microservice_id.clone(), server_idx), address.clone());
+                    for &server_idx in &owned {
+                        let mut outbound = Output::default();
+                        outbound.connect(ReplicaBalancer::outbound, &mailbox);
+                        replica_balancer_outbound
+                            .insert((microservice_id.clone(), server_idx), outbound);
+                        replica_balancer_addresses
+                            .insert((microservice_id.clone(), server_idx), address.clone());
+                    }
 
-                pending_replica_balancers.push(PendingReplicaBalancer {
-                    balancer,
-                    mailbox,
-                    rb_id,
-                    microservice_id: microservice_id.clone(),
-                    server_idx,
-                    downstream_indices: downstream_indices.clone(),
-                });
+                    pending_replica_balancers.push(PendingReplicaBalancer {
+                        balancer,
+                        mailbox,
+                        rb_id,
+                        microservice_id: microservice_id.clone(),
+                        server_idx: sc_id,
+                        downstream_indices: downstream_indices.clone(),
+                    });
+                }
+            }
+        } else {
+            for microservice_id in &graph.microservice_order {
+                let n_servers = graph.microservices[microservice_id].replicas as usize;
+
+                for server_idx in 0..n_servers {
+                    let mut downstream_indices = HashMap::new();
+                    for target in downstream_targets(&graph, microservice_id) {
+                        let target_servers = graph.microservices[&target].replicas as usize;
+                        let indices = subset::assign_subset(
+                            args.lb_subset_policy,
+                            target_servers,
+                            server_idx,
+                            args.lb_subset_size,
+                        );
+                        if args.verbose >= 1 {
+                            eprintln!(
+                                "server {microservice_id}/{server_idx} -> {target} subset: {indices:?}"
+                            );
+                        }
+                        downstream_indices.insert(target.clone(), indices);
+                    }
+
+                    let (policy, lb_policy) = if is_approx {
+                        (
+                            resolved_pull_policy
+                                .expect("pull_policy validated before simulation")
+                                .build(),
+                            LoadBalancePolicyKind::Approx,
+                        )
+                    } else {
+                        (args.lb_policy.build(), args.lb_policy)
+                    };
+
+                    let rb_id = next_rb_id;
+                    next_rb_id += 1;
+
+                    let balancer = ReplicaBalancer::new(
+                        policy,
+                        lb_policy,
+                        rb_id,
+                        microservice_id.clone(),
+                        server_idx,
+                        downstream_indices.clone(),
+                        &microservice_server_counts,
+                        tracer.clone(),
+                        pull_audit.clone(),
+                        args.approx_sched,
+                        caller_lb_queue_occupancy.clone(),
+                    );
+                    let mailbox = Mailbox::new();
+                    let address = mailbox.address();
+
+                    let mut outbound = Output::default();
+                    outbound.connect(ReplicaBalancer::outbound, &mailbox);
+                    replica_balancer_outbound.insert((microservice_id.clone(), server_idx), outbound);
+                    replica_balancer_addresses
+                        .insert((microservice_id.clone(), server_idx), address.clone());
+
+                    pending_replica_balancers.push(PendingReplicaBalancer {
+                        balancer,
+                        mailbox,
+                        rb_id,
+                        microservice_id: microservice_id.clone(),
+                        server_idx,
+                        downstream_indices: downstream_indices.clone(),
+                    });
+                }
             }
         }
 
@@ -894,7 +1036,13 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 if outputs.len() != n_target {
                     *outputs = (0..n_target).map(|_| Output::default()).collect();
                 }
-                for &server_idx in indices {
+                // approx-share selects among sidecars but dispatches to concrete replicas.
+                let connect_idxs: Vec<usize> = if is_approx_share {
+                    (0..n_target).collect()
+                } else {
+                    indices.clone()
+                };
+                for server_idx in connect_idxs {
                     if let Some(mb) =
                         server_mailboxes.get(&(target_microservice.clone(), server_idx))
                     {
@@ -920,6 +1068,106 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                         {
                             intent_outputs[server_idx]
                                 .connect(Replica::receive_pull_intent, mb);
+                        }
+                    }
+                }
+            }
+        }
+
+        if is_approx_share {
+            // Build mailbox address map for server sidecars, then wire intents.
+            let sidecar_addresses: HashMap<(String, usize), _> = pending_approx_sidecars
+                .iter()
+                .map(|p| {
+                    (
+                        (p.microservice_id.clone(), p.sidecar_id),
+                        p.mailbox.address(),
+                    )
+                })
+                .collect();
+
+            for pending in &mut pending_replica_balancers {
+                for (target_microservice, indices) in &pending.downstream_indices {
+                    let intent_outputs = pending
+                        .balancer
+                        .pull_intent_outputs
+                        .get_mut(target_microservice)
+                        .unwrap_or_else(|| {
+                            panic!("missing pull intent outputs for {target_microservice}")
+                        });
+                    // Ensure intent output vec covers sidecar indices (sized to replica count).
+                    let n_target = graph.microservices[target_microservice].replicas as usize;
+                    if intent_outputs.len() != n_target {
+                        *intent_outputs = (0..n_target).map(|_| Output::default()).collect();
+                    }
+                    for &sc_idx in indices {
+                        if let Some(addr) =
+                            sidecar_addresses.get(&(target_microservice.clone(), sc_idx))
+                        {
+                            intent_outputs[sc_idx]
+                                .connect(ApproxServerSidecar::receive_pull_intent, addr);
+                        }
+                    }
+                }
+            }
+
+            // Wire sidecar pull replies to caller balancers.
+            for pending_sc in &mut pending_approx_sidecars {
+                for pending_rb in &pending_replica_balancers {
+                    if pending_rb
+                        .downstream_indices
+                        .get(&pending_sc.microservice_id)
+                        .is_some_and(|indices| indices.contains(&pending_sc.sidecar_id))
+                    {
+                        let mut output = Output::default();
+                        output.connect(ReplicaBalancer::pull, &pending_rb.mailbox);
+                        pending_sc
+                            .sidecar
+                            .approx_pull_outputs
+                            .insert(pending_rb.rb_id, output);
+                    }
+                }
+            }
+
+            // Ingress: share=1 → edge directly onto replicas (≈ approx). share>1 →
+            // edge → sidecars → least-occupancy owned replica.
+            if approx_share == 1 {
+                for pending in &mut pending_edge_balancers {
+                    for &server_idx in &pending.server_indices {
+                        if let Some(mb) = server_mailboxes
+                            .get(&(pending.entry_microservice.clone(), server_idx))
+                        {
+                            pending.balancer.outputs[server_idx].connect(Replica::input, mb);
+                        }
+                    }
+                }
+            } else {
+                for pending in &mut pending_edge_balancers {
+                    for &sc_idx in &pending.server_indices {
+                        if let Some(pending_sc) = pending_approx_sidecars.iter_mut().find(|p| {
+                            p.microservice_id == pending.entry_microservice
+                                && p.sidecar_id == sc_idx
+                        }) {
+                            pending.balancer.outputs[sc_idx].connect(
+                                ApproxServerSidecar::receive_upstream,
+                                &pending_sc.mailbox,
+                            );
+                        }
+                    }
+                }
+                for pending_sc in &mut pending_approx_sidecars {
+                    let owned = sidecar_replicas(
+                        pending_sc.sidecar_id,
+                        graph.microservices[&pending_sc.microservice_id].replicas as usize,
+                        approx_share,
+                    );
+                    for &rid in &owned {
+                        if let Some(mb) =
+                            server_mailboxes.get(&(pending_sc.microservice_id.clone(), rid))
+                        {
+                            let mut output = Output::default();
+                            output.connect(Replica::input, mb);
+                            pending_sc.sidecar.upstream_outputs.insert(rid, output);
                         }
                     }
                 }
@@ -1070,6 +1318,16 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     .get(&(microservice_id.clone(), i))
                     .expect("outbound gateway address");
                 outbound_release.connect(OutboundGateway::release, gw_address);
+            } else if is_approx_share {
+                let sc = *replica_to_sidecar
+                    .get(&(microservice_id.clone(), i))
+                    .expect("replica sidecar mapping");
+                let rb_mailbox = pending_replica_balancers
+                    .iter()
+                    .find(|p| p.microservice_id == *microservice_id && p.server_idx == sc)
+                    .map(|p| &p.mailbox)
+                    .expect("approx-share replica balancer mailbox");
+                outbound_release.connect(ReplicaBalancer::release_outbound, rb_mailbox);
             } else {
                 let rb_mailbox = pending_replica_balancers
                     .iter()
@@ -1118,6 +1376,22 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 }
             }
 
+            let (sidecar_capacity, edge_release_idx) = if is_approx_share {
+                let sc = *replica_to_sidecar
+                    .get(&(microservice_id.clone(), i))
+                    .expect("replica sidecar mapping");
+                let sc_mailbox = pending_approx_sidecars
+                    .iter()
+                    .find(|p| p.microservice_id == *microservice_id && p.sidecar_id == sc)
+                    .map(|p| &p.mailbox)
+                    .expect("approx server sidecar mailbox");
+                let mut output = Output::default();
+                output.connect(ApproxServerSidecar::capacity_event, sc_mailbox);
+                (Some(output), sc)
+            } else {
+                (None, i)
+            };
+
             let mut probe_reply_outputs = HashMap::new();
             if is_prequal && prequal_probe_targets.contains(&(microservice_id.clone(), i)) {
                 for pending in &pending_replica_balancers {
@@ -1149,6 +1423,8 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 tracer: tracer.clone(),
                 pull_output,
                 approx_pull_outputs,
+                sidecar_capacity,
+                edge_release_idx,
                 probe_reply_outputs,
                 pull_audit: pull_audit.clone(),
                 scheduling: args.scheduling,
@@ -1168,6 +1444,17 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             &format!(
                 "replica-balancer-{}-{}",
                 pending.microservice_id, pending.server_idx
+            ),
+        );
+    }
+
+    for pending in pending_approx_sidecars {
+        bench = bench.add_model(
+            pending.sidecar,
+            pending.mailbox,
+            &format!(
+                "approx-sidecar-{}-{}",
+                pending.microservice_id, pending.sidecar_id
             ),
         );
     }
@@ -1213,6 +1500,8 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         &busy,
         &mut replica_occ,
         &mut caller_lb_occ,
+        args.lb_policy,
+        approx_share,
         graph.as_ref(),
         &load,
         t0,
@@ -1296,6 +1585,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         }
     }
 
@@ -1323,6 +1613,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         })
         .unwrap()
         .expect("stats");
@@ -1382,6 +1673,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1428,6 +1720,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         })
         .unwrap()
         .expect("stats");
@@ -1471,6 +1764,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1504,6 +1798,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         };
 
         let stats = run(&chain_args(LoadBalancePolicyKind::Centralized))
@@ -1585,6 +1880,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         })
         .unwrap()
         .expect("stats");
@@ -1786,6 +2082,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         })
         .unwrap()
         .expect("stats")
@@ -1821,6 +2118,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         })
         .unwrap()
         .expect("stats");
@@ -1862,6 +2160,7 @@ mod tests {
             pull_audit: None,
             centralized_audit: None,
             approx_sched: None,
+            approx_share: 1,
         })
         .unwrap()
         .expect("stats");

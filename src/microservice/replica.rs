@@ -5,6 +5,7 @@ use super::hop::{
     filtered_children, microservice_for_endpoint, sample_duration,
 };
 use super::microservice_stats::MicroserviceVisitTracker;
+use super::sidecar::SidecarCapacityEvent;
 use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::PullIntent;
@@ -45,6 +46,10 @@ pub struct ReplicaConfig {
     pub tracer: Option<Arc<MsTracer>>,
     pub pull_output: Option<Output<usize>>,
     pub approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
+    /// When set, this replica uses a shared ApproxServerSidecar for intents / occupancy.
+    pub sidecar_capacity: Option<Output<SidecarCapacityEvent>>,
+    /// Index sent on edge release (replica idx, or sidecar id under approx-share).
+    pub edge_release_idx: usize,
     pub probe_reply_outputs: HashMap<usize, Output<ReplicaProbeReply>>,
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
     pub scheduling: SchedulingPolicyKind,
@@ -85,6 +90,9 @@ pub struct Replica {
     #[serde(skip)]
     approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
     #[serde(skip)]
+    sidecar_capacity: Option<Output<SidecarCapacityEvent>>,
+    edge_release_idx: usize,
+    #[serde(skip)]
     probe_reply_outputs: HashMap<usize, Output<ReplicaProbeReply>>,
     #[serde(skip)]
     pull_intent_queue: VecDeque<PullIntent>,
@@ -117,12 +125,39 @@ impl Replica {
             tracer: config.tracer,
             pull_output: config.pull_output,
             approx_pull_outputs: config.approx_pull_outputs,
+            sidecar_capacity: config.sidecar_capacity,
+            edge_release_idx: config.edge_release_idx,
             probe_reply_outputs: config.probe_reply_outputs,
             pull_intent_queue: VecDeque::new(),
             pull_audit: config.pull_audit,
             scheduling: config.scheduling,
             approx_sched: config.approx_sched,
         }
+    }
+
+    fn uses_local_approx_pulls(&self) -> bool {
+        !self.approx_pull_outputs.is_empty()
+    }
+
+    fn uses_shared_sidecar(&self) -> bool {
+        self.sidecar_capacity.is_some()
+    }
+
+    async fn notify_sidecar(&mut self, event: SidecarCapacityEvent) {
+        if let Some(output) = &mut self.sidecar_capacity {
+            output.send(event).await;
+        }
+    }
+
+    async fn report_occupancy_to_sidecar(&mut self) {
+        if !self.uses_shared_sidecar() {
+            return;
+        }
+        self.notify_sidecar(SidecarCapacityEvent::Occupancy {
+            server_idx: self.server_idx,
+            level: self.occupancy_level(),
+        })
+        .await;
     }
 
     async fn drain_pull_intents_async(&mut self) {
@@ -153,6 +188,7 @@ impl Replica {
                 .send(ReplicaPull {
                     target_microservice: self.microservice_id.clone(),
                     server_idx: self.server_idx,
+                    intent_target_idx: self.server_idx,
                     request_id: intent.request_id,
                 })
                 .await;
@@ -219,17 +255,18 @@ impl Replica {
 
     async fn release_edge(&mut self, api: &str) {
         if let Some(output) = self.edge_releases.get_mut(api) {
-            output.send(self.server_idx).await;
+            output.send(self.edge_release_idx).await;
         }
     }
 
-    fn begin_service(&mut self, mut hop: Hop, cx: &Context<Self>) {
+    async fn begin_service(&mut self, mut hop: Hop, cx: &Context<Self>) {
         match sample_duration(&self.graph, &hop.endpoint) {
             Ok(duration) => hop.duration = duration,
             Err(e) => {
                 eprintln!("sample_duration: {}", e);
                 self.in_flight = self.in_flight.saturating_sub(1);
                 self.sample_occupancy(cx.time());
+                self.report_occupancy_to_sidecar().await;
                 return;
             }
         }
@@ -245,6 +282,7 @@ impl Replica {
             eprintln!("could not schedule complete. err: {}", h);
             self.in_flight = self.in_flight.saturating_sub(1);
             self.sample_occupancy(cx.time());
+            self.report_occupancy_to_sidecar().await;
         }
     }
 
@@ -256,7 +294,7 @@ impl Replica {
                 ReplicaWork::Upstream(hop) => {
                     self.in_flight += 1;
                     self.sample_occupancy(cx.time());
-                    self.begin_service(hop, cx);
+                    self.begin_service(hop, cx).await;
                     break;
                 }
                 ReplicaWork::DownstreamReturn(hop) => {
@@ -265,6 +303,7 @@ impl Replica {
                 }
             }
         }
+        self.report_occupancy_to_sidecar().await;
     }
 
     async fn handle_return(&mut self, mut hop: Hop, cx: &Context<Self>) {
@@ -404,6 +443,7 @@ impl Replica {
                         hop.deadline,
                     );
                 }
+                // Pull (slot_release): start immediately, no local queue.
                 if hop.slot_release.is_some() {
                     self.trace(
                         &hop,
@@ -416,12 +456,19 @@ impl Replica {
                             self.in_flight
                         ),
                     );
-                    if !self.approx_pull_outputs.is_empty() {
+                    if self.uses_local_approx_pulls() {
                         self.pending_pulls = self.pending_pulls.saturating_sub(1);
+                    }
+                    if self.uses_shared_sidecar() {
+                        self.notify_sidecar(SidecarCapacityEvent::PullArrived {
+                            server_idx: self.server_idx,
+                        })
+                        .await;
                     }
                     self.in_flight += 1;
                     self.sample_occupancy(cx.time());
-                    self.begin_service(hop, cx);
+                    self.report_occupancy_to_sidecar().await;
+                    self.begin_service(hop, cx).await;
                     return;
                 }
                 self.trace(
@@ -537,6 +584,7 @@ impl Replica {
         );
         self.in_flight = self.in_flight.saturating_sub(1);
         self.sample_occupancy(cx.time());
+        self.report_occupancy_to_sidecar().await;
 
         if let Some(release) = hop.slot_release.take() {
             self.release_outbound(release).await;
@@ -545,8 +593,14 @@ impl Replica {
                     output.send(self.server_idx).await;
                 }
             }
-            if !self.approx_pull_outputs.is_empty() {
+            if self.uses_local_approx_pulls() {
                 self.drain_pull_intents_async().await;
+            }
+            if self.uses_shared_sidecar() {
+                self.notify_sidecar(SidecarCapacityEvent::Completed {
+                    server_idx: self.server_idx,
+                })
+                .await;
             }
         }
 

@@ -670,7 +670,10 @@ def parse_args() -> argparse.Namespace:
         "--pull-policy",
         choices=PULL_POLICIES,
         default=None,
-        help="Pull-intent server selection for approx (required when --lb-policy approx)",
+        help=(
+            "Pull-intent server/sidecar selection for approx / approx-share "
+            "(required when --lb-policy approx or approx-share)"
+        ),
     )
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
@@ -678,7 +681,19 @@ def parse_args() -> argparse.Namespace:
         "--approx-sched",
         choices=MS_APPROX_SCHED_POLICIES,
         default=None,
-        help="Approx outbound pull scheduling: fcfs, edf, or edf+ (only valid with --lb-policy approx)",
+        help=(
+            "Approx outbound pull scheduling: fcfs, edf, or edf+ "
+            "(only valid with --lb-policy approx or approx-share)"
+        ),
+    )
+    parser.add_argument(
+        "--approx-share",
+        type=int,
+        default=1,
+        help=(
+            "Replicas per sidecar with --lb-policy approx-share "
+            "(default: 1; only valid with approx-share)"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -711,12 +726,27 @@ def main() -> None:
         raise SystemExit(f"load file not found: {load_file}")
     if args.scale is not None and args.scale < 0:
         raise SystemExit(f"--scale must be >= 0 (got {args.scale})")
-    if args.lb_policy == "approx" and args.pull_policy is None:
-        raise SystemExit("--pull-policy is required when --lb-policy approx")
-    if args.lb_policy != "approx" and args.pull_policy is not None:
-        raise SystemExit("--pull-policy is only valid with --lb-policy approx")
-    if args.approx_sched is not None and args.lb_policy != "approx":
-        raise SystemExit("--approx-sched is only valid with --lb-policy approx")
+    uses_approx = args.lb_policy in ("approx", "approx-share")
+    if uses_approx and args.pull_policy is None:
+        raise SystemExit(
+            "--pull-policy is required when --lb-policy approx or approx-share"
+        )
+    if not uses_approx and args.pull_policy is not None:
+        raise SystemExit(
+            "--pull-policy is only valid with --lb-policy approx or approx-share"
+        )
+    if args.approx_sched is not None and not uses_approx:
+        raise SystemExit(
+            "--approx-sched is only valid with --lb-policy approx or approx-share"
+        )
+    if args.lb_policy == "approx-share":
+        if args.approx_share < 1:
+            raise SystemExit(
+                f"--approx-share must be >= 1 with --lb-policy approx-share "
+                f"(got {args.approx_share})"
+            )
+    elif args.approx_share != 1:
+        raise SystemExit("--approx-share is only valid with --lb-policy approx-share")
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)
 
     binary = args.ms_binary
@@ -739,6 +769,9 @@ def main() -> None:
         scheduling=args.scheduling,
         service_dist=args.service_dist,
         approx_sched=args.approx_sched,
+        approx_share=(
+            args.approx_share if args.lb_policy == "approx-share" else None
+        ),
         scale=args.scale,
     )
     if "by_microservice" not in data:

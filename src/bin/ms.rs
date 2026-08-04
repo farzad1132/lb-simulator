@@ -3,7 +3,8 @@ use lb::microservice::{
     MsArgs, MsServiceDistribution, MsStats, OutputFormat, print_human_stats, run,
 };
 use lb::policy::{
-    validate_prequal_subset, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    validate_approx_share, validate_prequal_subset, ApproxSchedKind, LoadBalancePolicyKind,
+    PullPolicyKind,
 };
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -46,6 +47,8 @@ struct Args {
     service_dist: MsServiceDistribution,
     #[arg(long, value_enum)]
     approx_sched: Option<ApproxSchedKind>,
+    #[arg(long, default_value_t = 1)]
+    approx_share: u32,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
     verbose: u8,
 }
@@ -53,6 +56,7 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
     validate_prequal_subset(cli.lb_policy, cli.lb_subset_size)?;
+    validate_approx_share(cli.lb_policy, cli.approx_share)?;
     let args = MsArgs {
         callgraph: cli.callgraph,
         load_file: cli.load_file,
@@ -74,6 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pull_audit: None,
         centralized_audit: None,
         approx_sched: cli.approx_sched,
+        approx_share: cli.approx_share,
     };
 
     let stats = run(&args)?;
@@ -320,6 +325,40 @@ mod tests {
         ]);
         assert_eq!(cli.approx_sched, Some(ApproxSchedKind::Fcfs));
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Approx);
+    }
+
+    #[test]
+    fn parses_approx_share_defaults_and_flags() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "approx-share",
+            "--pull-policy",
+            "power-of-two",
+            "--approx-share",
+            "4",
+            "--approx-sched",
+            "edf",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::ApproxShare);
+        assert_eq!(cli.approx_share, 4);
+        assert_eq!(cli.pull_policy, Some(PullPolicyKind::PowerOfTwo));
+        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::Edf));
+        assert_eq!(
+            Args::parse_from([
+                "ms",
+                "--callgraph",
+                "tests/fanin/callgraph.json",
+                "--load-file",
+                "tests/fanin/load.json",
+            ])
+            .approx_share,
+            1
+        );
     }
 
     #[test]

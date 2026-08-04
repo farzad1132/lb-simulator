@@ -617,6 +617,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             LoadBalancePolicyKind::Cl => "cl",
             LoadBalancePolicyKind::ClLr => "cl-lr",
             LoadBalancePolicyKind::Corr => "corr",
+            LoadBalancePolicyKind::ApproxShare => "approx-share",
             _ => unreachable!(),
         };
         return Err(format!(

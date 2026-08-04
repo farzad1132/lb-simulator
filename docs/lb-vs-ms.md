@@ -13,9 +13,9 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
-| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
+| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Approx-share** (`approx-share`, ms-only): approx protocol with shared sidecars (`--approx-share`). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
 | Local inflight load view | yes | yes | Typical push policies use each balancer's **local inflight** counters; **prequal** additionally probes server/replica `queue.len + in_flight` |
-| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, or with `cl`, `cl-lr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
+| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, `approx-share`, or with `cl`, `cl-lr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
@@ -27,6 +27,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **Work shedding** | yes | — | lb-only; `--shed-delay`; see [work-shedding.md](work-shedding.md) |
 | **Centralized pull dispatch** | yes | yes | lb: one queue per subset (or one global queue); servers pull on spare capacity. ms: one pull queue per downstream target (or `S` partitioned queues when `k > 0`; outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **Approx decentralized pull** | yes | yes (outbound only) | See [approx-policy.md](approx-policy.md) |
+| **Approx-share (shared sidecars)** | — | yes (outbound only) | `--approx-share N` replicas per sidecar; see [approx-policy.md](approx-policy.md#approx-share-ms-only) |
 | **Prequal async probe pool** | yes | yes (outbound only) | See [prequal-policy.md](prequal-policy.md); ms ingress stays P2C |
 | **`--approx-sched fcfs` (unbound approx pulls)** | yes | yes | Outbound approx only in `ms`; see [approx-policy.md](approx-policy.md) |
 | **`--approx-sched edf` (outbound approx queue)** | — | yes | `ms` only; see [approx-policy.md](approx-policy.md) |
