@@ -1,5 +1,5 @@
 use lb::microservice::{ApproxPullAudit, MsArgs, MsServiceDistribution, OutputFormat, run};
-use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{ApproxSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
@@ -29,6 +29,7 @@ fn approx_args(
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
         centralized_audit: None,

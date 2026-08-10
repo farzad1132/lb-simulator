@@ -28,7 +28,8 @@ use crate::approx_audit::ApproxPullAudit;
 use crate::ms_centralized_audit::MsCentralizedAudit;
 use crate::policy::{
     validate_approx_sched, validate_approx_share, validate_centralized_subset,
-    validate_prequal_subset, validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind,
+    validate_centralized_sched, validate_prequal_subset, validate_pull_policy, ApproxSchedKind,
+    CentralizedSchedKind, LoadBalancePolicyKind,
     PullPolicyKind,
 };
 use crate::rng;
@@ -65,6 +66,8 @@ pub struct MsArgs {
     pub scale: u32,
     pub verbose: u8,
     pub scheduling: SchedulingPolicyKind,
+    /// Shared DownstreamBalancer pull-queue discipline (`centralized` only; default fcfs).
+    pub centralized_sched: CentralizedSchedKind,
     pub service_dist: MsServiceDistribution,
     /// When set, records approx pull/intent events for post-run invariant checks (tests).
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
@@ -516,6 +519,7 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
     validate_approx_sched(args.lb_policy, args.approx_sched, true)?;
     validate_approx_share(args.lb_policy, args.approx_share)?;
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)?;
+    validate_centralized_sched(args.lb_policy, args.centralized_sched)?;
     rng::enter_run(args.seed);
     let result = run_inner(args);
     rng::exit_run();
@@ -778,6 +782,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     server_indices.clone(),
                     args.lb_policy,
                     lb_id,
+                    args.centralized_sched,
                     tracer.clone(),
                     centralized_audit.clone(),
                     caller_lb_queue_occupancy.clone(),
@@ -1581,6 +1586,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -1609,6 +1615,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -1669,6 +1676,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -1716,6 +1724,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -1760,6 +1769,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -1794,6 +1804,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -1876,6 +1887,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -2078,6 +2090,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
@@ -2114,6 +2127,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Fixed,
             pull_audit: None,
             centralized_audit: None,
@@ -2156,6 +2170,7 @@ mod tests {
             scale: 0,
             verbose: 0,
             scheduling: SchedulingPolicyKind::Fifo,
+            centralized_sched: CentralizedSchedKind::Fcfs,
             service_dist: MsServiceDistribution::Bimodal,
             pull_audit: None,
             centralized_audit: None,

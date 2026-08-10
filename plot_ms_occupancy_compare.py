@@ -111,6 +111,8 @@ def format_run_summary(
         parts.append(f"pull_policy={config.pull_policy}")
     if config.approx_sched is not None:
         parts.append(f"approx_sched={config.approx_sched}")
+    if config.lb_policy == "centralized" and config.centralized_sched != "fcfs":
+        parts.append(f"centralized_sched={config.centralized_sched}")
     if config.scale is not None:
         parts.append(f"scale={config.scale}")
     parts.append(f"rps={rps:g}")
@@ -145,6 +147,7 @@ def run_occupancy_compare(
             pull_policy=config.pull_policy,
             lb_subset_size=config.lb_subset_size,
             scheduling=config.scheduling,
+            centralized_sched=config.centralized_sched,
             seed=seed,
             rps=rps,
             service_dist=service_dist,

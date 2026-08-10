@@ -11,6 +11,20 @@ pub enum ApproxSchedKind {
     EdfPlus,
 }
 
+/// Shared DownstreamBalancer pull-queue discipline for `--lb-policy centralized`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+pub enum CentralizedSchedKind {
+    #[default]
+    Fcfs,
+    Edf,
+}
+
+impl CentralizedSchedKind {
+    pub fn uses_edf(self) -> bool {
+        matches!(self, Self::Edf)
+    }
+}
+
 impl ApproxSchedKind {
     /// Outbound balancer queues use EDF insert for `edf` and `edf+`.
     pub fn outbound_uses_edf(self) -> bool {
@@ -286,6 +300,20 @@ pub fn validate_approx_sched(
     }
     if approx_sched.requires_ms() && !allow_edf {
         return Err("--approx-sched edf/edf+ is only supported by the ms simulator".into());
+    }
+    Ok(())
+}
+
+/// `--centralized-sched edf` is only valid with `--lb-policy centralized`.
+/// Default `fcfs` is allowed with any policy (no-op when not centralized).
+pub fn validate_centralized_sched(
+    lb_policy: LoadBalancePolicyKind,
+    centralized_sched: CentralizedSchedKind,
+) -> Result<(), String> {
+    if centralized_sched.uses_edf() && !lb_policy.is_centralized() {
+        return Err(
+            "--centralized-sched edf is only valid with --lb-policy centralized".into(),
+        );
     }
     Ok(())
 }
@@ -636,5 +664,32 @@ mod tests {
         assert!(!ApproxSchedKind::Fcfs.outbound_uses_edf());
         assert!(ApproxSchedKind::EdfPlus.intent_queue_uses_edf());
         assert!(!ApproxSchedKind::Edf.intent_queue_uses_edf());
+    }
+
+    #[test]
+    fn validate_centralized_sched_requires_centralized_for_edf() {
+        assert!(validate_centralized_sched(
+            LoadBalancePolicyKind::Centralized,
+            CentralizedSchedKind::Fcfs,
+        )
+        .is_ok());
+        assert!(validate_centralized_sched(
+            LoadBalancePolicyKind::Centralized,
+            CentralizedSchedKind::Edf,
+        )
+        .is_ok());
+        assert!(validate_centralized_sched(
+            LoadBalancePolicyKind::PowerOfTwo,
+            CentralizedSchedKind::Fcfs,
+        )
+        .is_ok());
+        let err = validate_centralized_sched(
+            LoadBalancePolicyKind::PowerOfTwo,
+            CentralizedSchedKind::Edf,
+        )
+        .unwrap_err();
+        assert!(err.contains("only valid with --lb-policy centralized"));
+        assert!(CentralizedSchedKind::Edf.uses_edf());
+        assert!(!CentralizedSchedKind::Fcfs.uses_edf());
     }
 }

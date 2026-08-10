@@ -4,7 +4,7 @@ use super::trace::MsTracer;
 use crate::approx::{fatal_pull_abort, PullIntent};
 use crate::approx_audit::ApproxPullAudit;
 use crate::ms_centralized_audit::MsCentralizedAudit;
-use crate::policy::ApproxSchedKind;
+use crate::policy::{ApproxSchedKind, CentralizedSchedKind};
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
@@ -726,6 +726,7 @@ pub struct DownstreamBalancer {
     #[serde(skip, default = "default_policy")]
     policy: Box<dyn LoadBalancePolicy>,
     lb_policy: LoadBalancePolicyKind,
+    centralized_sched: CentralizedSchedKind,
     target_microservice: String,
     lb_id: usize,
     #[serde(skip)]
@@ -765,6 +766,7 @@ impl DownstreamBalancer {
         server_indices: Vec<usize>,
         lb_policy: LoadBalancePolicyKind,
         lb_id: usize,
+        centralized_sched: CentralizedSchedKind,
         tracer: Option<Arc<MsTracer>>,
         centralized_audit: Option<Arc<MsCentralizedAudit>>,
         caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
@@ -776,6 +778,7 @@ impl DownstreamBalancer {
         Self {
             policy: lb_policy.downstream_push_policy(),
             lb_policy,
+            centralized_sched,
             target_microservice,
             lb_id,
             tracer,
@@ -843,6 +846,7 @@ impl DownstreamBalancer {
                     self.lb_id,
                     server_idx,
                     call.hop.request_id,
+                    call.hop.deadline,
                 );
             }
             call.hop.slot_release = Some(OutboundRelease {
@@ -905,6 +909,7 @@ impl DownstreamBalancer {
                     self.lb_id,
                     caller_server,
                     call.hop.request_id,
+                    call.hop.deadline,
                     queue_len_before,
                 );
             }
@@ -923,7 +928,15 @@ impl DownstreamBalancer {
                 );
             }
             self.increment_caller_queue_count(&call, cx.time());
-            self.queue.push_back(call);
+            if self.centralized_sched.uses_edf() {
+                let insert_at = edf_insert_index(
+                    self.queue.iter().map(|c| c.hop.deadline),
+                    call.hop.deadline,
+                );
+                self.queue.insert(insert_at, call);
+            } else {
+                self.queue.push_back(call);
+            }
             self.dispatch_waiting(cx.time()).await;
             return;
         }

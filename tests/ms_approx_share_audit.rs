@@ -2,7 +2,7 @@ use lb::microservice::{
     ApproxPullAudit, MsArgs, MsServiceDistribution, OutputFormat, n_sidecars, run, sidecar_id,
     sidecar_replicas,
 };
-use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{ApproxSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::collections::HashMap;
@@ -34,6 +34,7 @@ fn chain3_args(
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
         centralized_audit: None,
@@ -107,6 +108,7 @@ fn ms_approx_share_one_latency_close_to_approx() {
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
@@ -169,6 +171,7 @@ fn ms_approx_share_one_entry_occupancy_close_to_approx() {
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
@@ -329,6 +332,7 @@ fn ms_approx_share_two_entry_occupancy_balanced_within_groups() {
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,

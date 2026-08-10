@@ -1,5 +1,5 @@
 use lb::microservice::{MsArgs, MsServiceDistribution, OutputFormat, run};
-use lb::policy::{LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsA
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
@@ -140,6 +141,7 @@ fn f1_nested_callgraph_completes() {
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,

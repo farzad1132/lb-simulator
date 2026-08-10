@@ -76,6 +76,7 @@ class MsExperimentConfig:
     approx_sched: str | None = None
     approx_share: int = 1  # replicas per sidecar; only for approx-share
     scheduling: str = "fifo"
+    centralized_sched: str = "fcfs"  # only meaningful when lb_policy == centralized
     scale: int | None = None
     rps: float | None = None  # base rate; simulator rps = load * rps
 
@@ -86,7 +87,8 @@ def uses_approx_protocol(config: MsExperimentConfig) -> bool:
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
-    MsExperimentConfig("CQ", "centralized"),
+    MsExperimentConfig("CQ-FCFS", "centralized"),
+    #MsExperimentConfig("CQ-EDF", "centralized", centralized_sched="edf"),
     #MsExperimentConfig("CQ-K10", "centralized", lb_subset_size=10),
     #MsExperimentConfig("CQ-K20", "centralized", lb_subset_size=20),
     #MsExperimentConfig("P2C-K10", "power-of-two", lb_subset_size=10),
@@ -135,6 +137,11 @@ def validate_ms_config(config: MsExperimentConfig) -> None:
         raise SystemExit(
             f"config {label!r}: approx_sched is only valid when lb_policy is "
             "approx or approx-share"
+        )
+    if config.centralized_sched != "fcfs" and config.lb_policy != "centralized":
+        raise SystemExit(
+            f"config {label!r}: centralized_sched is only valid when lb_policy is "
+            "centralized"
         )
     if config.lb_policy == "approx-share":
         if config.approx_share < 1:
@@ -236,6 +243,7 @@ def calibrate_topology_slo(
         pull_policy=config.pull_policy,
         lb_subset_size=config.lb_subset_size,
         scheduling=config.scheduling,
+        centralized_sched=config.centralized_sched,
         seed=seed,
         service_dist=service_dist,
         approx_sched=config.approx_sched,
@@ -274,6 +282,8 @@ def format_run_summary(
         parts.append(f"pull_policy={config.pull_policy}")
     if config.approx_sched is not None:
         parts.append(f"approx_sched={config.approx_sched}")
+    if config.lb_policy == "centralized" and config.centralized_sched != "fcfs":
+        parts.append(f"centralized_sched={config.centralized_sched}")
     if config.lb_policy == "approx-share":
         parts.append(f"approx_share={config.approx_share}")
     if config.scale is not None:
@@ -316,6 +326,7 @@ def run_load_compare_sweep(
             pull_policy=config.pull_policy,
             lb_subset_size=config.lb_subset_size,
             scheduling=config.scheduling,
+            centralized_sched=config.centralized_sched,
             seed=seed,
             rps=rps,
             slo_ms=slo_ms,

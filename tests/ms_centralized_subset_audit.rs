@@ -1,5 +1,5 @@
 use lb::microservice::{MsArgs, MsCentralizedAudit, MsServiceDistribution, OutputFormat, run};
-use lb::policy::LoadBalancePolicyKind;
+use lb::policy::{CentralizedSchedKind, LoadBalancePolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
@@ -29,6 +29,7 @@ fn chain3_centralized_args(
         scale: 0,
         verbose: 0,
         scheduling: SchedulingPolicyKind::Fifo,
+        centralized_sched: CentralizedSchedKind::Fcfs,
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: audit,

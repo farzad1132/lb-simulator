@@ -1,18 +1,26 @@
-# Server Queue Scheduling (`ms`)
+# Queue Scheduling (`ms`)
 
-This document describes server-side queue scheduling in the microservice simulator (`ms`). Scheduling is independent of load balancing: load balancers pick *which server* receives work; scheduling picks *which waiting item* that server serves next.
+This document describes queue scheduling in the microservice simulator (`ms`). Scheduling is independent of *which server* a load balancer selects: it picks *which waiting item* is served next from a given queue.
+
+There are three independent scheduling surfaces:
+
+| Flag | Queue | Values |
+|------|-------|--------|
+| `--scheduling` | Replica local work queues | `fifo` (default), `edf` |
+| `--centralized-sched` | Shared `DownstreamBalancer` pull queues (`--lb-policy centralized`) | `fcfs` (default), `edf` |
+| `--approx-sched` | Approx unbound outbound queues (and intent queues for `edf+`) | see [approx-policy.md](approx-policy.md) |
 
 See also: [microservice-simulation.md](microservice-simulation.md) for overall request flow and replica queue semantics; [lb-vs-ms.md](lb-vs-ms.md) for feature comparison with the flat `lb` simulator.
 
-## Overview
+## Replica queue scheduling (`--scheduling`)
 
 Each replica (server) has a local queue. By default, the queue is **FIFO** (`--scheduling fifo`). With **EDF** (Earliest Deadline First, `--scheduling edf`), newly arriving work — both upstream arrivals and downstream returns — is inserted by deadline so the server tends to serve requests closest to their SLO deadline first.
 
-Scheduling applies only to **replica queues**. It does not reorder work at shared `DownstreamBalancer` pull queues used by `--lb-policy centralized`.
+`--scheduling` applies only to **replica queues**. Shared `DownstreamBalancer` pull queues use [`--centralized-sched`](#centralized-pull-queue-scheduling---centralized-sched) instead.
 
-For **approx unbound outbound queues** on `ReplicaBalancer`, use [`--approx-sched`](approx-policy.md#outbound-queue-scheduling---approx-sched) (`fcfs`, `edf`, or `edf+`) instead. That flag is independent of `--scheduling`. With `edf+`, the replica **pull-intent queue** is also EDF-ordered (still separate from this work-queue `--scheduling`).
+For **approx unbound outbound queues** on `ReplicaBalancer`, use [`--approx-sched`](approx-policy.md#outbound-queue-scheduling---approx-sched) (`fcfs`, `edf`, or `edf+`) instead. That flag is independent of `--scheduling` and `--centralized-sched`. With `edf+`, the replica **pull-intent queue** is also EDF-ordered (still separate from this work-queue `--scheduling`).
 
-## CLI
+### CLI
 
 | Flag | Default | Values | Description |
 |------|---------|--------|-------------|
@@ -99,26 +107,50 @@ Under EDF, returns use the same insertion rule as upstream arrivals. req=5 inser
 
 ## Independence from load balancing
 
-Scheduling does not change:
+`--scheduling` does not change which server a load balancer selects (`EdgeBalancer`, `ReplicaBalancer`, `DownstreamBalancer`). It only changes the order in which a replica dequeues waiting local queue items.
 
-- Which server a load balancer selects (`EdgeBalancer`, `ReplicaBalancer`, `DownstreamBalancer`)
-- Shared `DownstreamBalancer` pull queue ordering (always FIFO under `centralized`)
-
-Scheduling only changes the order in which a replica dequeues waiting queue items.
+Shared centralized pull-queue order is controlled separately by `--centralized-sched`.
 
 ## Interaction with LB policies
 
-| LB policy | EDF effect on replica queues |
+| LB policy | `--scheduling edf` effect on replica queues |
 |-----------|------------------------------|
 | Push (`random`, `power-of-two`, `round-robin`, `least-request`, **`cl`**, **`corr`**) | EDF affects every replica queue when servers are saturated |
-| **`centralized`** | EDF affects **ingress** (entry) replica queues. Downstream replicas bypass local queuing via `slot_release`, so EDF has no effect on downstream hops |
+| **`centralized`** | EDF affects **ingress** (entry) replica queues. Downstream replicas bypass local queuing via `slot_release`, so replica EDF has no effect on downstream hops. Use `--centralized-sched edf` to reorder the shared pull queue. |
+
+## Centralized pull-queue scheduling (`--centralized-sched`)
+
+With `--lb-policy centralized`, outbound calls wait in a shared `DownstreamBalancer` queue until a downstream replica pulls. By default that queue is **FCFS** (`--centralized-sched fcfs`). With **EDF** (`--centralized-sched edf`), newly enqueued calls are inserted by `Hop.deadline` (same deadline assignment as replica EDF). Waiting pullers remain FIFO.
+
+| Flag | Default | Values | Description |
+|------|---------|--------|-------------|
+| `--centralized-sched` | `fcfs` | `fcfs`, `edf` | Shared pull-queue discipline under `--lb-policy centralized` |
+
+`--centralized-sched edf` is rejected unless `--lb-policy centralized`. Default `fcfs` is a no-op for other policies.
+
+Example:
+
+```bash
+./target/release/ms \
+  --callgraph tests/chain/3/callgraph.json \
+  --load-file tests/chain/3/load.json \
+  --lb-policy centralized \
+  --centralized-sched edf \
+  --n 10000
+```
+
+**Dequeue:** always `pop_front`. The flag only affects **enqueue placement** (same insert-before-strictly-later-deadline rule as replica EDF).
+
+The flat `lb` simulator's centralized dispatcher remains FCFS-only.
 
 ## Source files
 
 | File | Role |
 |------|------|
 | [`src/scheduling.rs`](../src/scheduling.rs) | `SchedulingPolicyKind` enum and EDF insert-index helper |
+| [`src/policy.rs`](../src/policy.rs) | `CentralizedSchedKind` enum and validation |
 | [`src/microservice/hop.rs`](../src/microservice/hop.rs) | `deadline` field on `Hop` |
 | [`src/microservice/simulate.rs`](../src/microservice/simulate.rs) | Deadline assignment at `UserArrival::inject` |
-| [`src/microservice/replica.rs`](../src/microservice/replica.rs) | Queue enqueue logic |
-| [`src/bin/ms.rs`](../src/bin/ms.rs) | `--scheduling` CLI flag |
+| [`src/microservice/replica.rs`](../src/microservice/replica.rs) | Replica queue enqueue logic (`--scheduling`) |
+| [`src/microservice/balancer.rs`](../src/microservice/balancer.rs) | Centralized pull-queue enqueue (`--centralized-sched`) |
+| [`src/bin/ms.rs`](../src/bin/ms.rs) | `--scheduling` and `--centralized-sched` CLI flags |

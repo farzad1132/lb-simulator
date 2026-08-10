@@ -3,8 +3,8 @@ use lb::microservice::{
     MsArgs, MsServiceDistribution, MsStats, OutputFormat, print_human_stats, run,
 };
 use lb::policy::{
-    validate_approx_share, validate_prequal_subset, ApproxSchedKind, LoadBalancePolicyKind,
-    PullPolicyKind,
+    validate_approx_share, validate_centralized_sched, validate_prequal_subset, ApproxSchedKind,
+    CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
 };
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -43,6 +43,8 @@ struct Args {
     scale: u32,
     #[arg(long, value_enum, default_value_t = SchedulingPolicyKind::Fifo)]
     scheduling: SchedulingPolicyKind,
+    #[arg(long, value_enum, default_value_t = CentralizedSchedKind::Fcfs)]
+    centralized_sched: CentralizedSchedKind,
     #[arg(long, value_enum, default_value_t = MsServiceDistribution::Exp)]
     service_dist: MsServiceDistribution,
     #[arg(long, value_enum)]
@@ -57,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
     validate_prequal_subset(cli.lb_policy, cli.lb_subset_size)?;
     validate_approx_share(cli.lb_policy, cli.approx_share)?;
+    validate_centralized_sched(cli.lb_policy, cli.centralized_sched)?;
     let args = MsArgs {
         callgraph: cli.callgraph,
         load_file: cli.load_file,
@@ -73,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trace_limit: cli.trace_limit,
         scale: cli.scale,
         scheduling: cli.scheduling,
+        centralized_sched: cli.centralized_sched,
         service_dist: cli.service_dist,
         verbose: cli.verbose,
         pull_audit: None,
@@ -125,6 +129,7 @@ mod tests {
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::PowerOfTwo);
         assert_eq!(cli.lb_subset_policy, SubsetPolicyKind::Deterministic);
         assert_eq!(cli.scheduling, SchedulingPolicyKind::Fifo);
+        assert_eq!(cli.centralized_sched, CentralizedSchedKind::Fcfs);
         assert_eq!(cli.scale, 0);
         assert_eq!(cli.rps, None);
         assert_eq!(cli.slo_ms, None);
@@ -230,6 +235,38 @@ mod tests {
             "edf",
         ]);
         assert_eq!(cli.scheduling, SchedulingPolicyKind::Edf);
+    }
+
+    #[test]
+    fn parses_centralized_sched_edf() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "centralized",
+            "--centralized-sched",
+            "edf",
+        ]);
+        assert_eq!(cli.centralized_sched, CentralizedSchedKind::Edf);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Centralized);
+    }
+
+    #[test]
+    fn rejects_centralized_sched_edf_without_centralized() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--centralized-sched",
+            "edf",
+        ]);
+        let err = validate_centralized_sched(cli.lb_policy, cli.centralized_sched).unwrap_err();
+        assert!(err.contains("only valid with --lb-policy centralized"));
     }
 
     #[test]

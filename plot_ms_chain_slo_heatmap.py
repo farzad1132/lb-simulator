@@ -29,6 +29,7 @@ except ModuleNotFoundError:
 
 from plot_cdfs import (
     MS_APPROX_SCHED_POLICIES,
+    MS_CENTRALIZED_SCHED_POLICIES,
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
     MS_SERVICE_DISTS,
@@ -91,6 +92,7 @@ def calibrate_topology_slo(
     pull_policy: str | None,
     lb_subset_size: int,
     scheduling: str,
+    centralized_sched: str,
     seed: int | None,
     service_dist: str,
     approx_sched: str | None,
@@ -104,6 +106,7 @@ def calibrate_topology_slo(
         pull_policy=pull_policy,
         lb_subset_size=lb_subset_size,
         scheduling=scheduling,
+        centralized_sched=centralized_sched,
         seed=seed,
         service_dist=service_dist,
         approx_sched=approx_sched,
@@ -129,6 +132,7 @@ def run_chain_sweep(
     lb_subset_size: int,
     scheduling: str,
     seed: int | None,
+    centralized_sched: str = "fcfs",
     service_dist: str = "exp",
     approx_sched: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -148,6 +152,7 @@ def run_chain_sweep(
             pull_policy=pull_policy,
             lb_subset_size=lb_subset_size,
             scheduling=scheduling,
+            centralized_sched=centralized_sched,
             seed=seed,
             service_dist=service_dist,
             approx_sched=approx_sched,
@@ -176,6 +181,7 @@ def run_chain_sweep(
                 pull_policy=pull_policy,
                 lb_subset_size=lb_subset_size,
                 scheduling=scheduling,
+                centralized_sched=centralized_sched,
                 seed=seed,
                 rps=rps,
                 slo_ms=slo_ms,
@@ -245,6 +251,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument(
+        "--centralized-sched",
+        choices=MS_CENTRALIZED_SCHED_POLICIES,
+        default="fcfs",
+        help=(
+            "Shared DownstreamBalancer pull-queue scheduling: fcfs or edf "
+            "(edf only valid with --lb-policy centralized)"
+        ),
+    )
+    parser.add_argument(
         "--service-dist",
         choices=MS_SERVICE_DISTS,
         default="exp",
@@ -268,6 +283,10 @@ def main() -> None:
         raise SystemExit("--pull-policy is only valid with --lb-policy approx")
     if args.approx_sched is not None and args.lb_policy != "approx":
         raise SystemExit("--approx-sched is only valid with --lb-policy approx")
+    if args.centralized_sched != "fcfs" and args.lb_policy != "centralized":
+        raise SystemExit(
+            "--centralized-sched edf is only valid with --lb-policy centralized"
+        )
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)
 
     loads = load_values(args.load_min, args.load_max, args.load_step)
@@ -292,6 +311,7 @@ def main() -> None:
         pull_policy=args.pull_policy,
         lb_subset_size=args.lb_subset_size,
         scheduling=args.scheduling,
+        centralized_sched=args.centralized_sched,
         seed=args.seed,
         service_dist=args.service_dist,
         approx_sched=args.approx_sched,

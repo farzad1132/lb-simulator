@@ -1,7 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use nexosim::time::MonotonicTime;
+
+use crate::scheduling::edf_insert_index;
 use crate::subset::{self, SubsetPolicyKind};
 
 /// Records MS centralized enqueue/dispatch events for post-hoc subset invariant checks.
@@ -24,6 +27,7 @@ pub enum CentralizedEventKind {
         lb_id: usize,
         caller_server: usize,
         request_id: u64,
+        deadline: MonotonicTime,
         queue_len_before: usize,
     },
     CallDispatched {
@@ -31,6 +35,7 @@ pub enum CentralizedEventKind {
         lb_id: usize,
         server_idx: usize,
         request_id: u64,
+        deadline: MonotonicTime,
     },
 }
 
@@ -50,6 +55,7 @@ impl MsCentralizedAudit {
         lb_id: usize,
         caller_server: usize,
         request_id: u64,
+        deadline: MonotonicTime,
         queue_len_before: usize,
     ) {
         self.record(CentralizedEventKind::CallEnqueued {
@@ -57,6 +63,7 @@ impl MsCentralizedAudit {
             lb_id,
             caller_server,
             request_id,
+            deadline,
             queue_len_before,
         });
     }
@@ -67,12 +74,14 @@ impl MsCentralizedAudit {
         lb_id: usize,
         server_idx: usize,
         request_id: u64,
+        deadline: MonotonicTime,
     ) {
         self.record(CentralizedEventKind::CallDispatched {
             target: target.to_string(),
             lb_id,
             server_idx,
             request_id,
+            deadline,
         });
     }
 
@@ -82,6 +91,16 @@ impl MsCentralizedAudit {
             .unwrap()
             .iter()
             .map(|e| e.kind.clone())
+            .collect()
+    }
+
+    pub fn dispatch_request_ids(&self, target: &str) -> Vec<u64> {
+        self.events_for_target(target)
+            .into_iter()
+            .filter_map(|kind| match kind {
+                CentralizedEventKind::CallDispatched { request_id, .. } => Some(request_id),
+                _ => None,
+            })
             .collect()
     }
 
@@ -301,17 +320,104 @@ impl MsCentralizedAudit {
 
         Ok(())
     }
+
+    /// Replay FCFS enqueue/dispatch per (target, lb_id) and require each dispatch to pop the head.
+    pub fn validate_centralized_fcfs(&self, target: &str) -> Result<(), String> {
+        self.validate_queue_discipline(target, false)
+    }
+
+    /// Replay EDF enqueue/dispatch per (target, lb_id) and require each dispatch to pop the EDF head.
+    pub fn validate_centralized_edf(&self, target: &str) -> Result<(), String> {
+        self.validate_queue_discipline(target, true)
+    }
+
+    fn validate_queue_discipline(&self, target: &str, edf: bool) -> Result<(), String> {
+        let mode = if edf { "EDF" } else { "FCFS" };
+        let mut queues: HashMap<usize, VecDeque<(u64, MonotonicTime)>> = HashMap::new();
+        let mut saw_dispatch = false;
+        let mut saw_backlog_pop = false;
+
+        for kind in self.events_for_target(target) {
+            match kind {
+                CentralizedEventKind::CallEnqueued {
+                    lb_id,
+                    request_id,
+                    deadline,
+                    ..
+                } => {
+                    let queue = queues.entry(lb_id).or_default();
+                    if edf {
+                        let insert_at =
+                            edf_insert_index(queue.iter().map(|(_, d)| *d), deadline);
+                        queue.insert(insert_at, (request_id, deadline));
+                    } else {
+                        queue.push_back((request_id, deadline));
+                    }
+                }
+                CentralizedEventKind::CallDispatched {
+                    lb_id,
+                    request_id,
+                    ..
+                } => {
+                    saw_dispatch = true;
+                    let queue = queues.get_mut(&lb_id).ok_or_else(|| {
+                        format!(
+                            "target {target}: {mode} dispatch of {request_id} on lb {lb_id} with no replay queue"
+                        )
+                    })?;
+                    if queue.len() > 1 {
+                        saw_backlog_pop = true;
+                    }
+                    let front = queue.pop_front().ok_or_else(|| {
+                        format!(
+                            "target {target}: {mode} dispatch of {request_id} on lb {lb_id} with empty replay queue"
+                        )
+                    })?;
+                    if front.0 != request_id {
+                        return Err(format!(
+                            "target {target}: lb {lb_id} dispatch was not {mode}: expected {}, got {request_id}",
+                            front.0
+                        ));
+                    }
+                }
+            }
+        }
+
+        if !saw_dispatch {
+            return Err(format!("target {target}: no centralized dispatches recorded"));
+        }
+        for (lb_id, queue) in &queues {
+            if !queue.is_empty() {
+                return Err(format!(
+                    "target {target}: non-empty {mode} replay queue on lb {lb_id} after validation"
+                ));
+            }
+        }
+        if edf && !saw_backlog_pop {
+            return Err(format!(
+                "target {target}: EDF validation never saw a backlog pop (queue len > 1); \
+                 queue discipline may not have been exercised"
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn t(ms: u64) -> MonotonicTime {
+        MonotonicTime::EPOCH + Duration::from_millis(ms)
+    }
 
     #[test]
     fn caller_mapping_rejects_mismatch() {
         let audit = MsCentralizedAudit::new();
         // n=10, k=5 → S=2; caller 1 should map to lb 1
-        audit.record_call_enqueued("backend1", 0, 1, 1, 0);
+        audit.record_call_enqueued("backend1", 0, 1, 1, t(100), 0);
         let err = audit
             .validate_caller_lb_mapping("backend1", 10, 5)
             .unwrap_err();
@@ -321,11 +427,48 @@ mod tests {
     #[test]
     fn caller_mapping_accepts_modulo() {
         let audit = MsCentralizedAudit::new();
-        audit.record_call_enqueued("backend1", 0, 0, 1, 0);
-        audit.record_call_enqueued("backend1", 1, 1, 2, 0);
-        audit.record_call_enqueued("backend1", 0, 2, 3, 0);
+        audit.record_call_enqueued("backend1", 0, 0, 1, t(100), 0);
+        audit.record_call_enqueued("backend1", 1, 1, 2, t(100), 0);
+        audit.record_call_enqueued("backend1", 0, 2, 3, t(100), 0);
         audit
             .validate_caller_lb_mapping("backend1", 10, 5)
             .expect("mapping ok");
+    }
+
+    #[test]
+    fn validate_centralized_edf_accepts_reordered_dispatch() {
+        let audit = MsCentralizedAudit::new();
+        // Enqueue late deadline first, then early; EDF dispatch should pull early first.
+        audit.record_call_enqueued("backend1", 0, 0, 1, t(200), 0);
+        audit.record_call_enqueued("backend1", 0, 0, 2, t(100), 1);
+        audit.record_call_dispatched("backend1", 0, 0, 2, t(100));
+        audit.record_call_dispatched("backend1", 0, 0, 1, t(200));
+        audit
+            .validate_centralized_edf("backend1")
+            .expect("edf ok");
+    }
+
+    #[test]
+    fn validate_centralized_edf_rejects_fcfs_order() {
+        let audit = MsCentralizedAudit::new();
+        audit.record_call_enqueued("backend1", 0, 0, 1, t(200), 0);
+        audit.record_call_enqueued("backend1", 0, 0, 2, t(100), 1);
+        // FCFS would dispatch 1 first — wrong for EDF.
+        audit.record_call_dispatched("backend1", 0, 0, 1, t(200));
+        audit.record_call_dispatched("backend1", 0, 0, 2, t(100));
+        let err = audit.validate_centralized_edf("backend1").unwrap_err();
+        assert!(err.contains("not EDF"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_centralized_fcfs_accepts_arrival_order() {
+        let audit = MsCentralizedAudit::new();
+        audit.record_call_enqueued("backend1", 0, 0, 1, t(200), 0);
+        audit.record_call_enqueued("backend1", 0, 0, 2, t(100), 1);
+        audit.record_call_dispatched("backend1", 0, 0, 1, t(200));
+        audit.record_call_dispatched("backend1", 0, 0, 2, t(100));
+        audit
+            .validate_centralized_fcfs("backend1")
+            .expect("fcfs ok");
     }
 }

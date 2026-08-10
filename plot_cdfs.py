@@ -53,6 +53,7 @@ MS_LB_POLICIES = (
     "corr",
 )
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
+MS_CENTRALIZED_SCHED_POLICIES = ("fcfs", "edf")
 MS_APPROX_SCHED_POLICIES = ("fcfs", "edf", "edf+")
 LB_APPROX_SCHED_POLICIES = ("fcfs",)
 MS_SERVICE_DISTS = ("exp", "fixed", "bimodal")
@@ -331,6 +332,7 @@ def run_ms_simulation(
     rps: float | None = None,
     slo_ms: float | None = None,
     scheduling: str = "fifo",
+    centralized_sched: str = "fcfs",
     service_dist: str = "exp",
     approx_sched: str | None = None,
     approx_share: int | None = None,
@@ -352,6 +354,8 @@ def run_ms_simulation(
         str(lb_subset_size),
         "--scheduling",
         scheduling,
+        "--centralized-sched",
+        centralized_sched,
         "--service-dist",
         service_dist,
     ]

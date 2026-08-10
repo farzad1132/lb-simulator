@@ -19,6 +19,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
+| Centralized pull-queue scheduling | — | yes | ms: `--centralized-sched fcfs` (default) or `edf` with `--lb-policy centralized`; lb centralized remains FCFS; see [scheduling.md](scheduling.md#centralized-pull-queue-scheduling---centralized-sched) |
 | Poisson arrivals | yes | yes | lb: from `--load` (exponential default); ms: per-API `rps` in `load.json` |
 | Arrival distribution | yes | — | lb: `--arrival exponential|constant`; ms: exponential only |
 | SLO violation rate | yes | yes | lb: optional `--slo` (seconds); ms: `slo_ms` per API in `load.json` |
@@ -197,7 +198,7 @@ With `--lb-policy cl-lr`, outbound routing uses the same shared topology as `cl`
 
 ### Centralized pull-based outbound (ms)
 
-With `--lb-policy centralized`, outbound routing uses the same shared topology as `cl`, but each `DownstreamBalancer` is pull-based (FCFS queue; replicas pull on spare capacity). Inflight is released after local service complete at the assigned replica. Ingress stays push P2C on `EdgeBalancer`. With `--lb-subset-size k > 0`, each downstream target is partitioned into `S` shared pull balancers under the same constraints as lb centralized subsetting.
+With `--lb-policy centralized`, outbound routing uses the same shared topology as `cl`, but each `DownstreamBalancer` is pull-based (queue order via `--centralized-sched`, default FCFS; replicas pull on spare capacity). Inflight is released after local service complete at the assigned replica. Ingress stays push P2C on `EdgeBalancer`. With `--lb-subset-size k > 0`, each downstream target is partitioned into `S` shared pull balancers under the same constraints as lb centralized subsetting.
 
 ### Corr outbound (experimental)
 

@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from plot_cdfs import (  # noqa: E402
     MS_APPROX_SCHED_POLICIES,
     MS_LB_POLICIES,
+    MS_CENTRALIZED_SCHED_POLICIES,
     MS_SCHEDULING_POLICIES,
     MS_SERVICE_DISTS,
     PULL_POLICIES,
@@ -678,6 +679,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
     parser.add_argument(
+        "--centralized-sched",
+        choices=MS_CENTRALIZED_SCHED_POLICIES,
+        default="fcfs",
+        help=(
+            "Shared DownstreamBalancer pull-queue scheduling: fcfs or edf "
+            "(edf only valid with --lb-policy centralized)"
+        ),
+    )
+    parser.add_argument(
         "--approx-sched",
         choices=MS_APPROX_SCHED_POLICIES,
         default=None,
@@ -739,6 +749,10 @@ def main() -> None:
         raise SystemExit(
             "--approx-sched is only valid with --lb-policy approx or approx-share"
         )
+    if args.centralized_sched != "fcfs" and args.lb_policy != "centralized":
+        raise SystemExit(
+            "--centralized-sched edf is only valid with --lb-policy centralized"
+        )
     if args.lb_policy == "approx-share":
         if args.approx_share < 1:
             raise SystemExit(
@@ -767,6 +781,7 @@ def main() -> None:
         rps=args.rps,
         slo_ms=args.slo,
         scheduling=args.scheduling,
+        centralized_sched=args.centralized_sched,
         service_dist=args.service_dist,
         approx_sched=args.approx_sched,
         approx_share=(

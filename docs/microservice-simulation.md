@@ -2,7 +2,7 @@
 
 This document describes how the microservice simulator works: inputs, internal model, request flow, and metrics. The simulator is implemented as a separate binary (`ms`) and module (`src/microservice/`) that does not modify the flat load-balancer simulator (`lb`).
 
-See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the flat load-balancer simulator (including which features are shared, lb-only, or ms-only). Per-microservice visit distributions are documented in [analyze.md](analyze.md). Server queue scheduling (`fifo` / `edf`) is documented in [scheduling.md](scheduling.md).
+See also: [lb-vs-ms.md](lb-vs-ms.md) for a feature comparison with the flat load-balancer simulator (including which features are shared, lb-only, or ms-only). Per-microservice visit distributions are documented in [analyze.md](analyze.md). Replica and centralized pull-queue scheduling are documented in [scheduling.md](scheduling.md).
 
 ## Vocabulary
 
@@ -117,7 +117,7 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 | **EdgeBalancer** | one per API | Push routing to entry replicas (most policies) or entry **sidecars** (`approx-share`); honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `approx-share` / `prequal` |
 | **ReplicaBalancer** | one per server (default, `approx`, and `prequal`); one per sidecar group (`approx-share`) | Outbound only: push dispatch (default policies), decentralized pull-intent queues (`approx` / `approx-share`), or async RIF probe pools (`prequal`) |
 | **ApproxServerSidecar** | one per sidecar group (`approx-share`) | Dual-mode: ingress fan-out to least-occupancy owned replica (`N>1`); pull approx-share intent queue for inter-service |
-| **DownstreamBalancer** | one per downstream target (`cl`, `cl-lr`, `corr`); one per subset of each target (`centralized` with `k > 0`, else one per target) | Shared outbound LB: push P2C (`cl`), push least-request (`cl-lr`), pull FCFS (`centralized`), or experimental push (`corr`) |
+| **DownstreamBalancer** | one per downstream target (`cl`, `cl-lr`, `corr`); one per subset of each target (`centralized` with `k > 0`, else one per target) | Shared outbound LB: push P2C (`cl`), push least-request (`cl-lr`), pull queue with `--centralized-sched` (`centralized`), or experimental push (`corr`) |
 | **OutboundGateway** | one per server (`cl`, `cl-lr`, `centralized`, `corr`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
 | **Replica** (server) | `replicas` per microservice | Configurable queue (`fifo` default, `edf` optional; see [scheduling.md](scheduling.md)), local processing, nested dispatch/return |
 
@@ -229,7 +229,7 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 | `cl` | All callers to the same downstream target share one inflight view (push P2C) |
 | `cl-lr` | Same shared topology as `cl`; downstream uses least-request on shared inflight |
 | `corr` | Same shared topology as `cl`; experimental outbound routing |
-| `centralized` | All callers share one pull queue per downstream target (pull FCFS); see below |
+| `centralized` | All callers share one pull queue per downstream target (`--centralized-sched`); see below |
 
 `lb --lb-policy cl` and `lb --lb-policy cl-lr` are rejected at startup.
 
@@ -246,7 +246,7 @@ The only difference from `cl` is downstream routing: `DownstreamBalancer` uses *
 
 ### Centralized policy (pull-based layer)
 
-`--lb-policy centralized` uses the same shared outbound topology as `cl` (`DownstreamBalancer` + `OutboundGateway` per downstream target), but dispatch is **pull-based** like lb `centralized`: outbound calls queue at the shared balancer; downstream replicas pull when they have spare capacity; FCFS matching (no `select()`).
+`--lb-policy centralized` uses the same shared outbound topology as `cl` (`DownstreamBalancer` + `OutboundGateway` per downstream target), but dispatch is **pull-based** like lb `centralized`: outbound calls queue at the shared balancer; downstream replicas pull when they have spare capacity (no `select()`). Queue order is controlled by `--centralized-sched` (`fcfs` default, or `edf`); waiting pullers remain FIFO. See [scheduling.md](scheduling.md#centralized-pull-queue-scheduling---centralized-sched).
 
 Ingress stays push-based power-of-two on `EdgeBalancer` (same as `cl`).
 
@@ -260,8 +260,8 @@ backend1/* ──▶ OutboundGateway(backend1/i) ──▶ DownstreamBalancer(ba
 | vs | Difference |
 |----|------------|
 | `cl` | Push-on-arrival P2C; inflight released on return to caller |
-| `centralized` | Pull FCFS queue; inflight released after local service complete at assigned replica (before nested child dispatch) |
-| lb `centralized` | One global flat pool (or partitioned subsets); ms uses one pull queue **per downstream target** (or `S` partitioned queues when `k > 0`) |
+| `centralized` | Pull queue (`--centralized-sched`); inflight released after local service complete at assigned replica (before nested child dispatch) |
+| lb `centralized` | One global flat pool (or partitioned subsets); ms uses one pull queue **per downstream target** (or `S` partitioned queues when `k > 0`). lb remains FCFS-only. |
 
 With `--lb-subset-size k > 0`, each downstream target is partitioned into `S = replicas / k` shared pull balancers under the same constraints as [lb centralized subsetting](lb-simulation.md#centralized-subsetting) (deterministic only; `k` divides target replicas; each caller's replicas divisible by `S`). `--lb-subset-size > 0` remains unsupported with `cl`, `cl-lr`, and `corr`.
 
@@ -448,10 +448,11 @@ cargo build --release
 | `--callgraph` | Path to callgraph JSON (required) |
 | `--load-file` | Path to per-API load JSON (`rps` + `slo_ms`) (required) |
 | `--n` | Total requests, split across APIs proportional to RPS |
-| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `approx` (decentralized outbound pull; requires `--pull-policy`), `prequal` (decentralized outbound RIF probe pool), `cl` (shared push P2C outbound), `cl-lr` (shared push least-request outbound), `centralized` (shared pull FCFS outbound), or `corr` (experimental shared push outbound). For `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `prequal`, ingress stays push P2C on `EdgeBalancer`. |
+| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `approx` (decentralized outbound pull; requires `--pull-policy`), `prequal` (decentralized outbound RIF probe pool), `cl` (shared push P2C outbound), `cl-lr` (shared push least-request outbound), `centralized` (shared pull outbound; see `--centralized-sched`), or `corr` (experimental shared push outbound). For `cl` / `cl-lr` / `centralized` / `corr` / `approx` / `prequal`, ingress stays push P2C on `EdgeBalancer`. |
 | `--pull-policy` | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--approx-sched` | Omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment; independent of `--scheduling` |
+| `--approx-sched` | Omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment; independent of `--scheduling` / `--centralized-sched` |
 | `--scheduling` | Server queue discipline at each replica: `fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
+| `--centralized-sched` | Shared DownstreamBalancer pull-queue discipline with `--lb-policy centralized`: `fcfs` (default) or `edf`; see [scheduling.md](scheduling.md#centralized-pull-queue-scheduling---centralized-sched) |
 | `--service-dist` | Service-time distribution: `exp` (default), `fixed`, or `bimodal` (hardcoded modes scaled to each endpoint mean) |
 | `--lb-subset-size` | Replica subset per balancer (`0` = all). Not supported with `prequal`, `cl`, `cl-lr`, or `corr`. With `centralized`, restricted partition subsetting (see above). |
 | `--lb-subset-policy` | Subset assignment policy: `deterministic` (default) or `random` |
