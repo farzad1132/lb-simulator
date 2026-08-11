@@ -200,7 +200,7 @@ def run_chain_sweep(
 
 
 def plot_chain_heatmap(loads: list[float], probs: np.ndarray, output_path: Path) -> None:
-    style = replace(ACM_COMPACT_HALF, aspect_ratio=0.75)
+    style = replace(ACM_COMPACT_HALF, aspect_ratio=0.4)
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
     vmax = max(float(np.nanmax(probs)), 1.0)

@@ -839,7 +839,7 @@ impl DownstreamBalancer {
     async fn dispatch_to_server(&mut self, server_idx: usize, mut call: OutboundCall) {
         self.local_inflight[server_idx] += 1;
 
-        if self.lb_policy.is_centralized() {
+        if self.lb_policy.uses_central_pull_queue() {
             if let Some(audit) = &self.centralized_audit {
                 audit.record_call_dispatched(
                     &self.target_microservice,
@@ -895,7 +895,7 @@ impl DownstreamBalancer {
             return;
         }
 
-        if self.lb_policy.is_centralized() {
+        if self.lb_policy.uses_central_pull_queue() {
             let queue_len_before = self.queue.len();
             if let Some(audit) = &self.centralized_audit {
                 let caller_server = call
@@ -914,12 +914,17 @@ impl DownstreamBalancer {
                 );
             }
             if let Some(tracer) = &self.tracer {
+                let policy_name = if self.lb_policy.is_jbsq() {
+                    "jbsq"
+                } else {
+                    "centralized"
+                };
                 tracer.log(
                     call.hop.trace,
                     cx.time(),
                     call.hop.request_id,
                     &format!(
-                        "DownstreamBalancer(target={}, lb={}, centralized) enqueue endpoint={} queue={}",
+                        "DownstreamBalancer(target={}, lb={}, {policy_name}) enqueue endpoint={} queue={}",
                         self.target_microservice,
                         self.lb_id,
                         call.hop.endpoint,
@@ -976,16 +981,21 @@ impl DownstreamBalancer {
     }
 
     pub async fn pull(&mut self, server_idx: usize, cx: &Context<Self>) {
-        if !self.lb_policy.is_centralized() {
+        if !self.lb_policy.uses_central_pull_queue() {
             return;
         }
+        let policy_name = if self.lb_policy.is_jbsq() {
+            "jbsq"
+        } else {
+            "centralized"
+        };
         if let Some(tracer) = &self.tracer {
             tracer.log(
                 false,
                 cx.time(),
                 0,
                 &format!(
-                    "DownstreamBalancer(target={}, centralized) pull server={server_idx} queue={}",
+                    "DownstreamBalancer(target={}, {policy_name}) pull server={server_idx} queue={}",
                     self.target_microservice,
                     self.queue.len()
                 ),
@@ -1002,7 +1012,7 @@ impl DownstreamBalancer {
                     cx.time(),
                     call.hop.request_id,
                     &format!(
-                        "DownstreamBalancer(target={}, centralized) dispatch -> server={server_idx} endpoint={}",
+                        "DownstreamBalancer(target={}, {policy_name}) dispatch -> server={server_idx} endpoint={}",
                         self.target_microservice, call.hop.endpoint
                     ),
                 );

@@ -10,6 +10,7 @@ use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::approx::PullIntent;
 use crate::approx_audit::ApproxPullAudit;
+use crate::ms_jbsq_audit::MsJbsqAudit;
 use crate::policy::ApproxSchedKind;
 use crate::prequal::Probe;
 use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
@@ -52,6 +53,9 @@ pub struct ReplicaConfig {
     pub edge_release_idx: usize,
     pub probe_reply_outputs: HashMap<usize, Output<ReplicaProbeReply>>,
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
+    pub jbsq_audit: Option<Arc<MsJbsqAudit>>,
+    /// When set, this replica uses jbsq pull threshold `n` instead of spare concurrency.
+    pub jbsq_n: Option<u32>,
     pub scheduling: SchedulingPolicyKind,
     pub approx_sched: Option<ApproxSchedKind>,
 }
@@ -99,6 +103,10 @@ pub struct Replica {
     #[serde(skip)]
     pull_audit: Option<Arc<ApproxPullAudit>>,
     #[serde(skip)]
+    jbsq_audit: Option<Arc<MsJbsqAudit>>,
+    #[serde(skip)]
+    jbsq_n: Option<u32>,
+    #[serde(skip)]
     scheduling: SchedulingPolicyKind,
     #[serde(skip)]
     approx_sched: Option<ApproxSchedKind>,
@@ -130,8 +138,69 @@ impl Replica {
             probe_reply_outputs: config.probe_reply_outputs,
             pull_intent_queue: VecDeque::new(),
             pull_audit: config.pull_audit,
+            jbsq_audit: config.jbsq_audit,
+            jbsq_n: config.jbsq_n,
             scheduling: config.scheduling,
             approx_sched: config.approx_sched,
+        }
+    }
+
+    fn uses_jbsq(&self) -> bool {
+        self.jbsq_n.is_some() && self.pull_output.is_some()
+    }
+
+    /// Pulled-work occupancy for jbsq: upstream queue + in_flight (excludes DownstreamReturn).
+    fn jbsq_occupancy(&self) -> u32 {
+        let upstream_queued = self
+            .queue
+            .iter()
+            .filter(|w| matches!(w, ReplicaWork::Upstream(_)))
+            .count() as u32;
+        upstream_queued + self.in_flight
+    }
+
+    fn jbsq_can_pull(&self) -> bool {
+        let Some(n) = self.jbsq_n else {
+            return false;
+        };
+        self.jbsq_occupancy() + self.pending_pulls < n
+    }
+
+    async fn try_jbsq_pull(&mut self) {
+        if !self.uses_jbsq() || !self.jbsq_can_pull() {
+            return;
+        }
+        let Some(n) = self.jbsq_n else {
+            return;
+        };
+        let occupancy_before = self.jbsq_occupancy();
+        let pending_before = self.pending_pulls;
+        if let Some(audit) = &self.jbsq_audit {
+            audit.record_pull_sent(
+                &self.microservice_id,
+                self.server_idx,
+                occupancy_before,
+                pending_before,
+                n,
+            );
+        }
+        self.pending_pulls += 1;
+        if let Some(output) = &mut self.pull_output {
+            output.send(self.server_idx).await;
+        } else {
+            self.pending_pulls = self.pending_pulls.saturating_sub(1);
+        }
+    }
+
+    async fn try_jbsq_pull_until_full(&mut self) {
+        while self.jbsq_can_pull() {
+            let pending_before = self.pending_pulls;
+            let occ_before = self.jbsq_occupancy();
+            self.try_jbsq_pull().await;
+            // Nested pull fulfillment may consume pending while raising occupancy.
+            if self.pending_pulls == pending_before && self.jbsq_occupancy() == occ_before {
+                break;
+            }
         }
     }
 
@@ -443,8 +512,49 @@ impl Replica {
                         hop.deadline,
                     );
                 }
-                // Pull (slot_release): start immediately, no local queue.
+                // Pull (slot_release): centralized starts immediately; jbsq enqueues locally.
                 if hop.slot_release.is_some() {
+                    if self.uses_jbsq() {
+                        let n = self.jbsq_n.unwrap_or(1);
+                        let queue_before = self
+                            .queue
+                            .iter()
+                            .filter(|w| matches!(w, ReplicaWork::Upstream(_)))
+                            .count() as u32;
+                        let in_flight_before = self.in_flight;
+                        let pending_before = self.pending_pulls;
+                        if let Some(audit) = &self.jbsq_audit {
+                            audit.record_pull_arrived(
+                                &self.microservice_id,
+                                self.server_idx,
+                                queue_before,
+                                in_flight_before,
+                                pending_before,
+                                n,
+                            );
+                        }
+                        self.pending_pulls = self.pending_pulls.saturating_sub(1);
+                        self.trace(
+                            &hop,
+                            cx,
+                            &format!(
+                                "Server({}/{}) jbsq enqueue endpoint={} upstream_queue={} inflight={} pending={}",
+                                self.microservice_id,
+                                self.server_idx,
+                                hop.endpoint,
+                                queue_before + 1,
+                                self.in_flight,
+                                self.pending_pulls
+                            ),
+                        );
+                        self.enqueue_work(ReplicaWork::Upstream(hop));
+                        self.sample_occupancy(cx.time());
+                        self.drain_queue(cx).await;
+                        self.sample_occupancy(cx.time());
+                        // Do not re-pull here: Output::send may re-enter this model and
+                        // nested pull-until-full can overshoot n before pending settles.
+                        return;
+                    }
                     self.trace(
                         &hop,
                         cx,
@@ -508,6 +618,10 @@ impl Replica {
     }
 
     pub async fn request_pull(&mut self, _: (), _cx: &Context<Self>) {
+        if self.uses_jbsq() {
+            self.try_jbsq_pull().await;
+            return;
+        }
         if self.pull_output.is_some() && self.in_flight < self.max_concurrency {
             if let Some(output) = &mut self.pull_output {
                 output.send(self.server_idx).await;
@@ -588,7 +702,9 @@ impl Replica {
 
         if let Some(release) = hop.slot_release.take() {
             self.release_outbound(release).await;
-            if self.pull_output.is_some() {
+            if self.uses_jbsq() {
+                // Re-pull after drain below once occupancy reflects completion.
+            } else if self.pull_output.is_some() {
                 if let Some(output) = &mut self.pull_output {
                     output.send(self.server_idx).await;
                 }
@@ -609,6 +725,9 @@ impl Replica {
             eprintln!("advance after local complete failed: {}", e);
         }
         self.drain_queue(cx).await;
+        if self.uses_jbsq() {
+            self.try_jbsq_pull_until_full().await;
+        }
         self.sample_occupancy(cx.time());
     }
 }

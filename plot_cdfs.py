@@ -336,6 +336,7 @@ def run_ms_simulation(
     service_dist: str = "exp",
     approx_sched: str | None = None,
     approx_share: int | None = None,
+    jbsq_n: int | None = None,
     scale: int | None = None,
 ) -> dict:
     cmd = [
@@ -371,6 +372,8 @@ def run_ms_simulation(
         cmd.extend(["--approx-sched", approx_sched])
     if approx_share is not None:
         cmd.extend(["--approx-share", str(approx_share)])
+    if jbsq_n is not None:
+        cmd.extend(["--jbsq-n", str(jbsq_n)])
     if scale is not None and scale != 0:
         cmd.extend(["--scale", str(scale)])
     result = run_subprocess(cmd, label="simulator")

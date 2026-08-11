@@ -32,8 +32,10 @@ fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsA
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: 1,
+        jbsq_n: None,
     }
 }
 
@@ -145,8 +147,10 @@ fn f1_nested_callgraph_completes() {
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: 1,
+        jbsq_n: None,
     })
     .unwrap()
     .expect("stats");

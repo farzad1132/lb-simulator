@@ -33,8 +33,10 @@ fn chain3_centralized_args(
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: audit,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: 1,
+        jbsq_n: None,
     }
 }
 

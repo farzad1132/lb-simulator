@@ -205,7 +205,9 @@ fn ms_centralized_rejects_caller_not_divisible_by_subset_count() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("must be divisible by the subset count")
-            || stderr.contains("centralized subsetting"),
+            || stderr.contains("must evenly divide")
+            || stderr.contains("centralized subsetting")
+            || stderr.contains("central pull-queue subsetting"),
         "unexpected stderr: {stderr}"
     );
 }

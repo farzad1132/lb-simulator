@@ -112,8 +112,10 @@ fn ms_approx_share_one_latency_close_to_approx() {
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: 1,
+        jbsq_n: None,
     })
     .unwrap()
     .expect("approx");
@@ -175,8 +177,10 @@ fn ms_approx_share_one_entry_occupancy_close_to_approx() {
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: 1,
+        jbsq_n: None,
     })
     .unwrap()
     .expect("approx");
@@ -336,8 +340,10 @@ fn ms_approx_share_two_entry_occupancy_balanced_within_groups() {
         service_dist: MsServiceDistribution::Exp,
         pull_audit: None,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: share,
+        jbsq_n: None,
     })
     .unwrap()
     .expect("share=2");

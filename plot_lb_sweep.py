@@ -36,7 +36,7 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 HUMAN_PERCENTILES = (1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 99, 100)
 CALIBRATION_N = 300_000
 SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
-SLO_VIOLATION_Y_MIN = 0.01
+SLO_VIOLATION_Y_MIN = 0.0
 SLO_VIOLATION_Y_MAX = 10.0
 
 SWEEP_CHOICES = ("load", "clients", "servers", "concurrency", "lb-subset-size")
@@ -44,11 +44,11 @@ SERIES_CHOICES = ("lb-policy",)
 METRIC_CHOICES = ("p99", "p50", "p90", "utilization", "slo-violation")
 
 POLICY_LEGEND_LABELS = {
-    "centralized": "CQ",
+    "centralized": "CPull",
     "random": "R",
     "least-request": "LR",
     "power-of-two": "P2C",
-    "round-robin": "RR",
+    "round-robin": "WRR",
 }
 PULL_POLICY_LEGEND_SUFFIX = {
     "least-request": None,  # omitted from legend (default pull policy)
@@ -500,14 +500,10 @@ def plot_sweep(
 
     metric_kind, _ = parse_metric(metric)
     for color_idx, (label, y_values) in enumerate(series):
-        plot_y = y_values
-        if metric_kind == "slo-violation":
-            # Log scale cannot plot non-positive values; clamp for display.
-            plot_y = [max(float(v), SLO_VIOLATION_Y_MIN) for v in y_values]
         plot_line(
             ax,
             x_values,
-            plot_y,
+            y_values,
             label=label,
             style=style,
             color_idx=color_idx,
@@ -525,11 +521,10 @@ def plot_sweep(
             xlabel=sweep_spec.xlabel,
             ylabel="SLO Violations (%)",
             title=title or "",
-            log_y=True,
             ylim=(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX),
-            auto_ticks=False,
+            y_step=1,
+            auto_ticks=True,
         )
-        ax.set_ylim(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX)
     else:
         grid.configure_labels(
             pattern="leftmost_y_bottom_x",

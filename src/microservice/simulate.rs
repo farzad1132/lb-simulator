@@ -26,11 +26,11 @@ use super::sidecar::{n_sidecars, sidecar_replicas, ApproxServerSidecar};
 use super::trace::MsTracer;
 use crate::approx_audit::ApproxPullAudit;
 use crate::ms_centralized_audit::MsCentralizedAudit;
+use crate::ms_jbsq_audit::MsJbsqAudit;
 use crate::policy::{
     validate_approx_sched, validate_approx_share, validate_centralized_subset,
-    validate_centralized_sched, validate_prequal_subset, validate_pull_policy, ApproxSchedKind,
-    CentralizedSchedKind, LoadBalancePolicyKind,
-    PullPolicyKind,
+    validate_centralized_sched, validate_jbsq_n, validate_prequal_subset, validate_pull_policy,
+    ApproxSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
 };
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
@@ -66,17 +66,21 @@ pub struct MsArgs {
     pub scale: u32,
     pub verbose: u8,
     pub scheduling: SchedulingPolicyKind,
-    /// Shared DownstreamBalancer pull-queue discipline (`centralized` only; default fcfs).
+    /// Shared DownstreamBalancer pull-queue discipline (`centralized`/`jbsq`; default fcfs).
     pub centralized_sched: CentralizedSchedKind,
     pub service_dist: MsServiceDistribution,
     /// When set, records approx pull/intent events for post-run invariant checks (tests).
     pub pull_audit: Option<Arc<ApproxPullAudit>>,
     /// When set, records centralized enqueue/dispatch events for post-run subset checks (tests).
     pub centralized_audit: Option<Arc<MsCentralizedAudit>>,
+    /// When set, records jbsq pull occupancy events for post-run invariant checks (tests).
+    pub jbsq_audit: Option<Arc<MsJbsqAudit>>,
     /// Approx outbound pull scheduling: None = bound 1:1; Some(Fcfs|Edf|EdfPlus) = unbound queue head.
     pub approx_sched: Option<ApproxSchedKind>,
     /// Replicas per shared approx sidecar (`approx-share` only). Default 1.
     pub approx_share: u32,
+    /// Max local occupancy (`queue + in_flight`) for jbsq pulls. Required when `lb_policy` is jbsq.
+    pub jbsq_n: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -487,7 +491,7 @@ fn validate_ms_shared_subset(
             "--lb-subset-size is not supported with --lb-policy cl, cl-lr, or corr".into(),
         );
     }
-    if !lb_policy.is_centralized() {
+    if !lb_policy.uses_central_pull_queue() {
         return Ok(());
     }
 
@@ -507,7 +511,7 @@ fn validate_ms_shared_subset(
                 lb_subset_policy,
             )
             .map_err(|err| {
-                format!("centralized subsetting for caller {caller} → target {target}: {err}")
+                format!("central pull-queue subsetting for caller {caller} → target {target}: {err}")
             })?;
         }
     }
@@ -520,6 +524,7 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
     validate_approx_share(args.lb_policy, args.approx_share)?;
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)?;
     validate_centralized_sched(args.lb_policy, args.centralized_sched)?;
+    validate_jbsq_n(args.lb_policy, args.jbsq_n)?;
     rng::enter_run(args.seed);
     let result = run_inner(args);
     rng::exit_run();
@@ -743,7 +748,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
         sorted_targets.sort();
 
         let use_centralized_subsets =
-            args.lb_policy.is_centralized() && args.lb_subset_size > 0;
+            args.lb_policy.uses_central_pull_queue() && args.lb_subset_size > 0;
 
         for target in &sorted_targets {
             let n_servers = graph.microservices[target].replicas as usize;
@@ -1343,11 +1348,13 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             }
 
             let mut pull_output = None;
-            if args.lb_policy.is_centralized() && downstream_target_set.contains(microservice_id) {
+            if args.lb_policy.uses_central_pull_queue()
+                && downstream_target_set.contains(microservice_id)
+            {
                 let lb_id = server_to_lb
                     .get(microservice_id)
                     .map(|owned| owned[i])
-                    .expect("server_to_lb for centralized target");
+                    .expect("server_to_lb for central pull-queue target");
                 let db_address = downstream_balancer_addresses
                     .get(&(microservice_id.clone(), lb_id))
                     .expect("downstream balancer address");
@@ -1412,6 +1419,11 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 }
             }
 
+            let jbsq_n = if args.lb_policy.is_jbsq() && pull_output.is_some() {
+                args.jbsq_n
+            } else {
+                None
+            };
             let replica = Replica::new(ReplicaConfig {
                 graph: graph.clone(),
                 microservice_id: microservice_id.clone(),
@@ -1432,12 +1444,19 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 edge_release_idx,
                 probe_reply_outputs,
                 pull_audit: pull_audit.clone(),
+                jbsq_audit: args.jbsq_audit.clone(),
+                jbsq_n,
                 scheduling: args.scheduling,
                 approx_sched: args.approx_sched,
             });
             bench = bench.add_model(replica, mb, &format!("{microservice_id}-server-{i}"));
             if let Some(pull_input) = pull_input {
-                pull_registrations.push((pull_input, concurrency));
+                let warm_pulls = if args.lb_policy.is_jbsq() {
+                    args.jbsq_n.unwrap_or(concurrency)
+                } else {
+                    concurrency
+                };
+                pull_registrations.push((pull_input, warm_pulls));
             }
         }
     }
@@ -1590,8 +1609,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         }
     }
 
@@ -1619,8 +1640,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         })
         .unwrap()
         .expect("stats");
@@ -1680,8 +1703,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1728,8 +1753,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         })
         .unwrap()
         .expect("stats");
@@ -1773,8 +1800,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1808,8 +1837,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         };
 
         let stats = run(&chain_args(LoadBalancePolicyKind::Centralized))
@@ -1891,8 +1922,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         })
         .unwrap()
         .expect("stats");
@@ -2094,8 +2127,10 @@ mod tests {
             service_dist: MsServiceDistribution::Exp,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         })
         .unwrap()
         .expect("stats")
@@ -2131,8 +2166,10 @@ mod tests {
             service_dist: MsServiceDistribution::Fixed,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         })
         .unwrap()
         .expect("stats");
@@ -2174,8 +2211,10 @@ mod tests {
             service_dist: MsServiceDistribution::Bimodal,
             pull_audit: None,
             centralized_audit: None,
+            jbsq_audit: None,
             approx_sched: None,
             approx_share: 1,
+            jbsq_n: None,
         })
         .unwrap()
         .expect("stats");

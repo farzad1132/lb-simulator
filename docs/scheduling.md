@@ -117,16 +117,17 @@ Shared centralized pull-queue order is controlled separately by `--centralized-s
 |-----------|------------------------------|
 | Push (`random`, `power-of-two`, `round-robin`, `least-request`, **`cl`**, **`corr`**) | EDF affects every replica queue when servers are saturated |
 | **`centralized`** | EDF affects **ingress** (entry) replica queues. Downstream replicas bypass local queuing via `slot_release`, so replica EDF has no effect on downstream hops. Use `--centralized-sched edf` to reorder the shared pull queue. |
+| **`jbsq`** | EDF affects ingress and **downstream** replica queues (jbsq enqueues pulled work locally). Use `--centralized-sched edf` to reorder the shared pull queue. |
 
 ## Centralized pull-queue scheduling (`--centralized-sched`)
 
-With `--lb-policy centralized`, outbound calls wait in a shared `DownstreamBalancer` queue until a downstream replica pulls. By default that queue is **FCFS** (`--centralized-sched fcfs`). With **EDF** (`--centralized-sched edf`), newly enqueued calls are inserted by `Hop.deadline` (same deadline assignment as replica EDF). Waiting pullers remain FIFO.
+With `--lb-policy centralized` or **`jbsq`**, outbound calls wait in a shared `DownstreamBalancer` queue until a downstream replica pulls. By default that queue is **FCFS** (`--centralized-sched fcfs`). With **EDF** (`--centralized-sched edf`), newly enqueued calls are inserted by `Hop.deadline` (same deadline assignment as replica EDF). Waiting pullers remain FIFO.
 
 | Flag | Default | Values | Description |
 |------|---------|--------|-------------|
-| `--centralized-sched` | `fcfs` | `fcfs`, `edf` | Shared pull-queue discipline under `--lb-policy centralized` |
+| `--centralized-sched` | `fcfs` | `fcfs`, `edf` | Shared pull-queue discipline under `--lb-policy centralized` or `jbsq` |
 
-`--centralized-sched edf` is rejected unless `--lb-policy centralized`. Default `fcfs` is a no-op for other policies.
+`--centralized-sched edf` is rejected unless `--lb-policy centralized` or `jbsq`. Default `fcfs` is a no-op for other policies.
 
 Example:
 

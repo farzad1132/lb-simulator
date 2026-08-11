@@ -170,6 +170,8 @@ pub enum LoadBalancePolicyKind {
     RoundRobin,
     LeastRequest,
     Centralized,
+    #[value(name = "jbsq")]
+    Jbsq,
     #[value(name = "approx")]
     Approx,
     #[value(name = "approx-share")]
@@ -194,7 +196,7 @@ impl LoadBalancePolicyKind {
                 next: 0,
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
-            Self::Centralized => Box::new(CentralizedPolicy),
+            Self::Centralized | Self::Jbsq => Box::new(CentralizedPolicy),
             Self::Approx | Self::ApproxShare => Box::new(ApproxPolicy),
             Self::Prequal => Box::new(PrequalPolicy),
             Self::Cl | Self::ClLr | Self::Corr => Box::new(PowerOfTwoPolicy),
@@ -203,6 +205,15 @@ impl LoadBalancePolicyKind {
 
     pub fn is_centralized(self) -> bool {
         matches!(self, Self::Centralized)
+    }
+
+    pub fn is_jbsq(self) -> bool {
+        matches!(self, Self::Jbsq)
+    }
+
+    /// Shared DownstreamBalancer pull queue (centralized or jbsq).
+    pub fn uses_central_pull_queue(self) -> bool {
+        matches!(self, Self::Centralized | Self::Jbsq)
     }
 
     pub fn is_approx(self) -> bool {
@@ -223,7 +234,10 @@ impl LoadBalancePolicyKind {
     }
 
     pub fn is_pull_based(self) -> bool {
-        matches!(self, Self::Centralized | Self::Approx | Self::ApproxShare)
+        matches!(
+            self,
+            Self::Centralized | Self::Jbsq | Self::Approx | Self::ApproxShare
+        )
     }
 
     pub fn is_cl(self) -> bool {
@@ -237,14 +251,14 @@ impl LoadBalancePolicyKind {
     pub fn is_ms_only(self) -> bool {
         matches!(
             self,
-            Self::Cl | Self::ClLr | Self::Corr | Self::ApproxShare
+            Self::Cl | Self::ClLr | Self::Corr | Self::ApproxShare | Self::Jbsq
         )
     }
 
     pub fn uses_shared_downstream(self) -> bool {
         matches!(
             self,
-            Self::Cl | Self::ClLr | Self::Centralized | Self::Corr
+            Self::Cl | Self::ClLr | Self::Centralized | Self::Jbsq | Self::Corr
         )
     }
 
@@ -253,6 +267,7 @@ impl LoadBalancePolicyKind {
             Self::Cl
             | Self::ClLr
             | Self::Centralized
+            | Self::Jbsq
             | Self::Corr
             | Self::Approx
             | Self::ApproxShare
@@ -304,18 +319,32 @@ pub fn validate_approx_sched(
     Ok(())
 }
 
-/// `--centralized-sched edf` is only valid with `--lb-policy centralized`.
-/// Default `fcfs` is allowed with any policy (no-op when not centralized).
+/// `--centralized-sched edf` is only valid with `--lb-policy centralized` or `jbsq`.
+/// Default `fcfs` is allowed with any policy (no-op when not a central pull queue).
 pub fn validate_centralized_sched(
     lb_policy: LoadBalancePolicyKind,
     centralized_sched: CentralizedSchedKind,
 ) -> Result<(), String> {
-    if centralized_sched.uses_edf() && !lb_policy.is_centralized() {
+    if centralized_sched.uses_edf() && !lb_policy.uses_central_pull_queue() {
         return Err(
-            "--centralized-sched edf is only valid with --lb-policy centralized".into(),
+            "--centralized-sched edf is only valid with --lb-policy centralized or jbsq"
+                .into(),
         );
     }
     Ok(())
+}
+
+/// `--jbsq-n` is required with `--lb-policy jbsq` (no default) and must be >= 1.
+pub fn validate_jbsq_n(
+    lb_policy: LoadBalancePolicyKind,
+    jbsq_n: Option<u32>,
+) -> Result<(), String> {
+    match (lb_policy.is_jbsq(), jbsq_n) {
+        (true, None) => Err("--jbsq-n is required with --lb-policy jbsq".into()),
+        (true, Some(0)) => Err("--jbsq-n must be >= 1 with --lb-policy jbsq".into()),
+        (false, Some(_)) => Err("--jbsq-n is only valid with --lb-policy jbsq".into()),
+        _ => Ok(()),
+    }
 }
 
 pub fn validate_approx_share(
@@ -347,9 +376,9 @@ pub fn validate_prequal_subset(
     Ok(())
 }
 
-/// Centralized subsetting is a strict partition: `k` must divide `n_servers`,
+/// Central pull-queue subsetting is a strict partition: `k` must divide `n_servers`,
 /// clients must be divisible by the subset count, and only deterministic assignment
-/// is allowed. No-op unless policy is centralized and `lb_subset_size > 0`.
+/// is allowed. No-op unless policy uses a central pull queue and `lb_subset_size > 0`.
 pub fn validate_centralized_subset(
     lb_policy: LoadBalancePolicyKind,
     servers: u32,
@@ -357,22 +386,27 @@ pub fn validate_centralized_subset(
     lb_subset_size: u32,
     lb_subset_policy: crate::subset::SubsetPolicyKind,
 ) -> Result<(), String> {
-    if !lb_policy.is_centralized() || lb_subset_size == 0 {
+    if !lb_policy.uses_central_pull_queue() || lb_subset_size == 0 {
         return Ok(());
     }
 
+    let policy_name = if lb_policy.is_jbsq() {
+        "jbsq"
+    } else {
+        "centralized"
+    };
+
     if lb_subset_policy != crate::subset::SubsetPolicyKind::Deterministic {
-        return Err(
-            "--lb-subset-policy random is not supported with --lb-policy centralized; use deterministic"
-                .into(),
-        );
+        return Err(format!(
+            "--lb-subset-policy random is not supported with --lb-policy {policy_name}; use deterministic"
+        ));
     }
 
     let n = servers.max(1) as usize;
     let k = (lb_subset_size as usize).min(n).max(1);
     if n % k != 0 {
         return Err(format!(
-            "--lb-subset-size {lb_subset_size} must evenly divide --servers {servers} with --lb-policy centralized"
+            "--lb-subset-size {lb_subset_size} must evenly divide --servers {servers} with --lb-policy {policy_name}"
         ));
     }
 
@@ -380,7 +414,7 @@ pub fn validate_centralized_subset(
     let n_clients = clients.max(1) as usize;
     if n_clients % subset_count != 0 {
         return Err(format!(
-            "--clients {clients} must be divisible by the subset count ({subset_count} = servers/subset-size) with --lb-policy centralized"
+            "--clients {clients} must be divisible by the subset count ({subset_count} = servers/subset-size) with --lb-policy {policy_name}"
         ));
     }
 
@@ -568,8 +602,20 @@ mod tests {
         assert!(LoadBalancePolicyKind::Cl.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::ClLr.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Centralized.uses_shared_downstream());
+        assert!(LoadBalancePolicyKind::Jbsq.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Corr.uses_shared_downstream());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.uses_shared_downstream());
+    }
+
+    #[test]
+    fn jbsq_policy_kind_flags() {
+        assert!(LoadBalancePolicyKind::Jbsq.is_jbsq());
+        assert!(LoadBalancePolicyKind::Jbsq.uses_central_pull_queue());
+        assert!(LoadBalancePolicyKind::Centralized.uses_central_pull_queue());
+        assert!(!LoadBalancePolicyKind::Jbsq.is_centralized());
+        assert!(LoadBalancePolicyKind::Jbsq.is_pull_based());
+        assert!(LoadBalancePolicyKind::Jbsq.is_ms_only());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_jbsq());
     }
 
     #[test]
@@ -578,9 +624,38 @@ mod tests {
         assert!(LoadBalancePolicyKind::ClLr.is_ms_only());
         assert!(LoadBalancePolicyKind::Corr.is_ms_only());
         assert!(LoadBalancePolicyKind::ApproxShare.is_ms_only());
+        assert!(LoadBalancePolicyKind::Jbsq.is_ms_only());
         assert!(!LoadBalancePolicyKind::Approx.is_ms_only());
         assert!(!LoadBalancePolicyKind::Centralized.is_ms_only());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_ms_only());
+    }
+
+    #[test]
+    fn validate_jbsq_n_rules() {
+        assert!(validate_jbsq_n(LoadBalancePolicyKind::Jbsq, Some(1)).is_ok());
+        assert!(validate_jbsq_n(LoadBalancePolicyKind::Jbsq, Some(3)).is_ok());
+        let err = validate_jbsq_n(LoadBalancePolicyKind::Jbsq, None).unwrap_err();
+        assert!(err.contains("--jbsq-n is required"));
+        let err = validate_jbsq_n(LoadBalancePolicyKind::Jbsq, Some(0)).unwrap_err();
+        assert!(err.contains("must be >= 1"));
+        let err = validate_jbsq_n(LoadBalancePolicyKind::Centralized, Some(2)).unwrap_err();
+        assert!(err.contains("only valid with --lb-policy jbsq"));
+        assert!(validate_jbsq_n(LoadBalancePolicyKind::PowerOfTwo, None).is_ok());
+    }
+
+    #[test]
+    fn validate_centralized_sched_allows_edf_for_jbsq() {
+        assert!(validate_centralized_sched(
+            LoadBalancePolicyKind::Jbsq,
+            CentralizedSchedKind::Edf,
+        )
+        .is_ok());
+        let err = validate_centralized_sched(
+            LoadBalancePolicyKind::PowerOfTwo,
+            CentralizedSchedKind::Edf,
+        )
+        .unwrap_err();
+        assert!(err.contains("centralized or jbsq"));
     }
 
     #[test]
@@ -688,7 +763,7 @@ mod tests {
             CentralizedSchedKind::Edf,
         )
         .unwrap_err();
-        assert!(err.contains("only valid with --lb-policy centralized"));
+        assert!(err.contains("only valid with --lb-policy centralized or jbsq"));
         assert!(CentralizedSchedKind::Edf.uses_edf());
         assert!(!CentralizedSchedKind::Fcfs.uses_edf());
     }

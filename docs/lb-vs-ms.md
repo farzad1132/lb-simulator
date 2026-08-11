@@ -13,13 +13,13 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
-| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Approx-share** (`approx-share`, ms-only): approx protocol with shared sidecars (`--approx-share`). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
+| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **JBSQ** (`jbsq`, ms-only): same shared pull queues as centralized with occupancy bound `--jbsq-n`. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Approx-share** (`approx-share`, ms-only): approx protocol with shared sidecars (`--approx-share`). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
 | Local inflight load view | yes | yes | Typical push policies use each balancer's **local inflight** counters; **prequal** additionally probes server/replica `queue.len + in_flight` |
-| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, `approx-share`, or with `cl`, `cl-lr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
+| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, `approx-share`, or with `cl`, `cl-lr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` / `jbsq` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
-| Centralized pull-queue scheduling | — | yes | ms: `--centralized-sched fcfs` (default) or `edf` with `--lb-policy centralized`; lb centralized remains FCFS; see [scheduling.md](scheduling.md#centralized-pull-queue-scheduling---centralized-sched) |
+| Centralized pull-queue scheduling | — | yes | ms: `--centralized-sched fcfs` (default) or `edf` with `--lb-policy centralized` or `jbsq`; lb centralized remains FCFS; see [scheduling.md](scheduling.md#centralized-pull-queue-scheduling---centralized-sched) |
 | Poisson arrivals | yes | yes | lb: from `--load` (exponential default); ms: per-API `rps` in `load.json` |
 | Arrival distribution | yes | — | lb: `--arrival exponential|constant`; ms: exponential only |
 | SLO violation rate | yes | yes | lb: optional `--slo` (seconds); ms: `slo_ms` per API in `load.json` |
@@ -27,6 +27,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **Express lane** | yes | — | lb-only; see [expresslane.md](expresslane.md) |
 | **Work shedding** | yes | — | lb-only; `--shed-delay`; see [work-shedding.md](work-shedding.md) |
 | **Centralized pull dispatch** | yes | yes | lb: one queue per subset (or one global queue); servers pull on spare capacity. ms: one pull queue per downstream target (or `S` partitioned queues when `k > 0`; outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
+| **JBSQ bounded central pull** | — | yes (outbound only) | Same topology as ms `centralized`; pull while occupancy `< --jbsq-n`; see [jbsq-policy.md](jbsq-policy.md) |
 | **Approx decentralized pull** | yes | yes (outbound only) | See [approx-policy.md](approx-policy.md) |
 | **Approx-share (shared sidecars)** | — | yes (outbound only) | `--approx-share N` replicas per sidecar; see [approx-policy.md](approx-policy.md#approx-share-ms-only) |
 | **Prequal async probe pool** | yes | yes (outbound only) | See [prequal-policy.md](prequal-policy.md); ms ingress stays P2C |
@@ -39,7 +40,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Multiple ingress client LBs | yes | — | `--clients`: independent arrival sources; push policies use one LB per client; centralized uses one shared dispatcher per subset (or one global when `k=0`) |
 | Per-API ingress LB | — | yes | `EdgeBalancer`: one per API, routes user traffic to entry replicas |
 | Per-replica outbound LB | — | yes | `ReplicaBalancer`: one per replica (default push policies) |
-| Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl`, `cl-lr`, `centralized`, or `corr`) |
+| Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl`, `cl-lr`, `centralized`, `jbsq`, or `corr`) |
 | Flat topology CLI | yes | — | `--servers`, `--concurrency`, `--load` |
 | Callgraph topology | — | yes | `--callgraph`, `--load-file` |
 | Service distributions | yes | yes | lb: `exponential`, `constant`, `bimodal` (+ CLI modes); ms: `exp`, `fixed`, `bimodal` via `--service-dist` |

@@ -27,8 +27,10 @@ fn chain3_approx_args(n: u32, seed: u64, audit: Option<std::sync::Arc<ApproxPull
         service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: 1,
+        jbsq_n: None,
     }
 }
 
@@ -93,8 +95,10 @@ fn ms_approx_pull_invariants_with_power_of_two_pull_policy() {
         service_dist: MsServiceDistribution::Exp,
         pull_audit: Some(audit.clone()),
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: None,
         approx_share: 1,
+        jbsq_n: None,
     })
     .unwrap()
     .expect("simulation should complete");

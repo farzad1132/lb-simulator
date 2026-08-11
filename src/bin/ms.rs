@@ -3,8 +3,8 @@ use lb::microservice::{
     MsArgs, MsServiceDistribution, MsStats, OutputFormat, print_human_stats, run,
 };
 use lb::policy::{
-    validate_approx_share, validate_centralized_sched, validate_prequal_subset, ApproxSchedKind,
-    CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    validate_approx_share, validate_centralized_sched, validate_jbsq_n, validate_prequal_subset,
+    ApproxSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
 };
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -51,6 +51,8 @@ struct Args {
     approx_sched: Option<ApproxSchedKind>,
     #[arg(long, default_value_t = 1)]
     approx_share: u32,
+    #[arg(long)]
+    jbsq_n: Option<u32>,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
     verbose: u8,
 }
@@ -60,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_prequal_subset(cli.lb_policy, cli.lb_subset_size)?;
     validate_approx_share(cli.lb_policy, cli.approx_share)?;
     validate_centralized_sched(cli.lb_policy, cli.centralized_sched)?;
+    validate_jbsq_n(cli.lb_policy, cli.jbsq_n)?;
     let args = MsArgs {
         callgraph: cli.callgraph,
         load_file: cli.load_file,
@@ -81,8 +84,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         verbose: cli.verbose,
         pull_audit: None,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: cli.approx_sched,
         approx_share: cli.approx_share,
+        jbsq_n: cli.jbsq_n,
     };
 
     let stats = run(&args)?;
@@ -221,6 +226,23 @@ mod tests {
             "corr",
         ]);
         assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Corr);
+    }
+
+    #[test]
+    fn parses_jbsq_lb_policy_and_n() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "jbsq",
+            "--jbsq-n",
+            "3",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Jbsq);
+        assert_eq!(cli.jbsq_n, Some(3));
     }
 
     #[test]

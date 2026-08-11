@@ -33,8 +33,10 @@ fn approx_args(
         service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
         centralized_audit: None,
+        jbsq_audit: None,
         approx_sched: Some(approx_sched),
         approx_share: 1,
+        jbsq_n: None,
     }
 }
 

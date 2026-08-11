@@ -36,6 +36,7 @@ fn approx_args(
         centralized_audit: None,
         approx_sched,
         approx_share: 1,
+        jbsq_n: None,
     }
 }
 

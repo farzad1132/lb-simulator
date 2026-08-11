@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Scatter of per-tier average occupancy for MS configs at a single load.
+"""Standalone cumulative queueing variance line plot for MS configs at a single load.
 
-Requires --chain {3,6,10}. X-axis is microservice tier; Y-axis is mean
-server_avg_queue_inflight over that tier's replicas. One point per config at
-each tier.
+Requires --chain {3,6,10}. Configs are selected like plot_ms_occupancy_compare.py.
+Color encodes config; shared marker/linestyle encodes Theory: Independent
+(sum of per-hop queueing variances) vs Simulation
+(var of cumulative_queueing_delay_ms) by microservice tier.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import os
 import sys
 import tempfile
 from pathlib import Path
 
-_CACHE_ROOT = Path(tempfile.gettempdir()) / "lb-ms-occupancy-compare-plot-cache"
+_CACHE_ROOT = Path(tempfile.gettempdir()) / "lb-ms-cum-queueing-var-plot-cache"
 _MPL_CACHE = _CACHE_ROOT / "matplotlib"
 _XDG_CACHE = _CACHE_ROOT / "xdg"
 _MPL_CACHE.mkdir(parents=True, exist_ok=True)
@@ -48,21 +50,32 @@ from plot_ms_chain_load_compare import (
 from plotting_primitive import (
     ACM_COMPACT_HALF,
     SubplotGrid,
-    distinct_series_styles,
+    plot_line,
 )
+
+# Shared across configs: Theory vs Simulation distinguished only by style.
+THEORY_MARKER = "o"
+THEORY_LINESTYLE = "--"
+SIMULATION_MARKER = "s"
+SIMULATION_LINESTYLE = "-"
+
+sys.path.insert(0, str(REPO_ROOT / "analyze"))
+from ms_service_distributions import finalize_violin_y_axis  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
-    MsExperimentConfig("CPull", "centralized"),
-    MsExperimentConfig("CPush", "cl"),
+    #MsExperimentConfig("CPull", "centralized"),
+    #MsExperimentConfig("CPush", "cl"),
     MsExperimentConfig("P2C", "power-of-two"),
-    MsExperimentConfig("LR", "least-request"),
-    MsExperimentConfig("WRR", "round-robin"),
-    MsExperimentConfig("R", "random"),
-    MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
+    #MsExperimentConfig("P2C+EDF", "power-of-two", scheduling="edf"),
+    #MsExperimentConfig("LR", "least-request"),
+    #MsExperimentConfig("WRR", "round-robin"),
+    #MsExperimentConfig("R", "random"),
+    #MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
     #MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs"),
+    #MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
 ]
 
 
@@ -81,19 +94,43 @@ def microservice_order(data: dict) -> list[str]:
     raise SystemExit("ms JSON missing microservice_order; rebuild the ms binary")
 
 
-def per_tier_average_occupancy(data: dict, microservices: list[str]) -> np.ndarray:
-    by_ms = data.get("server_avg_queue_inflight") or {}
+def validate_queueing_fields(data: dict, microservices: list[str]) -> None:
+    by_ms = data.get("by_microservice")
     if not by_ms:
-        raise SystemExit("ms JSON missing server_avg_queue_inflight")
-    values: list[float] = []
+        raise SystemExit("ms JSON missing by_microservice; rebuild the ms binary")
     for ms in microservices:
         if ms not in by_ms:
-            raise SystemExit(f"ms JSON missing server_avg_queue_inflight for {ms}")
-        replica_avgs = [float(v) for v in by_ms[ms].values()]
-        if not replica_avgs:
-            raise SystemExit(f"server_avg_queue_inflight has no replicas for {ms}")
-        values.append(float(np.mean(replica_avgs)))
-    return np.asarray(values, dtype=float)
+            raise SystemExit(f"ms JSON missing by_microservice entry for {ms}")
+        ms_stats = by_ms[ms]
+        if "queueing_delay_ms" not in ms_stats:
+            raise SystemExit(
+                "ms JSON missing by_microservice queueing_delay_ms; rebuild the ms binary"
+            )
+        if "cumulative_queueing_delay_ms" not in ms_stats:
+            raise SystemExit(
+                "ms JSON missing by_microservice cumulative_queueing_delay_ms; "
+                "rebuild the ms binary"
+            )
+
+
+def cumulative_queueing_var_series(
+    data: dict,
+    microservices: list[str],
+) -> tuple[list[float], list[float]]:
+    by_ms = data["by_microservice"]
+    per_hop_var = [
+        float(np.var(by_ms[ms]["queueing_delay_ms"], ddof=0))
+        for ms in microservices
+    ]
+    theoretical_var = [
+        float(sum(per_hop_var[: idx + 1]))
+        for idx in range(len(microservices))
+    ]
+    simulation_var = [
+        float(np.var(by_ms[ms]["cumulative_queueing_delay_ms"], ddof=0))
+        for ms in microservices
+    ]
+    return theoretical_var, simulation_var
 
 
 def format_run_summary(
@@ -101,7 +138,8 @@ def format_run_summary(
     config: MsExperimentConfig,
     load: float,
     rps: float,
-    tier_occupancy: np.ndarray,
+    theoretical_var: list[float],
+    simulation_var: list[float],
 ) -> str:
     parts = [
         f"label={config.label}",
@@ -114,6 +152,8 @@ def format_run_summary(
         parts.append(f"pull_policy={config.pull_policy}")
     if config.approx_sched is not None:
         parts.append(f"approx_sched={config.approx_sched}")
+    if config.lb_policy == "approx-share":
+        parts.append(f"approx_share={config.approx_share}")
     if config.lb_policy == "centralized" and config.centralized_sched != "fcfs":
         parts.append(f"centralized_sched={config.centralized_sched}")
     if config.scale is not None:
@@ -121,12 +161,14 @@ def format_run_summary(
     if config.service_dist is not None:
         parts.append(f"service_dist={config.service_dist}")
     parts.append(f"rps={rps:g}")
-    tier_str = ",".join(f"{v:.3f}" for v in tier_occupancy)
-    parts.append(f"tier_avg_occupancy=[{tier_str}]")
+    theory_str = ",".join(f"{v:.3f}" for v in theoretical_var)
+    sim_str = ",".join(f"{v:.3f}" for v in simulation_var)
+    parts.append(f"theory_var=[{theory_str}]")
+    parts.append(f"simulation_var=[{sim_str}]")
     return "  ".join(parts)
 
 
-def run_occupancy_compare(
+def run_cum_queueing_var_compare(
     binary: Path,
     configs: list[MsExperimentConfig],
     *,
@@ -136,10 +178,10 @@ def run_occupancy_compare(
     n: int,
     seed: int | None,
     default_service_dist: str = "exp",
-) -> tuple[list[str], list[tuple[str, np.ndarray]]]:
-    """Return (microservices, [(label, per-tier avg occupancy)])."""
+) -> tuple[list[str], list[tuple[str, list[float], list[float]]]]:
+    """Return (microservices, [(label, theory_var, simulation_var)])."""
     microservices: list[str] | None = None
-    series: list[tuple[str, np.ndarray]] = []
+    series: list[tuple[str, list[float], list[float]]] = []
 
     for config in tqdm(configs, desc="config", unit="run"):
         rps = load * resolve_config_rps(config)
@@ -160,6 +202,9 @@ def run_occupancy_compare(
             rps=rps,
             service_dist=service_dist,
             approx_sched=config.approx_sched,
+            approx_share=(
+                config.approx_share if config.lb_policy == "approx-share" else None
+            ),
             scale=config.scale,
         )
         order = microservice_order(data)
@@ -170,14 +215,18 @@ def run_occupancy_compare(
                 f"microservice_order mismatch for {config.label!r}: "
                 f"{order} vs {microservices}"
             )
-        tier_occupancy = per_tier_average_occupancy(data, microservices)
-        series.append((config.label, tier_occupancy))
+        validate_queueing_fields(data, microservices)
+        theoretical_var, simulation_var = cumulative_queueing_var_series(
+            data, microservices
+        )
+        series.append((config.label, theoretical_var, simulation_var))
         _log(
             format_run_summary(
                 config=config,
                 load=load,
                 rps=rps,
-                tier_occupancy=tier_occupancy,
+                theoretical_var=theoretical_var,
+                simulation_var=simulation_var,
             )
         )
 
@@ -186,59 +235,114 @@ def run_occupancy_compare(
     return microservices, series
 
 
-def plot_occupancy_scatter(
+def plot_cum_queueing_var_lines(
     microservices: list[str],
-    series: list[tuple[str, np.ndarray]],
+    series: list[tuple[str, list[float], list[float]]],
     *,
     output_path: Path,
 ) -> None:
-    style = ACM_COMPACT_HALF
+    from matplotlib.lines import Line2D
+
+    if not series:
+        raise SystemExit("expected at least 1 config, got 0")
+    style = replace(ACM_COMPACT_HALF, aspect_ratio=0.4)
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
 
-    n_tiers = len(microservices)
-    positions = list(range(n_tiers))
-    series_styles = distinct_series_styles(len(series), style)
-    all_y: list[float] = []
-
-    for cfg_idx, (label, tier_occupancy) in enumerate(series):
-        line_style = series_styles[cfg_idx]
-        ys = [float(v) for v in tier_occupancy]
-        all_y.extend(ys)
-        ax.scatter(
+    positions = list(range(len(microservices)))
+    all_values: list[float] = []
+    config_handles: list[Line2D] = []
+    config_labels: list[str] = []
+    for cfg_idx, (label, theoretical_var, simulation_var) in enumerate(series):
+        color = style.colors[cfg_idx % len(style.colors)]
+        all_values.extend(theoretical_var)
+        all_values.extend(simulation_var)
+        plot_line(
+            ax,
             positions,
-            ys,
-            label=label,
-            color=line_style["color"],
-            marker=line_style["marker"],
-            #s=(style.marker_size * 1.8) ** 2,
-            edgecolors="black",
-            linewidths=0.5,
-            zorder=3,
+            theoretical_var,
+            style=style,
+            show_markers=True,
+            color=color,
+            marker=THEORY_MARKER,
+            linestyle=THEORY_LINESTYLE,
         )
-
-    y_hi = max(all_y) if all_y else 1.0
-    if y_hi <= 0:
-        y_hi = 1.0
-    y_pad = style.axis_guard_fraction * y_hi
+        plot_line(
+            ax,
+            positions,
+            simulation_var,
+            style=style,
+            show_markers=True,
+            color=color,
+            marker=SIMULATION_MARKER,
+            linestyle=SIMULATION_LINESTYLE,
+        )
+        config_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=color,
+                linestyle="-",
+                marker="None",
+                linewidth=style.line_width,
+            )
+        )
+        config_labels.append(label)
 
     ax.set_xticks(positions)
     ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
-    ax.set_xlim(-0.5, n_tiers - 0.5)
-    ax.set_ylim(0.0, y_hi + y_pad)
-
+    finalize_violin_y_axis(ax, np.asarray(all_values, dtype=float), style=style)
+    if positions:
+        ax.set_xlim(positions[0] - 0.5, positions[-1] + 0.5)
     grid.configure_ax(
         ax,
-        xlabel="Microservice tier",
-        ylabel="Average Occupancy",
+        xlabel="Microservice index",
+        ylabel="Cum. Queue. Var.",
         title="",
         show_xlabel=True,
         show_ylabel=True,
+        show_title=False,
         show_xticklabels=True,
         show_yticklabels=True,
         auto_ticks=False,
     )
-    grid.add_shared_legend(position="top")
+
+    style_handles = [
+        Line2D(
+            [0],
+            [0],
+            color="black",
+            linestyle=THEORY_LINESTYLE,
+            marker=THEORY_MARKER,
+            markersize=style.marker_size,
+            linewidth=style.line_width,
+            label="Theory: Independent",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color="black",
+            linestyle=SIMULATION_LINESTYLE,
+            marker=SIMULATION_MARKER,
+            markersize=style.marker_size,
+            linewidth=style.line_width,
+            label="Simulation",
+        ),
+    ]
+    ax.legend(
+        handles=style_handles,
+        fontsize=max(style.legend_size - 1, 5),
+        loc="upper left",
+        frameon=False,
+    )
+    if len(series) > 1:
+        grid.add_shared_legend(
+            position="top",
+            handles=config_handles,
+            labels=config_labels,
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     grid.save(output_path)
 
 
@@ -248,7 +352,7 @@ def default_output_path(
     scale: int | None = None,
     lb_subset_size: int | None = None,
 ) -> Path:
-    name = f"ms_chain{chain}_occupancy_compare"
+    name = f"ms_chain{chain}_cumulative_queueing_var"
     if scale is not None and scale != 0:
         name += f"_scale{scale}"
     if lb_subset_size is not None:
@@ -266,8 +370,8 @@ def resolve_fixtures(args: argparse.Namespace) -> tuple[Path, Path]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Scatter of per-tier average occupancy for MS experiment configs "
-            "at a single load."
+            "Line plot of cumulative queueing variance (Theory: Independent vs "
+            "Simulation) for MS experiment configs at a single load."
         ),
     )
     parser.add_argument(
@@ -375,11 +479,13 @@ def main() -> None:
         rps=args.rps,
         service_dist=args.service_dist,
     )
+    if not configs:
+        raise SystemExit("no configs selected")
 
     callgraph, load_file = resolve_fixtures(args)
     binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="ms")
 
-    microservices, series = run_occupancy_compare(
+    microservices, series = run_cum_queueing_var_compare(
         binary,
         configs,
         load=args.load,
@@ -395,7 +501,7 @@ def main() -> None:
         lb_subset_size=args.lb_subset_size,
     )
     output_path = output_path_with_comment(output_path, args.comment)
-    plot_occupancy_scatter(
+    plot_cum_queueing_var_lines(
         microservices,
         series,
         output_path=output_path,
