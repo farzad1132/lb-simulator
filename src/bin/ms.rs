@@ -102,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 microservice_utilization_pct: Default::default(),
                 server_utilization_pct: Default::default(),
                 server_avg_queue_inflight: Default::default(),
+                server_avg_queue: Default::default(),
                 by_api: Default::default(),
                 by_microservice: Default::default(),
                 microservice_order: Default::default(),

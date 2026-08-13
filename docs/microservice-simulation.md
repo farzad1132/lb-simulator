@@ -388,6 +388,7 @@ The chain SLO heatmap (`plot_ms_chain_slo_heatmap.py`) does **not** use fixture 
 |--------|------------|
 | **server_utilization_pct** | `busy_time[ms][s] / (observation_time × (cpu[ms] / replicas[ms])) × 100` |
 | **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server, plus caller-side outbound LB queue depth under pull policies. Under `--lb-policy centralized`, each caller replica is credited with its own items waiting in the shared `DownstreamBalancer.queue` (identified via `hop.caller`). Under `--lb-policy approx`, each caller replica adds the sum of its `ReplicaBalancer.outbound_queues` depths. Under `--lb-policy approx-share`, each sidecar's outbound queue depth is split evenly across its owned replicas (`share=1` credits the single replica in full). Ingress sits on the replica queue. Pull intent queues are not counted. |
+| **server_avg_queue** | Same attribution as `server_avg_queue_inflight`, but the replica contribution is time-weighted `queue.len()` only (excludes `in_flight` / requests being processed). Caller-side outbound LB queue depth is included unchanged. |
 
 `busy_time[ms][s]` is the sum of local hop durations executed on server `s` of microservice `ms`. Per-server utilization uses that server's concurrency slots (`cpu / replicas`) as capacity. When all servers have equal capacity, the microservice-level overall utilization equals the average of per-server utilizations.
 
@@ -516,6 +517,12 @@ Only the first `--trace-limit` user arrivals are traced. Keep this small when `-
     "backend1": { "0": 1.4, "1": 1.2, "2": 1.1 },
     "backend2": { "0": 0.35, "1": 0.31 },
     "shared": { "0": 0.9, "1": 0.8, "2": 0.7, "3": 0.6 }
+  },
+  "server_avg_queue": {
+    "frontend": { "0": 0.02, "1": 0.01 },
+    "backend1": { "0": 0.4, "1": 0.3, "2": 0.2 },
+    "backend2": { "0": 0.05, "1": 0.04 },
+    "shared": { "0": 0.2, "1": 0.15, "2": 0.1, "3": 0.08 }
   },
   "by_api": {
     "f1": {

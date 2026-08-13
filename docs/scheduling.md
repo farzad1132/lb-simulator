@@ -7,7 +7,7 @@ There are three independent scheduling surfaces:
 | Flag | Queue | Values |
 |------|-------|--------|
 | `--scheduling` | Replica local work queues | `fifo` (default), `edf` |
-| `--centralized-sched` | Shared `DownstreamBalancer` pull queues (`--lb-policy centralized`) | `fcfs` (default), `edf` |
+| `--centralized-sched` | Shared `DownstreamBalancer` pull queues only (`centralized` / `jbsq`); never replica queues | `fcfs` (default), `edf` |
 | `--approx-sched` | Approx unbound outbound queues (and intent queues for `edf+`) | see [approx-policy.md](approx-policy.md) |
 
 See also: [microservice-simulation.md](microservice-simulation.md) for overall request flow and replica queue semantics; [lb-vs-ms.md](lb-vs-ms.md) for feature comparison with the flat `lb` simulator.
@@ -116,12 +116,12 @@ Shared centralized pull-queue order is controlled separately by `--centralized-s
 | LB policy | `--scheduling edf` effect on replica queues |
 |-----------|------------------------------|
 | Push (`random`, `power-of-two`, `round-robin`, `least-request`, **`cl`**, **`corr`**) | EDF affects every replica queue when servers are saturated |
-| **`centralized`** | EDF affects **ingress** (entry) replica queues. Downstream replicas bypass local queuing via `slot_release`, so replica EDF has no effect on downstream hops. Use `--centralized-sched edf` to reorder the shared pull queue. |
-| **`jbsq`** | EDF affects ingress and **downstream** replica queues (jbsq enqueues pulled work locally). Use `--centralized-sched edf` to reorder the shared pull queue. |
+| **`centralized`** | EDF affects **ingress** (entry) replica queues. Downstream replicas bypass local queuing via `slot_release`, so replica EDF has no effect on downstream hops. Shared pull-queue order is `--centralized-sched` only. |
+| **`jbsq`** | EDF affects ingress and **downstream** replica queues (jbsq enqueues pulled work locally). `--centralized-sched` still orders **only** the shared `DownstreamBalancer` queue; local buffers remain `--scheduling`. |
 
 ## Centralized pull-queue scheduling (`--centralized-sched`)
 
-With `--lb-policy centralized` or **`jbsq`**, outbound calls wait in a shared `DownstreamBalancer` queue until a downstream replica pulls. By default that queue is **FCFS** (`--centralized-sched fcfs`). With **EDF** (`--centralized-sched edf`), newly enqueued calls are inserted by `Hop.deadline` (same deadline assignment as replica EDF). Waiting pullers remain FIFO.
+With `--lb-policy centralized` or **`jbsq`**, outbound calls wait in a shared `DownstreamBalancer` queue until a downstream replica pulls. By default that queue is **FCFS** (`--centralized-sched fcfs`). With **EDF** (`--centralized-sched edf`), newly enqueued calls are inserted by `Hop.deadline` (same deadline assignment as replica EDF). Waiting pullers remain FIFO. This flag never changes replica local queue discipline — use `--scheduling` for that.
 
 | Flag | Default | Values | Description |
 |------|---------|--------|-------------|
@@ -142,6 +142,8 @@ Example:
 
 **Dequeue:** always `pop_front`. The flag only affects **enqueue placement** (same insert-before-strictly-later-deadline rule as replica EDF).
 
+With **jbsq** pull-ahead (`--jbsq-n > 1`), replicas often wait with empty LB queues, so `--centralized-sched edf` may change little in SLO plots even when LB dispatch order is correct. Trace tests in [`tests/ms_jbsq_sched_audit.rs`](../tests/ms_jbsq_sched_audit.rs) assert FCFS/EDF discipline on the shared queue (with `--scheduling fifo`).
+
 The flat `lb` simulator's centralized dispatcher remains FCFS-only.
 
 ## Source files
@@ -155,3 +157,5 @@ The flat `lb` simulator's centralized dispatcher remains FCFS-only.
 | [`src/microservice/replica.rs`](../src/microservice/replica.rs) | Replica queue enqueue logic (`--scheduling`) |
 | [`src/microservice/balancer.rs`](../src/microservice/balancer.rs) | Centralized pull-queue enqueue (`--centralized-sched`) |
 | [`src/bin/ms.rs`](../src/bin/ms.rs) | `--scheduling` and `--centralized-sched` CLI flags |
+| [`tests/ms_centralized_sched_audit.rs`](../tests/ms_centralized_sched_audit.rs) | Trace-based centralized FCFS/EDF |
+| [`tests/ms_jbsq_sched_audit.rs`](../tests/ms_jbsq_sched_audit.rs) | Trace-based jbsq FCFS/EDF on shared pull queue |

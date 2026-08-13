@@ -97,6 +97,8 @@ pub struct MsStats {
     pub microservice_utilization_pct: HashMap<String, f64>,
     pub server_utilization_pct: HashMap<String, HashMap<usize, f64>>,
     pub server_avg_queue_inflight: HashMap<String, HashMap<usize, f64>>,
+    /// Time-weighted average of local queue length only (excludes in-flight / processing).
+    pub server_avg_queue: HashMap<String, HashMap<usize, f64>>,
     pub by_api: HashMap<String, ApiStats>,
     pub by_microservice: HashMap<String, MicroserviceStats>,
     pub microservice_order: Vec<String>,
@@ -326,10 +328,73 @@ fn finalize_api_stats(stats: &mut ApiStats) {
     };
 }
 
+fn credit_caller_lb_avg(
+    server_avgs: &mut HashMap<String, HashMap<usize, f64>>,
+    ms: &str,
+    server: usize,
+    lb_avg: f64,
+    lb_policy: LoadBalancePolicyKind,
+    approx_share: u32,
+    graph: &CallGraph,
+) {
+    if lb_policy.is_approx_share() {
+        // Key is sidecar id; split evenly across owned replicas.
+        let n_servers = graph
+            .microservices
+            .get(ms)
+            .map(|s| s.replicas as usize)
+            .unwrap_or(0);
+        let owned = sidecar_replicas(server, n_servers, approx_share.max(1));
+        if owned.is_empty() {
+            return;
+        }
+        let share_each = lb_avg / owned.len() as f64;
+        if let Some(servers) = server_avgs.get_mut(ms) {
+            for rid in owned {
+                *servers.entry(rid).or_insert(0.0) += share_each;
+            }
+        }
+    } else if let Some(servers) = server_avgs.get_mut(ms) {
+        if let Some(avg) = servers.get_mut(&server) {
+            *avg += lb_avg;
+        } else {
+            servers.insert(server, lb_avg);
+        }
+    } else {
+        let mut by_server = HashMap::new();
+        by_server.insert(server, lb_avg);
+        server_avgs.insert(ms.to_string(), by_server);
+    }
+}
+
+fn finalize_replica_avgs(
+    replica_occupancy: &mut HashMap<String, HashMap<usize, OccupancyAccumulator>>,
+    graph: &CallGraph,
+    sim_start: MonotonicTime,
+    sim_end: MonotonicTime,
+) -> HashMap<String, HashMap<usize, f64>> {
+    let mut server_avgs = HashMap::new();
+    for microservice_id in &graph.microservice_order {
+        let n_servers = graph.microservices[microservice_id].replicas as usize;
+        let mut by_server = HashMap::new();
+        for i in 0..n_servers {
+            let avg = replica_occupancy
+                .get_mut(microservice_id)
+                .and_then(|m| m.get_mut(&i))
+                .map(|acc| acc.finalize(sim_end, sim_start))
+                .unwrap_or(0.0);
+            by_server.insert(i, avg);
+        }
+        server_avgs.insert(microservice_id.clone(), by_server);
+    }
+    server_avgs
+}
+
 fn calculate_stats(
     completed: &mut EventQueueReader<CompletedRequest>,
     busy_time: &HashMap<String, HashMap<usize, Duration>>,
     replica_occupancy: &mut HashMap<String, HashMap<usize, OccupancyAccumulator>>,
+    replica_queue_occupancy: &mut HashMap<String, HashMap<usize, OccupancyAccumulator>>,
     caller_lb_queue_occupancy: &mut HashMap<(String, usize), OccupancyAccumulator>,
     lb_policy: LoadBalancePolicyKind,
     approx_share: u32,
@@ -392,51 +457,31 @@ fn calculate_stats(
         }
     }
 
-    let mut server_avg_queue_inflight = HashMap::new();
-    for microservice_id in &graph.microservice_order {
-        let n_servers = graph.microservices[microservice_id].replicas as usize;
-        let mut by_server = HashMap::new();
-        for i in 0..n_servers {
-            let avg = replica_occupancy
-                .get_mut(microservice_id)
-                .and_then(|m| m.get_mut(&i))
-                .map(|acc| acc.finalize(sim_end, sim_start))
-                .unwrap_or(0.0);
-            by_server.insert(i, avg);
-        }
-        server_avg_queue_inflight.insert(microservice_id.clone(), by_server);
-    }
+    let mut server_avg_queue_inflight =
+        finalize_replica_avgs(replica_occupancy, graph, sim_start, sim_end);
+    let mut server_avg_queue =
+        finalize_replica_avgs(replica_queue_occupancy, graph, sim_start, sim_end);
 
     for ((ms, server), acc) in caller_lb_queue_occupancy {
         let lb_avg = acc.finalize(sim_end, sim_start);
-        if lb_policy.is_approx_share() {
-            // Key is sidecar id; split evenly across owned replicas.
-            let n_servers = graph
-                .microservices
-                .get(ms)
-                .map(|s| s.replicas as usize)
-                .unwrap_or(0);
-            let owned = sidecar_replicas(*server, n_servers, approx_share.max(1));
-            if owned.is_empty() {
-                continue;
-            }
-            let share_each = lb_avg / owned.len() as f64;
-            if let Some(servers) = server_avg_queue_inflight.get_mut(ms) {
-                for rid in owned {
-                    *servers.entry(rid).or_insert(0.0) += share_each;
-                }
-            }
-        } else if let Some(servers) = server_avg_queue_inflight.get_mut(ms) {
-            if let Some(avg) = servers.get_mut(server) {
-                *avg += lb_avg;
-            } else {
-                servers.insert(*server, lb_avg);
-            }
-        } else {
-            let mut by_server = HashMap::new();
-            by_server.insert(*server, lb_avg);
-            server_avg_queue_inflight.insert(ms.clone(), by_server);
-        }
+        credit_caller_lb_avg(
+            &mut server_avg_queue_inflight,
+            ms,
+            *server,
+            lb_avg,
+            lb_policy,
+            approx_share,
+            graph,
+        );
+        credit_caller_lb_avg(
+            &mut server_avg_queue,
+            ms,
+            *server,
+            lb_avg,
+            lb_policy,
+            approx_share,
+            graph,
+        );
     }
 
     let by_microservice = {
@@ -456,6 +501,7 @@ fn calculate_stats(
         microservice_utilization_pct,
         server_utilization_pct,
         server_avg_queue_inflight,
+        server_avg_queue,
         by_api,
         by_microservice,
         microservice_order: graph.microservice_order.clone(),
@@ -569,16 +615,24 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
     let replica_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let replica_queue_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     for microservice_id in &graph.microservice_order {
         let n_servers = graph.microservices[microservice_id].replicas as usize;
         let mut by_server = HashMap::new();
+        let mut by_server_queue = HashMap::new();
         for i in 0..n_servers {
             by_server.insert(i, OccupancyAccumulator::default());
+            by_server_queue.insert(i, OccupancyAccumulator::default());
         }
         replica_occupancy
             .lock()
             .unwrap()
             .insert(microservice_id.clone(), by_server);
+        replica_queue_occupancy
+            .lock()
+            .unwrap()
+            .insert(microservice_id.clone(), by_server_queue);
     }
 
     let caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>> =
@@ -1431,6 +1485,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                 max_concurrency: concurrency,
                 busy_time: busy_time.clone(),
                 replica_occupancy: replica_occupancy.clone(),
+                replica_queue_occupancy: replica_queue_occupancy.clone(),
                 visit_tracker: visit_tracker.clone(),
                 balancer_outbound: outbound,
                 outbound_release,
@@ -1517,12 +1572,14 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
     let sim_end = simu.time();
     let busy = busy_time.lock().unwrap().clone();
     let mut replica_occ = replica_occupancy.lock().unwrap().clone();
+    let mut replica_queue_occ = replica_queue_occupancy.lock().unwrap().clone();
     let mut caller_lb_occ = caller_lb_queue_occupancy.lock().unwrap().clone();
     let mut tracker = visit_tracker.lock().unwrap();
     Ok(calculate_stats(
         &mut completed,
         &busy,
         &mut replica_occ,
+        &mut replica_queue_occ,
         &mut caller_lb_occ,
         args.lb_policy,
         approx_share,
@@ -1768,10 +1825,21 @@ mod tests {
                 .server_avg_queue_inflight
                 .get(microservice_id)
                 .expect("avg queue+inflight for microservice");
+            let queue_only = stats
+                .server_avg_queue
+                .get(microservice_id)
+                .expect("avg queue for microservice");
             assert_eq!(servers.len(), spec.replicas as usize);
+            assert_eq!(queue_only.len(), spec.replicas as usize);
             for i in 0..spec.replicas as usize {
                 let avg = servers[&i];
+                let q = queue_only[&i];
                 assert!(avg.is_finite() && avg >= 0.0, "server {i} of {microservice_id}: {avg}");
+                assert!(q.is_finite() && q >= 0.0, "queue server {i} of {microservice_id}: {q}");
+                assert!(
+                    q <= avg + 1e-9,
+                    "queue-only should be <= queue+inflight for {microservice_id}/{i}: {q} vs {avg}"
+                );
             }
         }
     }

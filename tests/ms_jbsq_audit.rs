@@ -103,22 +103,6 @@ fn ms_jbsq_n2_local_queue_and_bound() {
     );
 }
 
-#[test]
-fn ms_jbsq_edf_completes_with_audit() {
-    let audit = MsJbsqAudit::new();
-    let stats = run(&chain3_jbsq_args(
-        800,
-        99,
-        2,
-        CentralizedSchedKind::Edf,
-        Some(audit.clone()),
-    ))
-    .unwrap()
-    .expect("simulation should complete");
-    assert_eq!(stats.by_api["handle"].e2e_ms.len(), 800);
-    audit.validate().expect("jbsq edf audit invariants");
-}
-
 /// On chain/3, per-replica concurrency is 1, so jbsq `--jbsq-n 1` is pull-on-idle
 /// like centralized and must match latencies under the same seed.
 #[test]

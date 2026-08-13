@@ -24,6 +24,8 @@ Upstream occupancy counts `Upstream` items in the local replica queue plus `in_f
 
 `n` may exceed per-replica concurrency (`cpu / replicas`); excess pulled requests sit in the local queue and are subject to `--scheduling`. Effective in-service concurrency remains `max_concurrency`.
 
+When every replica for a target has `occupancy + pending_pulls >= n`, further outbound calls queue in the shared `DownstreamBalancer` (same as centralized under backlog). `--centralized-sched` orders **only** that shared pull queue; it does **not** change replica local queues (those use `--scheduling`). Under pull-ahead (`n > 1`), the LB queue may backlog less often than centralized, so EDF can have little SLO impact even when dispatch order is correct.
+
 Ingress stays push power-of-two on `EdgeBalancer`. `lb --lb-policy jbsq` is rejected (`jbsq` is ms-only).
 
 ## CLI
@@ -41,7 +43,7 @@ Ingress stays push power-of-two on `EdgeBalancer`. `lb --lb-policy jbsq` is reje
 |------|---------|-------------|
 | `--lb-policy jbsq` | — | Enable jbsq |
 | `--jbsq-n` | (none) | Max pulled upstream occupancy per replica; required with jbsq |
-| `--centralized-sched` | `fcfs` | Shared pull-queue discipline (`fcfs` or `edf`); same as centralized |
+| `--centralized-sched` | `fcfs` | Shared `DownstreamBalancer` pull-queue discipline (`fcfs` or `edf`); LB queue only — not replica queues |
 | `--lb-subset-size` | `0` | Optional partition subsets; same constraints as centralized |
 
 ## Architecture
@@ -60,8 +62,9 @@ Replicas pull while `jbsq_occupancy + pending_pulls < n`, track outstanding pull
 | Test | Role |
 |------|------|
 | [`tests/ms_jbsq.rs`](../tests/ms_jbsq.rs) | CLI smoke, `--jbsq-n` validation, lb reject, subset smoke |
-| [`tests/ms_jbsq_audit.rs`](../tests/ms_jbsq_audit.rs) | Occupancy-bound audit (`n=1`, `n=2`, EDF) |
-| [`src/ms_jbsq_audit.rs`](../src/ms_jbsq_audit.rs) | Event recorder + validators |
+| [`tests/ms_jbsq_audit.rs`](../tests/ms_jbsq_audit.rs) | Occupancy-bound audit (`n=1`, `n=2`) |
+| [`tests/ms_jbsq_sched_audit.rs`](../tests/ms_jbsq_sched_audit.rs) | Trace-based `--centralized-sched` FCFS/EDF on shared pull queue |
+| [`src/ms_jbsq_audit.rs`](../src/ms_jbsq_audit.rs) | Occupancy event recorder + validators |
 
 ## Source files
 

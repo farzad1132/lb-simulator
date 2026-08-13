@@ -38,6 +38,8 @@ pub struct ReplicaConfig {
     pub max_concurrency: u32,
     pub busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
     pub replica_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>>,
+    /// Time-weighted average of local `queue.len()` only (excludes `in_flight`).
+    pub replica_queue_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>>,
     pub visit_tracker: Arc<Mutex<MicroserviceVisitTracker>>,
     pub balancer_outbound: Output<OutboundCall>,
     pub outbound_release: Output<OutboundRelease>,
@@ -79,6 +81,8 @@ pub struct Replica {
     busy_time: Arc<Mutex<HashMap<String, HashMap<usize, Duration>>>>,
     #[serde(skip)]
     replica_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>>,
+    #[serde(skip)]
+    replica_queue_occupancy: Arc<Mutex<HashMap<String, HashMap<usize, OccupancyAccumulator>>>>,
     #[serde(skip)]
     visit_tracker: Arc<Mutex<MicroserviceVisitTracker>>,
     #[serde(skip)]
@@ -126,6 +130,7 @@ impl Replica {
             queue: VecDeque::new(),
             busy_time: config.busy_time,
             replica_occupancy: config.replica_occupancy,
+            replica_queue_occupancy: config.replica_queue_occupancy,
             visit_tracker: config.visit_tracker,
             balancer_outbound: config.balancer_outbound,
             return_outputs: config.return_outputs,
@@ -271,12 +276,20 @@ impl Replica {
     }
 
     fn sample_occupancy(&self, now: MonotonicTime) {
+        let queue_len = self.queue.len() as u32;
         if let Ok(mut occ) = self.replica_occupancy.lock() {
             occ.entry(self.microservice_id.clone())
                 .or_default()
                 .entry(self.server_idx)
                 .or_default()
                 .record(now, self.occupancy_level());
+        }
+        if let Ok(mut occ) = self.replica_queue_occupancy.lock() {
+            occ.entry(self.microservice_id.clone())
+                .or_default()
+                .entry(self.server_idx)
+                .or_default()
+                .record(now, queue_len);
         }
     }
 
