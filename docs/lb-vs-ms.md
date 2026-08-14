@@ -13,9 +13,9 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
-| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **JBSQ** (`jbsq`, ms-only): same shared pull queues as centralized with occupancy bound `--jbsq-n`. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Approx-share** (`approx-share`, ms-only): approx protocol with shared sidecars (`--approx-share`). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
+| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **JBSQ** (`jbsq`, ms-only): same shared pull queues as centralized with occupancy bound `--jbsq-n`. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Approx-share** (`approx-share`, ms-only): approx protocol with shared sidecars (`--approx-share`). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), **CL-R** (`cl-r`), **CL-RR** (`cl-rr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
 | Local inflight load view | yes | yes | Typical push policies use each balancer's **local inflight** counters; **prequal** additionally probes server/replica `queue.len + in_flight` |
-| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, `approx-share`, or with `cl`, `cl-lr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` / `jbsq` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
+| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, `approx-share`, or with `cl`, `cl-lr`, `cl-r`, `cl-rr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` / `jbsq` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
@@ -36,11 +36,13 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **`--approx-sched edf+` (outbound + intent EDF)** | — | yes | `ms` only; EDF outbound and intent queues; see [approx-policy.md](approx-policy.md) |
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
 | **CL-LR shared least-request outbound** | — | yes | Same shared topology as `cl`; downstream uses least-request on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-lr-policy-shared-least-request-outbound). |
+| **CL-R shared random outbound** | — | yes | Same shared topology as `cl`; downstream uses random on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-r-policy-shared-random-outbound). |
+| **CL-RR shared round-robin outbound** | — | yes | Same shared topology as `cl`; downstream uses round-robin on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-rr-policy-shared-round-robin-outbound). |
 | **Corr (experimental)** | — | yes | Same shared topology as `cl`; outbound routing is experimental. See [microservice-simulation.md](microservice-simulation.md#corr-policy-experimental). |
 | Multiple ingress client LBs | yes | — | `--clients`: independent arrival sources; push policies use one LB per client; centralized uses one shared dispatcher per subset (or one global when `k=0`) |
 | Per-API ingress LB | — | yes | `EdgeBalancer`: one per API, routes user traffic to entry replicas |
 | Per-replica outbound LB | — | yes | `ReplicaBalancer`: one per replica (default push policies) |
-| Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl`, `cl-lr`, `centralized`, `jbsq`, or `corr`) |
+| Shared downstream outbound LB | — | yes | `DownstreamBalancer`: one per downstream target (`--lb-policy cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, or `corr`) |
 | Flat topology CLI | yes | — | `--servers`, `--concurrency`, `--load` |
 | Callgraph topology | — | yes | `--callgraph`, `--load-file` |
 | Service distributions | yes | yes | lb: `exponential`, `constant`, `bimodal` (+ CLI modes); ms: `exp`, `fixed`, `bimodal` via `--service-dist` |
@@ -66,7 +68,7 @@ Policies implement `LoadBalancePolicy::select(&mut self, loads: &[u32]) -> usize
 | lb | `LoadBalancer` | Per server in the shared pool |
 | ms | `EdgeBalancer` | Per entry-service replica |
 | ms | `ReplicaBalancer` | Per downstream-service replica (one table per downstream target) |
-| ms | `DownstreamBalancer` | Per downstream microservice target (shared across all callers; `cl`, `cl-lr`, `centralized`, `corr`) |
+| ms | `DownstreamBalancer` | Per downstream microservice target (shared across all callers; `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `corr`) |
 
 These counters do **not** reflect other balancers' traffic, tasks waiting in downstream queues, or in-flight work dispatched by someone else.
 
@@ -82,7 +84,7 @@ Push policies (`random`, `power-of-two`, `least-request`, `round-robin`) dispatc
 | Ingress | Pull-based (same pool) | Push P2C on `EdgeBalancer` (unchanged) |
 | Subset | Strict partition when `k > 0` | Same constraints as lb, applied per caller→target edge |
 
-**CL** (`cl`, ms-only) is also an architecture change: outbound RPCs share one `DownstreamBalancer` with push-based power-of-two on aggregate inflight. **CL-LR** (`cl-lr`, ms-only) uses the same shared topology but routes downstream with least-request on aggregate inflight. **Corr** (`corr`, ms-only, experimental) uses the same shared topology as `cl`. Ingress stays per-API `EdgeBalancer` (always P2C for `cl` / `cl-lr` / `centralized` / `corr`). See [microservice-simulation.md — CL policy](microservice-simulation.md#cl-policy-centralized-layer), [CL-LR policy](microservice-simulation.md#cl-lr-policy-shared-least-request-outbound), and [Corr policy](microservice-simulation.md#corr-policy-experimental).
+**CL** (`cl`, ms-only) is also an architecture change: outbound RPCs share one `DownstreamBalancer` with push-based power-of-two on aggregate inflight. **CL-LR** (`cl-lr`, ms-only) uses the same shared topology but routes downstream with least-request on aggregate inflight. **CL-R** (`cl-r`, ms-only) uses random; **CL-RR** (`cl-rr`, ms-only) uses round-robin. **Corr** (`corr`, ms-only, experimental) uses the same shared topology as `cl`. Ingress stays per-API `EdgeBalancer` (always P2C for `cl` / `cl-lr` / `cl-r` / `cl-rr` / `centralized` / `corr`). See [microservice-simulation.md — CL policy](microservice-simulation.md#cl-policy-centralized-layer), [CL-LR policy](microservice-simulation.md#cl-lr-policy-shared-least-request-outbound), [CL-R policy](microservice-simulation.md#cl-r-policy-shared-random-outbound), [CL-RR policy](microservice-simulation.md#cl-rr-policy-shared-round-robin-outbound), and [Corr policy](microservice-simulation.md#corr-policy-experimental).
 
 ### Multiple LBs: ingress vs egress
 
@@ -106,7 +108,7 @@ User → EdgeBalancer(api) → entry replica
                               └→ ReplicaBalancer(service/replica) → downstream replica
 ```
 
-- **EdgeBalancer** (one per API): routes **user ingress** to entry-service replicas. Honors `--lb-policy` for push policies; always P2C for `cl` / `cl-lr` / `centralized` / `corr`.
+- **EdgeBalancer** (one per API): routes **user ingress** to entry-service replicas. Honors `--lb-policy` for push policies; always P2C for `cl` / `cl-lr` / `cl-r` / `cl-rr` / `centralized` / `corr`.
 - **ReplicaBalancer** (one per replica per service): routes **that replica's outbound RPCs** to downstream services.
 
 A single user request enters through one `EdgeBalancer`. Outbound LBs are tied to replicas making nested calls, not to independent traffic sources.
@@ -121,7 +123,7 @@ User → EdgeBalancer(api) → entry replica
   Replica(C/2) ──┘         (shared inflight + P2C push)
 ```
 
-- **EdgeBalancer** (one per API): unchanged for push policies; always P2C for `cl` / `cl-lr` / `centralized` / `corr`.
+- **EdgeBalancer** (one per API): unchanged for push policies; always P2C for `cl` / `cl-lr` / `cl-r` / `cl-rr` / `centralized` / `corr`.
 - **DownstreamBalancer** (one per downstream microservice that receives RPCs): all caller replicas share one inflight table and one P2C routing decision per dispatch.
 - **OutboundGateway** (one per replica): thin forwarder from a replica's single outbound port to the correct `DownstreamBalancer` (no load state).
 
@@ -129,7 +131,7 @@ Example (chain-3): one `EdgeBalancer` for API `handle`, plus `DownstreamBalancer
 
 ### Subset assignment
 
-Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` but use different `client_id` values. **`cl`, `cl-lr`, and `corr` in ms reject `--lb-subset-size > 0`.** Both simulators accept centralized subsetting only as a strict partition (see [Centralized subsetting](lb-simulation.md#centralized-subsetting)); in ms the constraints apply per caller→target edge.
+Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` but use different `client_id` values. **`cl`, `cl-lr`, `cl-r`, `cl-rr`, and `corr` in ms reject `--lb-subset-size > 0`.** Both simulators accept centralized subsetting only as a strict partition (see [Centralized subsetting](lb-simulation.md#centralized-subsetting)); in ms the constraints apply per caller→target edge.
 
 | Balancer | `client_id` |
 |----------|-------------|
@@ -196,6 +198,14 @@ With `--lb-policy cl`, outbound routing uses one shared `DownstreamBalancer` per
 ### CL-LR shared least-request outbound
 
 With `--lb-policy cl-lr`, outbound routing uses the same shared topology as `cl`, but each `DownstreamBalancer` routes with least-request on aggregate inflight. Ingress stays push P2C on `EdgeBalancer`. `lb --lb-policy cl-lr` is rejected at startup.
+
+### CL-R shared random outbound
+
+With `--lb-policy cl-r`, outbound routing uses the same shared topology as `cl`, but each `DownstreamBalancer` routes with random on aggregate inflight. Ingress stays push P2C on `EdgeBalancer`. `lb --lb-policy cl-r` is rejected at startup.
+
+### CL-RR shared round-robin outbound
+
+With `--lb-policy cl-rr`, outbound routing uses the same shared topology as `cl`, but each `DownstreamBalancer` routes with round-robin on aggregate inflight. Ingress stays push P2C on `EdgeBalancer`. `lb --lb-policy cl-rr` is rejected at startup.
 
 ### Centralized pull-based outbound (ms)
 

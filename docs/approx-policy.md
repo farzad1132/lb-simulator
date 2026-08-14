@@ -359,7 +359,7 @@ Validation (`[src/policy.rs](../src/policy.rs)`):
 | ---------------------------- | ---------------------- | --------------------------------------------------------------- |
 | `--expresslane` (`lb`)       | No                     | Backlog at client LBs, not server queues where eviction applies |
 | `--shed-delay` (`lb`)        | No                     | Servers do not queue tasks locally                              |
-| `cl`, `cl-lr`, `corr` (`lb`) | No                     | `ms`-only policies                                              |
+| `cl`, `cl-lr`, `cl-r`, `cl-rr`, `corr` (`lb`) | No                     | `ms`-only policies                                              |
 
 
 See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).

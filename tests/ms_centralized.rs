@@ -236,7 +236,7 @@ fn ms_cl_rejects_subset_size() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not supported with --lb-policy cl, cl-lr, or corr"),
+        stderr.contains("not supported with --lb-policy cl, cl-lr, cl-r, cl-rr, or corr"),
         "unexpected stderr: {stderr}"
     );
 }

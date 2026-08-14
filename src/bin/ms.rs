@@ -216,6 +216,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_cl_r_lb_policy() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "cl-r",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::ClR);
+    }
+
+    #[test]
+    fn parses_cl_rr_lb_policy() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--lb-policy",
+            "cl-rr",
+        ]);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::ClRr);
+    }
+
+    #[test]
     fn parses_corr_lb_policy() {
         let cli = Args::parse_from([
             "ms",

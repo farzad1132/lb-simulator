@@ -182,6 +182,10 @@ pub enum LoadBalancePolicyKind {
     Cl,
     #[value(name = "cl-lr")]
     ClLr,
+    #[value(name = "cl-r")]
+    ClR,
+    #[value(name = "cl-rr")]
+    ClRr,
     #[value(name = "corr")]
     Corr,
 }
@@ -199,7 +203,9 @@ impl LoadBalancePolicyKind {
             Self::Centralized | Self::Jbsq => Box::new(CentralizedPolicy),
             Self::Approx | Self::ApproxShare => Box::new(ApproxPolicy),
             Self::Prequal => Box::new(PrequalPolicy),
-            Self::Cl | Self::ClLr | Self::Corr => Box::new(PowerOfTwoPolicy),
+            Self::Cl | Self::ClLr | Self::ClR | Self::ClRr | Self::Corr => {
+                Box::new(PowerOfTwoPolicy)
+            }
         }
     }
 
@@ -251,14 +257,26 @@ impl LoadBalancePolicyKind {
     pub fn is_ms_only(self) -> bool {
         matches!(
             self,
-            Self::Cl | Self::ClLr | Self::Corr | Self::ApproxShare | Self::Jbsq
+            Self::Cl
+                | Self::ClLr
+                | Self::ClR
+                | Self::ClRr
+                | Self::Corr
+                | Self::ApproxShare
+                | Self::Jbsq
         )
     }
 
     pub fn uses_shared_downstream(self) -> bool {
         matches!(
             self,
-            Self::Cl | Self::ClLr | Self::Centralized | Self::Jbsq | Self::Corr
+            Self::Cl
+                | Self::ClLr
+                | Self::ClR
+                | Self::ClRr
+                | Self::Centralized
+                | Self::Jbsq
+                | Self::Corr
         )
     }
 
@@ -266,6 +284,8 @@ impl LoadBalancePolicyKind {
         match self {
             Self::Cl
             | Self::ClLr
+            | Self::ClR
+            | Self::ClRr
             | Self::Centralized
             | Self::Jbsq
             | Self::Corr
@@ -279,6 +299,11 @@ impl LoadBalancePolicyKind {
     pub fn downstream_push_policy(self) -> Box<dyn LoadBalancePolicy> {
         match self {
             Self::ClLr => Box::new(LeastRequestPolicy),
+            Self::ClR => Box::new(RandomPolicy),
+            Self::ClRr => Box::new(RoundRobinPolicy {
+                order: Vec::new(),
+                next: 0,
+            }),
             Self::Cl => Box::new(PowerOfTwoPolicy),
             _ => Box::new(PowerOfTwoPolicy),
         }
@@ -601,6 +626,8 @@ mod tests {
     fn uses_shared_downstream_for_cl_centralized_and_corr() {
         assert!(LoadBalancePolicyKind::Cl.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::ClLr.uses_shared_downstream());
+        assert!(LoadBalancePolicyKind::ClR.uses_shared_downstream());
+        assert!(LoadBalancePolicyKind::ClRr.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Centralized.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Jbsq.uses_shared_downstream());
         assert!(LoadBalancePolicyKind::Corr.uses_shared_downstream());
@@ -622,6 +649,8 @@ mod tests {
     fn is_ms_only_for_cl_cl_lr_corr_and_approx_share() {
         assert!(LoadBalancePolicyKind::Cl.is_ms_only());
         assert!(LoadBalancePolicyKind::ClLr.is_ms_only());
+        assert!(LoadBalancePolicyKind::ClR.is_ms_only());
+        assert!(LoadBalancePolicyKind::ClRr.is_ms_only());
         assert!(LoadBalancePolicyKind::Corr.is_ms_only());
         assert!(LoadBalancePolicyKind::ApproxShare.is_ms_only());
         assert!(LoadBalancePolicyKind::Jbsq.is_ms_only());
@@ -686,10 +715,57 @@ mod tests {
     }
 
     #[test]
+    fn cl_r_and_cl_rr_ingress_is_power_of_two() {
+        crate::rng::enter_run(Some(42));
+        let mut cl = LoadBalancePolicyKind::Cl.ingress_policy();
+        let loads = [3u32, 0, 7, 2];
+        let cl_pick = cl.select(&loads);
+
+        crate::rng::enter_run(Some(42));
+        let mut cl_r = LoadBalancePolicyKind::ClR.ingress_policy();
+        assert_eq!(cl_r.select(&loads), cl_pick);
+
+        crate::rng::enter_run(Some(42));
+        let mut cl_rr = LoadBalancePolicyKind::ClRr.ingress_policy();
+        assert_eq!(cl_rr.select(&loads), cl_pick);
+        crate::rng::exit_run();
+    }
+
+    #[test]
     fn cl_lr_downstream_is_least_request() {
         let mut policy = LoadBalancePolicyKind::ClLr.downstream_push_policy();
         let loads = [5u32, 1, 3];
         assert_eq!(policy.select(&loads), 1);
+    }
+
+    #[test]
+    fn cl_r_downstream_is_random() {
+        crate::rng::enter_run(Some(7));
+        let mut expected = RandomPolicy;
+        let loads = [5u32, 1, 3, 2];
+        let expected_pick = expected.select(&loads);
+
+        crate::rng::enter_run(Some(7));
+        let mut policy = LoadBalancePolicyKind::ClR.downstream_push_policy();
+        assert_eq!(policy.select(&loads), expected_pick);
+        crate::rng::exit_run();
+    }
+
+    #[test]
+    fn cl_rr_downstream_is_round_robin() {
+        crate::rng::enter_run(Some(11));
+        let mut expected = RoundRobinPolicy {
+            order: Vec::new(),
+            next: 0,
+        };
+        let loads = [5u32, 1, 3, 2];
+        let expected_picks: Vec<usize> = (0..8).map(|_| expected.select(&loads)).collect();
+
+        crate::rng::enter_run(Some(11));
+        let mut policy = LoadBalancePolicyKind::ClRr.downstream_push_policy();
+        let actual_picks: Vec<usize> = (0..8).map(|_| policy.select(&loads)).collect();
+        assert_eq!(actual_picks, expected_picks);
+        crate::rng::exit_run();
     }
 
     #[test]

@@ -616,6 +616,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = match args.lb_policy {
             LoadBalancePolicyKind::Cl => "cl",
             LoadBalancePolicyKind::ClLr => "cl-lr",
+            LoadBalancePolicyKind::ClR => "cl-r",
+            LoadBalancePolicyKind::ClRr => "cl-rr",
             LoadBalancePolicyKind::Corr => "corr",
             LoadBalancePolicyKind::ApproxShare => "approx-share",
             LoadBalancePolicyKind::Jbsq => "jbsq",

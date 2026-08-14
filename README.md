@@ -36,13 +36,15 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **prequal** — decentralized push with async RIF probe pool (`lb` and `ms` outbound; `--lb-subset-size > 0` rejected); see [docs/prequal-policy.md](docs/prequal-policy.md)
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **cl-lr** — shared push least-request outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
+- **cl-r** — shared push random outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
+- **cl-rr** — shared push round-robin outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **corr** — experimental shared push outbound layer (`ms` only; same topology as `cl`; ingress stays P2C; `--lb-subset-size > 0` rejected)
 
 Each load balancer can be restricted to a subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`:
 
 - **Push / approx:** each client LB routes among `min(k, servers)` servers; leftovers (`n % k`) may be unused; `--lb-subset-policy` may be `deterministic` or `random`.
 - **Centralized (`lb`):** `k` must divide `--servers`; one shared pull LB per subset; `--clients` must be divisible by the subset count; only `deterministic` subset policy. See [docs/lb-simulation.md — Server subset](docs/lb-simulation.md#server-subset).
-- **Not supported:** `prequal`, and in `ms` also `cl`, `cl-lr`, and `corr`. Both simulators support restricted partition subsetting for `centralized` and `jbsq`.
+- **Not supported:** `prequal`, and in `ms` also `cl`, `cl-lr`, `cl-r`, `cl-rr`, and `corr`. Both simulators support restricted partition subsetting for `centralized` and `jbsq`.
 
 ## Metrics
 
@@ -136,12 +138,12 @@ cargo build --release
 | `--callgraph` | (required) | Path to callgraph JSON |
 | `--load-file` | (required) | Path to per-API load JSON (`rps` + `slo_ms`) |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `jbsq`, `approx`, `approx-share`, `prequal`, `corr`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, `approx`, `approx-share`, `prequal`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server/sidecar selection for `approx` / `approx-share` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with those policies |
 | `--approx-sched` | (omit) | With `approx` / `approx-share`: omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` (ms only; `edf+` also EDF-orders intent queues) for unbound queue-head fulfillment; see [docs/approx-policy.md](docs/approx-policy.md) |
 | `--approx-share` | `1` | Replicas per sidecar with `--lb-policy approx-share` (`ceil` partitioning; remainder gets its own sidecar) |
 | `--jbsq-n` | (none) | Max pulled occupancy per replica with `--lb-policy jbsq` (**required**; no default; `>= 1`); see [docs/jbsq-policy.md](docs/jbsq-policy.md) |
-| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, or `corr` in `ms`; `centralized` / `jbsq` require `k` divides servers/replicas and callers divisible by `S`) |
+| `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, or `corr` in `ms`; `centralized` / `jbsq` require `k` divides servers/replicas and callers divisible by `S`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`); see [docs/scheduling.md](docs/scheduling.md) |
@@ -386,7 +388,7 @@ python plot_lb_sweep.py --sweep load --servers 10 --n 100000
 | `--service-mode-probs` | (none) | Two mode probabilities for bimodal |
 | `--lb-policy` | all lb policies | Policies to compare (series lines); includes `prequal` |
 | `--slo` | (none) | SLO threshold in seconds (required for `--metric slo-violation`) |
-| `--seed` | (none) | RNG seed for reproducible runs |
+| `--seed` | (picked per execution) | RNG seed shared by SLO calibration and every series × sweep-value run; if omitted, a seed is picked and logged |
 | `--format` | `compact` | `human` (summary + e2e percentiles) or `compact` (one line per run) |
 | `--binary` | (build release) | Use a prebuilt binary and skip `cargo build --release` |
 | `--no-build` | (off) | Do not run `cargo build --release` |
@@ -625,7 +627,7 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range |
 | `--n` | `100000` | Requests per load-sweep run (calibration always uses `n=300000`) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `centralized`, `jbsq`, `approx`, `approx-share`, `prequal`, `corr`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, `approx`, `approx-share`, `prequal`, `corr`) |
 | `--pull-policy` | (none) | Pull-intent server/sidecar selection for `approx` / `approx-share` |
 | `--approx-sched` | (omit) | With `approx` / `approx-share`: omit for bound pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment |
 | `--approx-share` | `1` | Replicas per sidecar when `--lb-policy approx-share` |
@@ -647,7 +649,7 @@ python compare_lb_ms.py --scenario all --plot
 | `--scenario` | `all` | `single`, `multi`, or `all` fixture topologies |
 | `--n` | `200000` | Total requests per run |
 | `--load` | `0.8` | Target utilization for lb (ms `load.json` rps must match) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (`cl`, `cl-lr`, `corr` are shared-layer outbound without subsetting; ms `centralized` supports restricted partition subsetting) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy for both simulators (`cl`, `cl-lr`, `cl-r`, `cl-rr`, `corr` are shared-layer outbound without subsetting; ms `centralized` supports restricted partition subsetting) |
 | `--plot` | (off) | Write lb vs ms overlay CDF plots to `--output-dir` |
 | `--output-dir` | `output/` | Directory for optional CDF plots |
 | `--no-build` | (off) | Do not run `cargo build --release` |

@@ -531,10 +531,15 @@ fn validate_ms_shared_subset(
     }
     if matches!(
         lb_policy,
-        LoadBalancePolicyKind::Cl | LoadBalancePolicyKind::ClLr | LoadBalancePolicyKind::Corr
+        LoadBalancePolicyKind::Cl
+            | LoadBalancePolicyKind::ClLr
+            | LoadBalancePolicyKind::ClR
+            | LoadBalancePolicyKind::ClRr
+            | LoadBalancePolicyKind::Corr
     ) {
         return Err(
-            "--lb-subset-size is not supported with --lb-policy cl, cl-lr, or corr".into(),
+            "--lb-subset-size is not supported with --lb-policy cl, cl-lr, cl-r, cl-rr, or corr"
+                .into(),
         );
     }
     if !lb_policy.uses_central_pull_queue() {
