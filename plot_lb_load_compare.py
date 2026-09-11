@@ -63,8 +63,8 @@ SLO_VIOLATION_Y_MIN = 0.0
 SLO_VIOLATION_Y_MAX = 10.0
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
-    ExperimentConfig("CQ", "centralized", 10, 10),
-    ExperimentConfig("P2C", "power-of-two", 10, 10),
+    #ExperimentConfig("CQ", "centralized", 10, 10),
+    ExperimentConfig("P2C", "power-of-two", 1, 10),
     ExperimentConfig("LR", "least-request", 10, 10),
     ExperimentConfig("RR", "round-robin", 10, 10),
     ExperimentConfig("R", "random", 10, 10),

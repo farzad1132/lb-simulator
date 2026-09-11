@@ -4,15 +4,14 @@
 Requires --chain {3,6,10}. X-axis is load; Y-axis is SLO violation rate (%).
 One line per named config in DEFAULT_CONFIGS.
 
-Each load level uses one shared RNG seed for every policy (derived from --seed
-when set) so cross-policy comparisons at a given load are consistent.
+When --seed is set, the same RNG seed is used for every config × load run
+(and for SLO calibration) so cross-policy comparisons are consistent.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import random
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -98,31 +97,35 @@ def uses_central_pull_queue(config: MsExperimentConfig) -> bool:
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
-    MsExperimentConfig("CPull", "centralized"),
-    MsExperimentConfig("JBSQ-1", "jbsq", jbsq_n=1),
-    MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
-    MsExperimentConfig("JBSQ-5", "jbsq", jbsq_n=3),
+    #MsExperimentConfig("CPull", "centralized"),
+    #MsExperimentConfig("JBSQ-1", "jbsq", jbsq_n=1),
+    #MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
     #MsExperimentConfig("JBSQ-2-EDF", "jbsq", jbsq_n=2, centralized_sched="edf"),
-    MsExperimentConfig("CPush", "cl"),
-    MsExperimentConfig("Prequal", "prequal"),
+    #MsExperimentConfig("JBSQ-5", "jbsq", jbsq_n=3),
+    #MsExperimentConfig("JBSQ-2-EDF", "jbsq", jbsq_n=2, centralized_sched="edf"),
+    #MsExperimentConfig("C-P2C", "cl"),
+    #MsExperimentConfig("C-LR", "cl-lr"),
+    #MsExperimentConfig("C-RR", "cl-rr"),
+    #MsExperimentConfig("C-R", "cl-r"),
+    #MsExperimentConfig("Prequal", "prequal"),
     #MsExperimentConfig("CQ-EDF", "centralized", centralized_sched="edf"),
     #MsExperimentConfig("CQ-K10", "centralized", lb_subset_size=10),
     #MsExperimentConfig("CQ-K20", "centralized", lb_subset_size=20),
     #MsExperimentConfig("P2C-K10", "power-of-two", lb_subset_size=10),
     #MsExperimentConfig("P2C-K20", "power-of-two", lb_subset_size=20),
-    MsExperimentConfig("P2C", "power-of-two"),
-    MsExperimentConfig("LR", "least-request"),
-    MsExperimentConfig("WRR", "round-robin"),
-    MsExperimentConfig("R", "random"),
+    MsExperimentConfig("P2C+FCFS", "power-of-two"),
+    MsExperimentConfig("P2C+TailClipper", "power-of-two", scheduling="edf"),
+    #MsExperimentConfig("LR", "least-request"),
+    #MsExperimentConfig("RR", "round-robin"),
+    #MsExperimentConfig("R", "random"),
     #MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
     #MsExperimentConfig("Approx-S2", "approx-share", pull_policy="least-request", approx_share=2),
     #MsExperimentConfig("Approx-K10", "approx", pull_policy="least-request", lb_subset_size=10),
     #MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs",),
     #MsExperimentConfig("Approx-FCFS-S2", "approx-share", pull_policy="least-request", approx_sched="fcfs", approx_share=2),
     #MsExperimentConfig("Approx-FCFS-K10", "approx", pull_policy="least-request", approx_sched="fcfs", lb_subset_size=10),
-    #MsExperimentConfig("Approx-EDF-K10", "approx", pull_policy="least-request", approx_sched="edf", lb_subset_size=10),
+    MsExperimentConfig("Approx-EDF+FCFS", "approx", pull_policy="least-request", approx_sched="edf"),
     #MsExperimentConfig("Approx-EDF-K20", "approx", pull_policy="least-request", approx_sched="edf", lb_subset_size=20),
-    #MsExperimentConfig("Approx-EDF-R100-K10", "approx", pull_policy="least-request", approx_sched="edf", scale=90, rps=100_100, lb_subset_size=10),
     #MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
     #MsExperimentConfig("Approx-EDF-S2", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=2),
     #MsExperimentConfig("Approx-EDF-S3", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=3),
@@ -319,16 +322,6 @@ def average_utilization_pct(data: dict) -> float:
     return sum(float(v) for v in utils.values()) / len(utils)
 
 
-def seeds_for_loads(loads: list[float], base_seed: int | None) -> dict[float, int]:
-    """One seed per load level, shared across all policies at that load.
-
-    Derived from ``base_seed`` when set so sweeps are reproducible; otherwise
-    drawn once from the OS RNG for this process.
-    """
-    rng = random.Random(base_seed)
-    return {load: rng.randrange(2**63) for load in loads}
-
-
 def format_run_summary(
     *,
     config: MsExperimentConfig,
@@ -384,16 +377,13 @@ def run_load_compare_sweep(
 ) -> list[tuple[str, list[float]]]:
     """Return (label, SLO violation %) per config; x is shared loads.
 
-    Each load level gets one seed shared by every policy at that load.
+    The same seed is used for every config × load run when provided.
     """
     series: list[tuple[str, list[float]]] = [
         (config.label, []) for config in configs
     ]
-    seed_by_load = seeds_for_loads(loads, seed)
-    _log(
-        "per-load seeds: "
-        + ", ".join(f"{load:g}→{seed_by_load[load]}" for load in loads)
-    )
+    if seed is not None:
+        _log(f"shared seed: {seed}")
     pairs = list(product(configs, loads))
 
     for config, load in tqdm(pairs, desc="config × load", unit="run"):
@@ -402,7 +392,6 @@ def run_load_compare_sweep(
         service_dist = resolve_config_service_dist(
             config, default=default_service_dist
         )
-        run_seed = seed_by_load[load]
         data = run_ms_simulation(
             binary,
             callgraph=callgraph,
@@ -413,7 +402,7 @@ def run_load_compare_sweep(
             lb_subset_size=config.lb_subset_size,
             scheduling=config.scheduling,
             centralized_sched=config.centralized_sched,
-            seed=run_seed,
+            seed=seed,
             rps=rps,
             slo_ms=slo_ms,
             service_dist=service_dist,
@@ -436,7 +425,7 @@ def run_load_compare_sweep(
                 slo_ms=slo_ms,
                 violation_pct=violation_pct,
                 utilization_pct=utilization_pct,
-                seed=run_seed,
+                seed=seed,
             )
         )
     return series
@@ -638,8 +627,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Base seed for the sweep: derives one seed per load level, shared "
-            "across all policies at that load (default: non-deterministic base)"
+            "RNG seed shared by every config × load run and SLO calibration "
+            "(default: non-deterministic)"
         ),
     )
     return parser.parse_args()

@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Scatter of per-tier average occupancy for MS configs at a single load.
+"""Scatter of per-tier average queue length for MS configs at a single load.
 
 Requires --chain {3,6,10}. X-axis is microservice tier; Y-axis is mean
-server_avg_queue_inflight over that tier's replicas. One point per config at
-each tier.
+server_avg_queue (queue length only; excludes in-flight) over that tier's
+replicas. One point per config at each tier.
+
+One RNG seed is used for every config. If --seed is omitted, a seed is picked
+for this execution and logged.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
+import math
 import os
+import random
 import sys
 import tempfile
 from pathlib import Path
@@ -52,17 +58,21 @@ from plotting_primitive import (
 )
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
+Y_TICK_STEP = 0.5
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     MsExperimentConfig("CPull", "centralized"),
-    MsExperimentConfig("CPush", "cl"),
+    MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
+    MsExperimentConfig("C-P2C", "cl"),
+    MsExperimentConfig("Prequal", "prequal"),
     MsExperimentConfig("P2C", "power-of-two"),
     MsExperimentConfig("LR", "least-request"),
-    MsExperimentConfig("WRR", "round-robin"),
+    MsExperimentConfig("RR", "round-robin"),
     MsExperimentConfig("R", "random"),
     MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
     #MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs"),
+    #MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
 ]
 
 
@@ -81,17 +91,17 @@ def microservice_order(data: dict) -> list[str]:
     raise SystemExit("ms JSON missing microservice_order; rebuild the ms binary")
 
 
-def per_tier_average_occupancy(data: dict, microservices: list[str]) -> np.ndarray:
-    by_ms = data.get("server_avg_queue_inflight") or {}
+def per_tier_average_queue(data: dict, microservices: list[str]) -> np.ndarray:
+    by_ms = data.get("server_avg_queue") or {}
     if not by_ms:
-        raise SystemExit("ms JSON missing server_avg_queue_inflight")
+        raise SystemExit("ms JSON missing server_avg_queue; rebuild the ms binary")
     values: list[float] = []
     for ms in microservices:
         if ms not in by_ms:
-            raise SystemExit(f"ms JSON missing server_avg_queue_inflight for {ms}")
+            raise SystemExit(f"ms JSON missing server_avg_queue for {ms}")
         replica_avgs = [float(v) for v in by_ms[ms].values()]
         if not replica_avgs:
-            raise SystemExit(f"server_avg_queue_inflight has no replicas for {ms}")
+            raise SystemExit(f"server_avg_queue has no replicas for {ms}")
         values.append(float(np.mean(replica_avgs)))
     return np.asarray(values, dtype=float)
 
@@ -101,7 +111,8 @@ def format_run_summary(
     config: MsExperimentConfig,
     load: float,
     rps: float,
-    tier_occupancy: np.ndarray,
+    tier_queue: np.ndarray,
+    seed: int | None = None,
 ) -> str:
     parts = [
         f"label={config.label}",
@@ -114,15 +125,19 @@ def format_run_summary(
         parts.append(f"pull_policy={config.pull_policy}")
     if config.approx_sched is not None:
         parts.append(f"approx_sched={config.approx_sched}")
-    if config.lb_policy == "centralized" and config.centralized_sched != "fcfs":
+    if config.lb_policy in ("centralized", "jbsq") and config.centralized_sched != "fcfs":
         parts.append(f"centralized_sched={config.centralized_sched}")
+    if config.jbsq_n is not None:
+        parts.append(f"jbsq_n={config.jbsq_n}")
     if config.scale is not None:
         parts.append(f"scale={config.scale}")
     if config.service_dist is not None:
         parts.append(f"service_dist={config.service_dist}")
     parts.append(f"rps={rps:g}")
-    tier_str = ",".join(f"{v:.3f}" for v in tier_occupancy)
-    parts.append(f"tier_avg_occupancy=[{tier_str}]")
+    if seed is not None:
+        parts.append(f"seed={seed}")
+    tier_str = ",".join(f"{v:.3f}" for v in tier_queue)
+    parts.append(f"tier_avg_queue=[{tier_str}]")
     return "  ".join(parts)
 
 
@@ -137,9 +152,14 @@ def run_occupancy_compare(
     seed: int | None,
     default_service_dist: str = "exp",
 ) -> tuple[list[str], list[tuple[str, np.ndarray]]]:
-    """Return (microservices, [(label, per-tier avg occupancy)])."""
+    """Return (microservices, [(label, per-tier avg queue length)]).
+
+    The same seed is used for every config.
+    """
     microservices: list[str] | None = None
     series: list[tuple[str, np.ndarray]] = []
+    if seed is not None:
+        _log(f"shared seed: {seed}")
 
     for config in tqdm(configs, desc="config", unit="run"):
         rps = load * resolve_config_rps(config)
@@ -160,6 +180,7 @@ def run_occupancy_compare(
             rps=rps,
             service_dist=service_dist,
             approx_sched=config.approx_sched,
+            jbsq_n=config.jbsq_n,
             scale=config.scale,
         )
         order = microservice_order(data)
@@ -170,14 +191,15 @@ def run_occupancy_compare(
                 f"microservice_order mismatch for {config.label!r}: "
                 f"{order} vs {microservices}"
             )
-        tier_occupancy = per_tier_average_occupancy(data, microservices)
-        series.append((config.label, tier_occupancy))
+        tier_queue = per_tier_average_queue(data, microservices)
+        series.append((config.label, tier_queue))
         _log(
             format_run_summary(
                 config=config,
                 load=load,
                 rps=rps,
-                tier_occupancy=tier_occupancy,
+                tier_queue=tier_queue,
+                seed=seed,
             )
         )
 
@@ -193,6 +215,7 @@ def plot_occupancy_scatter(
     output_path: Path,
 ) -> None:
     style = ACM_COMPACT_HALF
+    #style = replace(style, aspect_ratio=)
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
 
@@ -217,26 +240,30 @@ def plot_occupancy_scatter(
             zorder=3,
         )
 
-    y_hi = max(all_y) if all_y else 1.0
-    if y_hi <= 0:
-        y_hi = 1.0
-    y_pad = style.axis_guard_fraction * y_hi
+    y_lo = min(all_y) if all_y else 0.0
+    y_hi = max(all_y) if all_y else Y_TICK_STEP
+    # Snap to 0.5 ticks so axis bounds sit on tick marks with no extra pad.
+    y_min = math.floor(y_lo / Y_TICK_STEP + 1e-12) * Y_TICK_STEP
+    y_max = math.ceil(y_hi / Y_TICK_STEP - 1e-12) * Y_TICK_STEP
+    if y_max <= y_min:
+        y_max = y_min + Y_TICK_STEP
 
     ax.set_xticks(positions)
     ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
     ax.set_xlim(-0.5, n_tiers - 0.5)
-    ax.set_ylim(0.0, y_hi + y_pad)
 
     grid.configure_ax(
         ax,
-        xlabel="Microservice tier",
-        ylabel="Average Occupancy",
+        xlabel="Microservice Tier",
+        ylabel="Average Queue Length",
         title="",
         show_xlabel=True,
         show_ylabel=True,
         show_xticklabels=True,
         show_yticklabels=True,
-        auto_ticks=False,
+        auto_ticks=True,
+        y_step=Y_TICK_STEP,
+        ylim=(y_min, y_max),
     )
     grid.add_shared_legend(position="top")
     grid.save(output_path)
@@ -359,7 +386,15 @@ def parse_args() -> argparse.Namespace:
             "default: per-config or exp)"
         ),
     )
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "RNG seed shared by every config "
+            "(default: pick a seed for this execution and log it)"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -378,6 +413,9 @@ def main() -> None:
 
     callgraph, load_file = resolve_fixtures(args)
     binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="ms")
+
+    if args.seed is None:
+        args.seed = random.randrange(2**32)
 
     microservices, series = run_occupancy_compare(
         binary,

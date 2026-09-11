@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import os
+import sched
 import sys
 import tempfile
 from pathlib import Path
@@ -66,12 +67,14 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
-    #MsExperimentConfig("CPull", "centralized"),
+    MsExperimentConfig("Idealized LB", "centralized"),
+    #MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
     #MsExperimentConfig("CPush", "cl"),
     MsExperimentConfig("P2C", "power-of-two"),
-    #MsExperimentConfig("P2C+EDF", "power-of-two", scheduling="edf"),
+    #MsExperimentConfig("Prequal", "prequal"),
+    MsExperimentConfig("P2C+TailClipper", "power-of-two", scheduling="edf"),
     #MsExperimentConfig("LR", "least-request"),
-    #MsExperimentConfig("WRR", "round-robin"),
+    #MsExperimentConfig("RR", "round-robin"),
     #MsExperimentConfig("R", "random"),
     #MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
     #MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs"),
@@ -205,6 +208,7 @@ def run_cum_queueing_var_compare(
             approx_share=(
                 config.approx_share if config.lb_policy == "approx-share" else None
             ),
+            jbsq_n=config.jbsq_n,
             scale=config.scale,
         )
         order = microservice_order(data)
@@ -296,7 +300,7 @@ def plot_cum_queueing_var_lines(
         ax.set_xlim(positions[0] - 0.5, positions[-1] + 0.5)
     grid.configure_ax(
         ax,
-        xlabel="Microservice index",
+        xlabel="Microservice Tier",
         ylabel="Cum. Queue. Var.",
         title="",
         show_xlabel=True,
