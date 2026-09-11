@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Sweep an lb simulator parameter and plot a metric vs sweep axis per LB policy."""
+"""Sweep an lb simulator parameter and plot a metric vs sweep axis per LB policy.
+
+One RNG seed is used for SLO calibration and every series × sweep-value run.
+If --seed is omitted, a seed is picked for this execution and logged.
+"""
 
 from __future__ import annotations
 
 import argparse
+import random
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -48,7 +53,7 @@ POLICY_LEGEND_LABELS = {
     "random": "R",
     "least-request": "LR",
     "power-of-two": "P2C",
-    "round-robin": "WRR",
+    "round-robin": "RR",
 }
 PULL_POLICY_LEGEND_SUFFIX = {
     "least-request": None,  # omitted from legend (default pull policy)
@@ -485,6 +490,7 @@ def plot_sweep(
     title: str | None = None,
 ) -> None:
     style = ACM_COMPACT_HALF
+    style = replace(style, aspect_ratio=0.4)
     grid = SubplotGrid(style, layout="1x1")
     ax = grid.get_ax(0, 0)
 
@@ -522,9 +528,21 @@ def plot_sweep(
             ylabel="SLO Violations (%)",
             title=title or "",
             ylim=(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX),
-            y_step=1,
-            auto_ticks=True,
+            auto_ticks=False,
+            grid=False,
         )
+        yticks = np.arange(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX + 0.1, 2)
+        y_grid = np.arange(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX + 0.1, 1)
+        # Labels on major ticks; grid drawn explicitly so it can differ from labels.
+        ax.set_yticks(yticks)
+        ax.set_ylim(SLO_VIOLATION_Y_MIN, SLO_VIOLATION_Y_MAX)
+        ax.grid(False)
+        ax.set_axisbelow(True)
+        grid_kw = dict(color="0.5", alpha=0.3, linewidth=0.5, zorder=0)
+        for x in x_values:
+            ax.axvline(x, **grid_kw)
+        for y in y_grid:
+            ax.axhline(y, **grid_kw)
     else:
         grid.configure_labels(
             pattern="leftmost_y_bottom_x",
@@ -704,7 +722,10 @@ def parse_args() -> argparse.Namespace:
         "--seed",
         type=int,
         default=None,
-        help="RNG seed for reproducible simulation",
+        help=(
+            "RNG seed shared by SLO calibration and every series × sweep-value "
+            "run (default: pick a seed for this execution and log it)"
+        ),
     )
     parser.add_argument(
         "--format",
@@ -756,6 +777,10 @@ def main() -> None:
     if not binary.is_file():
         raise SystemExit(f"lb binary not found: {binary}")
 
+    if args.seed is None:
+        args.seed = random.randrange(2**32)
+    _log(f"shared seed: {args.seed}")
+
     base_kwargs = base_sim_kwargs(args, args.sweep)
     slo = args.slo
     if metric_kind == "slo-violation" and slo is None:
@@ -792,7 +817,7 @@ def main() -> None:
         sweep_spec=sweep_spec,
         metric=args.metric,
         output_path=output_path,
-        title=title,
+        #title=title,
     )
     print(f"wrote {output_path}", file=sys.stderr)
 
