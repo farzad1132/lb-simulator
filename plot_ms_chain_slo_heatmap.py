@@ -28,7 +28,7 @@ except ModuleNotFoundError:
         return iterable
 
 from plot_cdfs import (
-    MS_APPROX_SCHED_POLICIES,
+    MS_AMPHIQUEUE_SCHED_POLICIES,
     MS_CENTRALIZED_SCHED_POLICIES,
     MS_LB_POLICIES,
     MS_SCHEDULING_POLICIES,
@@ -95,7 +95,7 @@ def calibrate_topology_slo(
     centralized_sched: str,
     seed: int | None,
     service_dist: str,
-    approx_sched: str | None,
+    amphiqueue_sched: str | None,
 ) -> float:
     data = run_ms_simulation(
         binary,
@@ -109,7 +109,7 @@ def calibrate_topology_slo(
         centralized_sched=centralized_sched,
         seed=seed,
         service_dist=service_dist,
-        approx_sched=approx_sched,
+        amphiqueue_sched=amphiqueue_sched,
     )
     return slo_from_unloaded_latency_ms(api_stats(data, api))
 
@@ -134,7 +134,7 @@ def run_chain_sweep(
     seed: int | None,
     centralized_sched: str = "fcfs",
     service_dist: str = "exp",
-    approx_sched: str | None = None,
+    amphiqueue_sched: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     topologies = [
         (chain3_callgraph, chain3_load, "chain3"),
@@ -155,7 +155,7 @@ def run_chain_sweep(
             centralized_sched=centralized_sched,
             seed=seed,
             service_dist=service_dist,
-            approx_sched=approx_sched,
+            amphiqueue_sched=amphiqueue_sched,
         )
         topology_slos.append(slo_ms)
         _log(
@@ -186,7 +186,7 @@ def run_chain_sweep(
                 rps=rps,
                 slo_ms=slo_ms,
                 service_dist=service_dist,
-                approx_sched=approx_sched,
+                amphiqueue_sched=amphiqueue_sched,
             )
             stats = api_stats(data, api)
             slos[row, col] = slo_ms
@@ -246,7 +246,7 @@ def parse_args() -> argparse.Namespace:
         "--pull-policy",
         choices=PULL_POLICIES,
         default=None,
-        help="Pull-intent server selection for approx (required when --lb-policy approx)",
+        help="Pull-intent server selection for amphiqueue (required when --lb-policy amphiqueue)",
     )
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument("--scheduling", choices=MS_SCHEDULING_POLICIES, default="fifo")
@@ -267,22 +267,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
-        "--approx-sched",
-        choices=MS_APPROX_SCHED_POLICIES,
+        "--amphiqueue-sched",
+        choices=MS_AMPHIQUEUE_SCHED_POLICIES,
         default=None,
-        help="Approx outbound pull scheduling: fcfs, edf, or edf+ (only valid with --lb-policy approx)",
+        help="AmphiQueue outbound pull scheduling: fcfs, edf, or edf+ (only valid with --lb-policy amphiqueue)",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.lb_policy == "approx" and args.pull_policy is None:
-        raise SystemExit("--pull-policy is required when --lb-policy approx")
-    if args.lb_policy != "approx" and args.pull_policy is not None:
-        raise SystemExit("--pull-policy is only valid with --lb-policy approx")
-    if args.approx_sched is not None and args.lb_policy != "approx":
-        raise SystemExit("--approx-sched is only valid with --lb-policy approx")
+    if args.lb_policy == "amphiqueue" and args.pull_policy is None:
+        raise SystemExit("--pull-policy is required when --lb-policy amphiqueue")
+    if args.lb_policy != "amphiqueue" and args.pull_policy is not None:
+        raise SystemExit("--pull-policy is only valid with --lb-policy amphiqueue")
+    if args.amphiqueue_sched is not None and args.lb_policy != "amphiqueue":
+        raise SystemExit("--amphiqueue-sched is only valid with --lb-policy amphiqueue")
     if args.centralized_sched != "fcfs" and args.lb_policy != "centralized":
         raise SystemExit(
             "--centralized-sched edf is only valid with --lb-policy centralized"
@@ -314,7 +314,7 @@ def main() -> None:
         centralized_sched=args.centralized_sched,
         seed=args.seed,
         service_dist=args.service_dist,
-        approx_sched=args.approx_sched,
+        amphiqueue_sched=args.amphiqueue_sched,
     )
     output_path = output_path_with_comment(args.output, args.comment)
     plot_chain_heatmap(loads, probs, output_path)

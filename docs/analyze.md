@@ -35,7 +35,7 @@ flowchart LR
 |-------|-------------|
 | `microservice_utilization_pct` | Per-microservice utilization (%) |
 | `server_utilization_pct` | Per-server utilization nested under each microservice |
-| `server_avg_queue_inflight` | Per-server time-weighted average occupancy (`queue + in_flight`, plus caller outbound LB queue under centralized/approx; under approx-share the sidecar outbound depth is split evenly across owned replicas) |
+| `server_avg_queue_inflight` | Per-server time-weighted average occupancy (`queue + in_flight`, plus caller outbound LB queue under centralized/amphiqueue; under amphiqueue-share the sidecar outbound depth is split evenly across owned replicas) |
 | `by_api` | Per-API request metrics (`e2e_ms`, `processing_time_ms`, SLO fields) |
 | `by_microservice` | Per-microservice visit sample arrays (see below) |
 | `total_processing_p99_ms` | p99 of per-request total local processing time across the call tree |
@@ -96,18 +96,18 @@ cargo build --release --bin lb
 # push (default power-of-two) — backlog at servers (hop 1)
 .venv/bin/python analyze/lb_service_distributions.py --n 100000 --seed 42 --servers 4 --clients 4
 
-# approx bound (1:1 pulls) — backlog at client LB queues (hop 0)
+# amphiqueue bound (1:1 pulls) — backlog at client LB queues (hop 0)
 .venv/bin/python analyze/lb_service_distributions.py \
-  --lb-policy approx --pull-policy least-request \
+  --lb-policy amphiqueue --pull-policy least-request \
   --servers 4 --clients 4 --slo 5 --n 100000
 
-# approx unbound FCFS
+# amphiqueue unbound FCFS
 .venv/bin/python analyze/lb_service_distributions.py \
-  --lb-policy approx --pull-policy least-request --approx-sched fcfs \
+  --lb-policy amphiqueue --pull-policy least-request --amphiqueue-sched fcfs \
   --servers 4 --clients 4 --n 100000
 ```
 
-Default PDF names include the policy (and pull-policy / approx-sched when set), e.g. `output/lb_service_distributions_approx_leastrequest.pdf`.
+Default PDF names include the policy (and pull-policy / amphiqueue-sched when set), e.g. `output/lb_service_distributions_amphiqueue_leastrequest.pdf`.
 
 ### Output artifacts
 
@@ -191,13 +191,13 @@ Custom fixtures and policy variants:
 .venv/bin/python analyze/ms_service_distributions.py \
   --service-dist bimodal --n 100000 --seed 42
 
-# approx unbound with outbound EDF queue scheduling
+# amphiqueue unbound with outbound EDF queue scheduling
 .venv/bin/python analyze/ms_service_distributions.py \
   --callgraph tests/chain/3/callgraph.json \
   --load-file tests/chain/3/load.json \
-  --lb-policy approx --pull-policy least-request \
-  --approx-sched edf \
-  --comment approx-lr-nb-edf
+  --lb-policy amphiqueue --pull-policy least-request \
+  --amphiqueue-sched edf \
+  --comment amphiqueue-lr-nb-edf
 ```
 
 ## Output artifacts

@@ -3,8 +3,8 @@ use lb::microservice::{
     MsArgs, MsServiceDistribution, MsStats, OutputFormat, print_human_stats, run,
 };
 use lb::policy::{
-    validate_approx_share, validate_centralized_sched, validate_jbsq_n, validate_prequal_subset,
-    ApproxSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    validate_amphiqueue_share, validate_centralized_sched, validate_jbsq_n, validate_prequal_subset,
+    AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
 };
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -48,9 +48,9 @@ struct Args {
     #[arg(long, value_enum, default_value_t = MsServiceDistribution::Exp)]
     service_dist: MsServiceDistribution,
     #[arg(long, value_enum)]
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
     #[arg(long, default_value_t = 1)]
-    approx_share: u32,
+    amphiqueue_share: u32,
     #[arg(long)]
     jbsq_n: Option<u32>,
     #[arg(short, long, action = clap::ArgAction::Count, default_value_t = 0)]
@@ -60,7 +60,7 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
     validate_prequal_subset(cli.lb_policy, cli.lb_subset_size)?;
-    validate_approx_share(cli.lb_policy, cli.approx_share)?;
+    validate_amphiqueue_share(cli.lb_policy, cli.amphiqueue_share)?;
     validate_centralized_sched(cli.lb_policy, cli.centralized_sched)?;
     validate_jbsq_n(cli.lb_policy, cli.jbsq_n)?;
     let args = MsArgs {
@@ -85,8 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pull_audit: None,
         centralized_audit: None,
         jbsq_audit: None,
-        approx_sched: cli.approx_sched,
-        approx_share: cli.approx_share,
+        amphiqueue_sched: cli.amphiqueue_sched,
+        amphiqueue_share: cli.amphiqueue_share,
         jbsq_n: cli.jbsq_n,
     };
 
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_approx_lb_policy() {
+    fn parses_amphiqueue_lb_policy() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
@@ -179,11 +179,11 @@ mod tests {
             "--load-file",
             "tests/fanin/load.json",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "least-request",
         ]);
-        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Approx);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::AmphiQueue);
         assert_eq!(cli.pull_policy, Some(PullPolicyKind::LeastRequest));
     }
 
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_approx_sched_edf() {
+    fn parses_amphiqueue_sched_edf() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
@@ -369,17 +369,17 @@ mod tests {
             "--load-file",
             "tests/fanin/load.json",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "least-request",
-            "--approx-sched",
+            "--amphiqueue-sched",
             "edf",
         ]);
-        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::Edf));
+        assert_eq!(cli.amphiqueue_sched, Some(AmphiQueueSchedKind::Edf));
     }
 
     #[test]
-    fn parses_approx_sched_edf_plus() {
+    fn parses_amphiqueue_sched_edf_plus() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
@@ -387,17 +387,17 @@ mod tests {
             "--load-file",
             "tests/fanin/load.json",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "least-request",
-            "--approx-sched",
+            "--amphiqueue-sched",
             "edf+",
         ]);
-        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::EdfPlus));
+        assert_eq!(cli.amphiqueue_sched, Some(AmphiQueueSchedKind::EdfPlus));
     }
 
     #[test]
-    fn parses_approx_sched_fcfs() {
+    fn parses_amphiqueue_sched_fcfs() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
@@ -405,18 +405,18 @@ mod tests {
             "--load-file",
             "tests/fanin/load.json",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "least-request",
-            "--approx-sched",
+            "--amphiqueue-sched",
             "fcfs",
         ]);
-        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::Fcfs));
-        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::Approx);
+        assert_eq!(cli.amphiqueue_sched, Some(AmphiQueueSchedKind::Fcfs));
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::AmphiQueue);
     }
 
     #[test]
-    fn parses_approx_share_defaults_and_flags() {
+    fn parses_amphiqueue_share_defaults_and_flags() {
         let cli = Args::parse_from([
             "ms",
             "--callgraph",
@@ -424,18 +424,18 @@ mod tests {
             "--load-file",
             "tests/fanin/load.json",
             "--lb-policy",
-            "approx-share",
+            "amphiqueue-share",
             "--pull-policy",
             "power-of-two",
-            "--approx-share",
+            "--amphiqueue-share",
             "4",
-            "--approx-sched",
+            "--amphiqueue-sched",
             "edf",
         ]);
-        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::ApproxShare);
-        assert_eq!(cli.approx_share, 4);
+        assert_eq!(cli.lb_policy, LoadBalancePolicyKind::AmphiQueueShare);
+        assert_eq!(cli.amphiqueue_share, 4);
         assert_eq!(cli.pull_policy, Some(PullPolicyKind::PowerOfTwo));
-        assert_eq!(cli.approx_sched, Some(ApproxSchedKind::Edf));
+        assert_eq!(cli.amphiqueue_sched, Some(AmphiQueueSchedKind::Edf));
         assert_eq!(
             Args::parse_from([
                 "ms",
@@ -444,7 +444,7 @@ mod tests {
                 "--load-file",
                 "tests/fanin/load.json",
             ])
-            .approx_share,
+            .amphiqueue_share,
             1
         );
     }

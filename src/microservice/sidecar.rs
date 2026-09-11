@@ -1,15 +1,15 @@
-//! Shared approx sidecars: grouping helpers and dual-mode server-side actor.
+//! Shared amphiqueue sidecars: grouping helpers and dual-mode server-side actor.
 //!
 //! - **Push (ingress):** forward to an owned replica's local queue (no sidecar wait
 //!   queue). `share=1` is identity; `share>1` joins the least-occupancy replica
 //!   (`queue.len() + in_flight`).
-//! - **Pull (approx-share):** shared intent queue; capacity-gated `ReplicaPull` replies.
+//! - **Pull (amphiqueue-share):** shared intent queue; capacity-gated `ReplicaPull` replies.
 
 use super::balancer::ReplicaPull;
 use super::hop::ReplicaInput;
-use crate::approx::PullIntent;
-use crate::approx_audit::ApproxPullAudit;
-use crate::policy::ApproxSchedKind;
+use crate::amphiqueue::PullIntent;
+use crate::amphiqueue_audit::AmphiQueuePullAudit;
+use crate::policy::AmphiQueueSchedKind;
 use crate::scheduling::edf_insert_index;
 use nexosim::model::{Context, Model};
 use nexosim::ports::Output;
@@ -54,9 +54,9 @@ pub enum SidecarCapacityEvent {
     Occupancy { server_idx: usize, level: u32 },
 }
 
-/// Shared server-side sidecar: ingress fan-out + pull approx-share intent queue.
+/// Shared server-side sidecar: ingress fan-out + pull amphiqueue-share intent queue.
 #[derive(Deserialize, Serialize)]
-pub struct ApproxServerSidecar {
+pub struct AmphiQueueServerSidecar {
     #[serde(skip)]
     microservice_id: String,
     sidecar_id: usize,
@@ -73,21 +73,21 @@ pub struct ApproxServerSidecar {
     pull_intent_queue: VecDeque<PullIntent>,
     /// Ingress dispatch to owned replicas.
     pub upstream_outputs: HashMap<usize, Output<ReplicaInput>>,
-    pub approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
+    pub amphiqueue_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
     #[serde(skip)]
-    pull_audit: Option<Arc<ApproxPullAudit>>,
+    pull_audit: Option<Arc<AmphiQueuePullAudit>>,
     #[serde(skip)]
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
 }
 
-impl ApproxServerSidecar {
+impl AmphiQueueServerSidecar {
     pub fn new(
         microservice_id: String,
         sidecar_id: usize,
         replica_indices: Vec<usize>,
         max_concurrency: u32,
-        pull_audit: Option<Arc<ApproxPullAudit>>,
-        approx_sched: Option<ApproxSchedKind>,
+        pull_audit: Option<Arc<AmphiQueuePullAudit>>,
+        amphiqueue_sched: Option<AmphiQueueSchedKind>,
     ) -> Self {
         let mut occupancy = HashMap::new();
         let mut pending_pulls = HashMap::new();
@@ -106,9 +106,9 @@ impl ApproxServerSidecar {
             max_concurrency: max_conc,
             pull_intent_queue: VecDeque::new(),
             upstream_outputs: HashMap::new(),
-            approx_pull_outputs: HashMap::new(),
+            amphiqueue_pull_outputs: HashMap::new(),
             pull_audit,
-            approx_sched,
+            amphiqueue_sched,
         }
     }
 
@@ -133,7 +133,7 @@ impl ApproxServerSidecar {
         best
     }
 
-    /// Pull mode (approx-share): pop one intent and reply with ReplicaPull.
+    /// Pull mode (amphiqueue-share): pop one intent and reply with ReplicaPull.
     async fn drain_intent_for_replica(&mut self, server_idx: usize) {
         if !self.has_capacity(server_idx) {
             return;
@@ -159,7 +159,7 @@ impl ApproxServerSidecar {
             );
         }
         *self.pending_pulls.entry(server_idx).or_insert(0) += 1;
-        if let Some(output) = self.approx_pull_outputs.get_mut(&intent.sender_id) {
+        if let Some(output) = self.amphiqueue_pull_outputs.get_mut(&intent.sender_id) {
             output
                 .send(ReplicaPull {
                     target_microservice: self.microservice_id.clone(),
@@ -197,7 +197,7 @@ impl ApproxServerSidecar {
 }
 
 #[Model]
-impl ApproxServerSidecar {
+impl AmphiQueueServerSidecar {
     /// Ingress: enqueue on the least-loaded owned replica (identity when share=1).
     pub async fn receive_upstream(&mut self, msg: ReplicaInput, _cx: &Context<Self>) {
         let ReplicaInput::Upstream(hop) = msg else {
@@ -230,7 +230,7 @@ impl ApproxServerSidecar {
             );
         }
         if self
-            .approx_sched
+            .amphiqueue_sched
             .is_some_and(|s| s.intent_queue_uses_edf())
         {
             let insert_at = edf_insert_index(
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn select_replica_least_occupancy() {
-        let mut sc = ApproxServerSidecar::new("ms".into(), 0, vec![0, 1, 2], 1, None, None);
+        let mut sc = AmphiQueueServerSidecar::new("ms".into(), 0, vec![0, 1, 2], 1, None, None);
         sc.occupancy.insert(0, 2);
         sc.occupancy.insert(1, 0);
         sc.occupancy.insert(2, 1);

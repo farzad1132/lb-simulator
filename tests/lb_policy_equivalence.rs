@@ -49,8 +49,8 @@ const POLICIES: &[PolicyCase] = &[
         extra_args: &["--lb-policy", "centralized"],
     },
     PolicyCase {
-        name: "approx",
-        extra_args: &["--lb-policy", "approx", "--pull-policy", "random"],
+        name: "amphiqueue",
+        extra_args: &["--lb-policy", "amphiqueue", "--pull-policy", "random"],
     },
 ];
 

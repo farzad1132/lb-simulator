@@ -70,11 +70,11 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("R", "random", 10, 10),
     #ExperimentConfig("CL-1-LR", "least-request", 1, 10),
     #ExperimentConfig("C-P2C-5", "power-of-two", 5, 100),
-    ExperimentConfig("Approx", "approx", 10, 10, pull_policy="least-request"),
-    ExperimentConfig("Approx-FCFS", "approx", 10, 10, pull_policy="least-request", approx_sched="fcfs"),
-    ExperimentConfig("CL-Approx-S2", "approx", 5, 5, concurrency=2, pull_policy="least-request", approx_sched="fcfs"),
-    #ExperimentConfig("Approx-R", "approx", 10, 10, pull_policy="random"),
-    #ExperimentConfig("Approx-R-FCFS", "approx", 10, 10, pull_policy="random", approx_sched="fcfs"),
+    ExperimentConfig("AmphiQueue", "amphiqueue", 10, 10, pull_policy="least-request"),
+    ExperimentConfig("AmphiQueue-FCFS", "amphiqueue", 10, 10, pull_policy="least-request", amphiqueue_sched="fcfs"),
+    ExperimentConfig("CL-AmphiQueue-S2", "amphiqueue", 5, 5, concurrency=2, pull_policy="least-request", amphiqueue_sched="fcfs"),
+    #ExperimentConfig("AmphiQueue-R", "amphiqueue", 10, 10, pull_policy="random"),
+    #ExperimentConfig("AmphiQueue-R-FCFS", "amphiqueue", 10, 10, pull_policy="random", amphiqueue_sched="fcfs"),
     #ExperimentConfig("Prequal", "prequal", 10, 10),
     #ExperimentConfig("P2C-S5", "power-of-two", 10, 10, shed_delay=5),
     #ExperimentConfig("P2C-E362", "power-of-two", 10, 10, lb_subset_size=0, express_size=3, express_del_th=6, express_th=2),
@@ -145,8 +145,8 @@ def calibrate_slo(
     }
     if uses_pull_policy(config):
         sim_kwargs["pull_policy"] = config.pull_policy
-        if config.approx_sched is not None:
-            sim_kwargs["approx_sched"] = config.approx_sched
+        if config.amphiqueue_sched is not None:
+            sim_kwargs["amphiqueue_sched"] = config.amphiqueue_sched
     if uses_express_lane(config):
         sim_kwargs.update(
             expresslane=True,
@@ -184,8 +184,8 @@ def format_run_summary(
     ]
     if uses_pull_policy(config):
         parts.append(f"pull_policy={config.pull_policy}")
-    if config.approx_sched is not None:
-        parts.append(f"approx_sched={config.approx_sched}")
+    if config.amphiqueue_sched is not None:
+        parts.append(f"amphiqueue_sched={config.amphiqueue_sched}")
     if uses_express_lane(config):
         parts.append(f"express_size={config.express_size}")
         if config.express_del_th is not None:
@@ -241,8 +241,8 @@ def run_load_sweep(
         }
         if uses_pull_policy(config):
             sim_kwargs["pull_policy"] = config.pull_policy
-            if config.approx_sched is not None:
-                sim_kwargs["approx_sched"] = config.approx_sched
+            if config.amphiqueue_sched is not None:
+                sim_kwargs["amphiqueue_sched"] = config.amphiqueue_sched
         if uses_express_lane(config):
             sim_kwargs.update(
                 expresslane=True,

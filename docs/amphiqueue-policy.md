@@ -1,42 +1,42 @@
-# Approx policy (decentralized pull)
+# AmphiQueue policy (decentralized pull)
 
-This document describes the **approx** load-balancing policy: architecture, wire protocol, concurrency accounting (`in_flight`, `pending_pulls`, `pull_intent_load`, `local_inflight`), latency semantics, CLI flags, and how it differs between the `lb` and `ms` simulators.
+This document describes the **amphiqueue** load-balancing policy: architecture, wire protocol, concurrency accounting (`in_flight`, `pending_pulls`, `pull_intent_load`, `local_inflight`), latency semantics, CLI flags, and how it differs between the `lb` and `ms` simulators.
 
 See also:
 
 - [lb-simulation.md](lb-simulation.md) — general `lb` simulator (push and centralized policies)
 - [microservice-simulation.md](microservice-simulation.md) — general `ms` simulator
 - [lb-vs-ms.md](lb-vs-ms.md) — feature comparison
-- [approx-wiring-lessons.md](approx-wiring-lessons.md) — postmortem on ms approx pull port wiring (avoid repeating)
+- [amphiqueue-wiring-lessons.md](amphiqueue-wiring-lessons.md) — postmortem on ms amphiqueue pull port wiring (avoid repeating)
 
 
 
 ## Overview
 
-**Approx** is a **decentralized pull** policy. Unlike push policies (tasks pushed to servers on arrival) or **centralized** (one global pull queue), approx gives each client/caller its own FIFO queue and uses a two-phase pull protocol:
+**AmphiQueue** is a **decentralized pull** policy. Unlike push policies (tasks pushed to servers on arrival) or **centralized** (one global pull queue), amphiqueue gives each client/caller its own FIFO queue and uses a two-phase pull protocol:
 
 1. **Pull intent** — the client balancer tells a server “I have work for you.”
-2. **Pull + dispatch** — when the server has spare capacity, it pulls from that client balancer and starts service immediately. By default the pull is **bound** to the queued item identified by `request_id`; with `--approx-sched fcfs`, `edf`, or `edf+` the balancer ignores the pull's `request_id` and dispatches the queue head (FCFS or earliest-deadline, respectively).
+2. **Pull + dispatch** — when the server has spare capacity, it pulls from that client balancer and starts service immediately. By default the pull is **bound** to the queued item identified by `request_id`; with `--amphiqueue-sched fcfs`, `edf`, or `edf+` the balancer ignores the pull's `request_id` and dispatches the queue head (FCFS or earliest-deadline, respectively).
 
 Backlog lives at **client-side queues**, not at server task queues. Servers queue **pull intents**, not tasks.
 
 
-| Aspect                  | Push                  | Centralized                 | Approx                                             |
+| Aspect                  | Push                  | Centralized                 | AmphiQueue                                             |
 | ----------------------- | --------------------- | --------------------------- | -------------------------------------------------- |
 | Queue location          | Server FIFO           | Single global LB FIFO       | Per-client LB FIFO                                 |
 | Dispatch trigger        | Arrival               | Server pull (one global LB) | Pull intent → server pull                          |
 | Server task queue       | Yes                   | No                          | No                                                 |
 | Load signal for routing | `local_inflight`      | N/A (FCFS pull order)       | `pull_intent_load`                                 |
 | `--pull-policy`         | N/A                   | N/A                         | **Required**                                       |
-| Pull fulfillment        | Bound by `request_id` | Bound by `request_id`       | Bound (default) or queue head via `--approx-sched` |
+| Pull fulfillment        | Bound by `request_id` | Bound by `request_id`       | Bound (default) or queue head via `--amphiqueue-sched` |
 | `--lb-subset-size`      | Yes                   | Ignored (`lb`)              | Yes                                                |
 
 
-Ingress in `ms` stays push power-of-two on `EdgeBalancer` (same as `centralized` / `cl`). Approx applies to **outbound** routing only in `ms`.
+Ingress in `ms` stays push power-of-two on `EdgeBalancer` (same as `centralized` / `cl`). AmphiQueue applies to **outbound** routing only in `ms`.
 
 ## Wire protocol
 
-Types live in `[src/approx.rs](../src/approx.rs)`:
+Types live in `[src/amphiqueue.rs](../src/amphiqueue.rs)`:
 
 ```rust
 PullIntent { sender_id, request_id, deadline }  // balancer → server
@@ -100,11 +100,11 @@ frontend/0 ──▶ ReplicaBalancer(frontend/0) ──PullIntent──▶ backe
                                 └──────── ReplicaPull ─────────┘
 ```
 
-Each caller replica has a `ReplicaBalancer` per downstream target microservice. Queue topology matches `lb` approx, but queues hold `OutboundCall` items keyed by `request_id`.
+Each caller replica has a `ReplicaBalancer` per downstream target microservice. Queue topology matches `lb` amphiqueue, but queues hold `OutboundCall` items keyed by `request_id`.
 
 ## Load and concurrency counters
 
-Approx uses **four distinct counters**. Confusing them leads to incorrect mental models (especially around end-to-end latency).
+AmphiQueue uses **four distinct counters**. Confusing them leads to incorrect mental models (especially around end-to-end latency).
 
 ### 1. `pull_intent_load` (balancer-side, routing only)
 
@@ -125,13 +125,13 @@ Used exclusively by `--pull-policy` for server selection. **Not** used by push `
 
 Same as push policies: increments when a task is **dispatched to a server**, decrements on `release` at completion. Tracks “this balancer has assigned work to that server that has not finished yet.”
 
-Under approx, increment happens in `dispatch_to_server` after a successful pull, not on arrival.
+Under amphiqueue, increment happens in `dispatch_to_server` after a successful pull, not on arrival.
 
 ### 3. `in_flight` (server/replica-side, active service)
 
 Tasks/hops currently being processed (`begin_service` running). Incremented when service starts; decremented on `complete`.
 
-Under approx, servers **never** enqueue tasks locally — `input` always calls `begin_service` immediately. Concurrency is enforced by the pull mechanism, not by a server task queue.
+Under amphiqueue, servers **never** enqueue tasks locally — `input` always calls `begin_service` immediately. Concurrency is enforced by the pull mechanism, not by a server task queue.
 
 ### 4. `pending_pulls` (server/replica-side, reserved slots)
 
@@ -197,11 +197,11 @@ sequenceDiagram
 2. **Enqueue + intent.** LB assigns monotonic `task_id`, pushes task onto its FIFO queue, selects a server via `--pull-policy` on `pull_intent_load`, increments `pull_intent_load[server]`, sends `PullIntent { sender_id: lb_id, request_id }`.
 3. **Intent queue.** Server `receive_pull_intent` pushes the intent and calls `drain_pull_intents_async`.
 4. **Pull.** If capacity allows, server pops one intent, increments `pending_pulls`, sends `PullRequest` to the originating LB.
-5. **Dispatch.** LB `pull` handler fulfills the pull: in **bound** mode (default, omit `--approx-sched`), removes the task whose `task_id` matches `pull.request_id`; with `--approx-sched fcfs`, removes the FIFO head regardless of `pull.request_id`. Then decrements `pull_intent_load`, increments `local_inflight`, sends task to `Server::input`.
+5. **Dispatch.** LB `pull` handler fulfills the pull: in **bound** mode (default, omit `--amphiqueue-sched`), removes the task whose `task_id` matches `pull.request_id`; with `--amphiqueue-sched fcfs`, removes the FIFO head regardless of `pull.request_id`. Then decrements `pull_intent_load`, increments `local_inflight`, sends task to `Server::input`.
 6. **Service.** Server decrements `pending_pulls`, increments `in_flight`, schedules completion after `duration`.
 7. **Completion.** `finish` set; task sent to stats sink; `release` decrements `local_inflight`; `in_flight` decremented; `drain_pull_intents_async` processes next intent.
 
-Each pull intent is bound to a specific queued item via `request_id` at intent-send time. There is a 1:1 mapping between intents and queued requests. Fulfillment semantics depend on `--approx-sched` (see below).
+Each pull intent is bound to a specific queued item via `request_id` at intent-send time. There is a 1:1 mapping between intents and queued requests. Fulfillment semantics depend on `--amphiqueue-sched` (see below).
 
 ## Intent binding invariant
 
@@ -211,46 +211,46 @@ Every `PullIntent` / `PullRequest` / `ReplicaPull` carries the `request_id` of e
 
 When a server pull arrives at the balancer, the bound item **must** be present in the queue. Lookup is by `request_id` (stored as `task_id` on the queued `Task`).
 
-If lookup fails (missing `request_id`, unknown queue, or no matching id), the simulator logs details to stderr and **panics** via `fatal_pull_abort` in `[src/approx.rs](../src/approx.rs)`. This should never happen in a correct run; it indicates a simulator bug or miswired ports.
+If lookup fails (missing `request_id`, unknown queue, or no matching id), the simulator logs details to stderr and **panics** via `fatal_pull_abort` in `[src/amphiqueue.rs](../src/amphiqueue.rs)`. This should never happen in a correct run; it indicates a simulator bug or miswired ports.
 
-### Unbound pull modes (`--approx-sched`)
+### Unbound pull modes (`--amphiqueue-sched`)
 
-Omit `--approx-sched` for **bound** mode (default): pull fulfillment removes the item matching `pull.request_id`.
+Omit `--amphiqueue-sched` for **bound** mode (default): pull fulfillment removes the item matching `pull.request_id`.
 
-With `--approx-sched fcfs`, pull fulfillment **ignores** `pull.request_id` and always pops the **head** of the outbound queue (oldest enqueued item, FCFS). With `--approx-sched edf` or `edf+` (`ms` **only**), outbound queues are ordered by hop deadline and the head is the **earliest-deadline** item. `edf+` additionally orders the **replica pull-intent queue** by deadline.
+With `--amphiqueue-sched fcfs`, pull fulfillment **ignores** `pull.request_id` and always pops the **head** of the outbound queue (oldest enqueued item, FCFS). With `--amphiqueue-sched edf` or `edf+` (`ms` **only**), outbound queues are ordered by hop deadline and the head is the **earliest-deadline** item. `edf+` additionally orders the **replica pull-intent queue** by deadline.
 
-In `lb`, `--approx-sched fcfs` uses FCFS on the client task queue (`queue.remove(0)`). In `ms`, unbound modes use the per-target outbound queue on each `ReplicaBalancer` (`outbound_queues[target].pop_front()`). Pull intents and pull messages still carry `request_id` on the wire — only the balancer's `pull` handler (and, for `edf+`, intent-queue enqueue) changes.
+In `lb`, `--amphiqueue-sched fcfs` uses FCFS on the client task queue (`queue.remove(0)`). In `ms`, unbound modes use the per-target outbound queue on each `ReplicaBalancer` (`outbound_queues[target].pop_front()`). Pull intents and pull messages still carry `request_id` on the wire — only the balancer's `pull` handler (and, for `edf+`, intent-queue enqueue) changes.
 
 
-| Aspect               | Bound (default)                                | `--approx-sched fcfs`                         | `--approx-sched edf` (`ms`)        | `--approx-sched edf+` (`ms`)                          |
+| Aspect               | Bound (default)                                | `--amphiqueue-sched fcfs`                         | `--amphiqueue-sched edf` (`ms`)        | `--amphiqueue-sched edf+` (`ms`)                          |
 | -------------------- | ---------------------------------------------- | --------------------------------------------- | ---------------------------------- | ----------------------------------------------------- |
 | Fulfillment          | Remove item matching `pull.request_id`         | Remove FIFO head                              | Remove earliest-deadline head      | Remove earliest-deadline head                         |
 | Outbound queue       | FIFO                                           | FIFO                                          | EDF                                | EDF                                                   |
 | Intent queue         | FIFO                                           | FIFO                                          | FIFO                               | EDF (by `PullIntent.deadline`)                        |
 | `request_id` on wire | Required; must match a queued item             | Still sent; ignored at fulfillment            | Still sent; ignored at fulfillment | Still sent; ignored at fulfillment                    |
-| Empty queue on pull  | Panic (`bound task/call not found` or similar) | Panic (`no queued task/call for approx pull`) | Same                               | Same                                                  |
+| Empty queue on pull  | Panic (`bound task/call not found` or similar) | Panic (`no queued task/call for amphiqueue pull`) | Same                               | Same                                                  |
 | Simulator support    | `lb` and `ms`                                  | `lb` and `ms` (outbound only in `ms`)         | `ms` **only**                      | `ms` **only**                                         |
 
 
 Use unbound modes to model decentralized pull where the server cannot rely on intent ids to identify a specific queued item — fulfillment is driven by queue discipline at the client/caller balancer regardless of which intent triggered the pull. In `ms`, outbound queue ordering is **per** `(rb_id, target_microservice)` queue. Intent-queue ordering is **per** downstream replica.
 
-### Outbound queue scheduling (`--approx-sched`)
+### Outbound queue scheduling (`--amphiqueue-sched`)
 
-Independent of server-side `[--scheduling](scheduling.md)`. Requires `--lb-policy approx` or `approx-share`.
+Independent of server-side `[--scheduling](scheduling.md)`. Requires `--lb-policy amphiqueue` or `amphiqueue-share`.
 
 
 | Flag             | Default  | Values                 | Description                                                                                      |
 | ---------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `--approx-sched` | *(omit)* | `fcfs`, `edf`, `edf+` | Omit for bound 1:1 pulls; `fcfs` / `edf` / `edf+` for unbound queue-head fulfillment |
+| `--amphiqueue-sched` | *(omit)* | `fcfs`, `edf`, `edf+` | Omit for bound 1:1 pulls; `fcfs` / `edf` / `edf+` for unbound queue-head fulfillment |
 
 
 - `fcfs`: append on enqueue (`push_back`); pulls `pop_front` (FCFS head). Intent queue remains FIFO.
 - `edf`: insert by `hop.deadline` on enqueue (same tie-breaking as server EDF); pulls `pop_front` (earliest deadline at head). Intent queue remains FIFO. `ms` **only.**
 - `edf+`: same outbound EDF as `edf`, plus EDF insert on the replica pull-intent queue by `PullIntent.deadline`. `ms` **only.**
 
-Validation (`[src/policy.rs](../src/policy.rs)`): any `--approx-sched` value requires `--lb-policy approx`; `--approx-sched edf` / `edf+` are only supported by the `ms` simulator.
+Validation (`[src/policy.rs](../src/policy.rs)`): any `--amphiqueue-sched` value requires `--lb-policy amphiqueue`; `--amphiqueue-sched edf` / `edf+` are only supported by the `ms` simulator.
 
-Trace-based tests record pull events via `[LbPullAudit](../src/lb_pull_audit.rs)` (`lb`) or `[ApproxPullAudit](../src/approx_audit.rs)` (`ms`) and check `validate_no_bind()` (FCFS), `validate_no_bind_edf()` (EDF outbound, FIFO intents), or `validate_no_bind_edf_plus()` (EDF outbound and intent queues) invariants (queue head popped, intent id may differ from pulled id). See `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`, `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`, `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`, and `[tests/ms_no_bind_edf_plus_audit.rs](../tests/ms_no_bind_edf_plus_audit.rs)`.
+Trace-based tests record pull events via `[LbPullAudit](../src/lb_pull_audit.rs)` (`lb`) or `[AmphiQueuePullAudit](../src/amphiqueue_audit.rs)` (`ms`) and check `validate_no_bind()` (FCFS), `validate_no_bind_edf()` (EDF outbound, FIFO intents), or `validate_no_bind_edf_plus()` (EDF outbound and intent queues) invariants (queue head popped, intent id may differ from pulled id). See `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`, `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`, `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`, and `[tests/ms_no_bind_edf_plus_audit.rs](../tests/ms_no_bind_edf_plus_audit.rs)`.
 
 ## Port wiring (`lb`)
 
@@ -266,7 +266,7 @@ Trace-based tests record pull events via `[LbPullAudit](../src/lb_pull_audit.rs)
 | `Server::release_outputs[lb_id]`       | server → LB         | `usize` → `LoadBalancer::release`            |
 
 
-Unlike centralized, approx does **not** call `schedule_initial_pulls` at t=0. The first pull happens when the first pull intent arrives (or after a completion drains the intent queue). This affects early transients only.
+Unlike centralized, amphiqueue does **not** call `schedule_initial_pulls` at t=0. The first pull happens when the first pull intent arrives (or after a completion drains the intent queue). This affects early transients only.
 
 ## Port wiring (`ms`)
 
@@ -276,11 +276,11 @@ Same protocol at the outbound layer:
 | Component         | Role                                                                                               |
 | ----------------- | -------------------------------------------------------------------------------------------------- |
 | `ReplicaBalancer` | Per-caller-replica outbound queues; pull intents; `pull` handler (bound or unbound per target)     |
-| `Replica`         | Pull-intent queue; `pending_pulls`; `approx_pull_outputs` (map keyed by `rb_id`) back to balancers |
+| `Replica`         | Pull-intent queue; `pending_pulls`; `amphiqueue_pull_outputs` (map keyed by `rb_id`) back to balancers |
 | `ReplicaPull`     | Extended pull message including `target_microservice`                                              |
 
 
-When an approx-dispatched hop arrives at a downstream replica with `slot_release` set, the replica decrements `pending_pulls` before `begin_service` (parallel to `Server::input` under approx).
+When an amphiqueue-dispatched hop arrives at a downstream replica with `slot_release` set, the replica decrements `pending_pulls` before `begin_service` (parallel to `Server::input` under amphiqueue).
 
 ## End-to-end latency
 
@@ -295,26 +295,26 @@ queueing_delay = (finish - start) - duration
 
 Per-microservice visit metrics in `ms` use the same idea at each hop: subtract downstream dependency response times and local processing from total visit response time. See [microservice-simulation.md](microservice-simulation.md#per-microservice-visit-metrics).
 
-Under correct concurrency enforcement, approx and push policies produce **similar** e2e distributions when routing is a no-op (e.g. `--clients 1 --servers 1`), because both model the same single-server FCFS system with backlog in different locations.
+Under correct concurrency enforcement, amphiqueue and push policies produce **similar** e2e distributions when routing is a no-op (e.g. `--clients 1 --servers 1`), because both model the same single-server FCFS system with backlog in different locations.
 
 The regression test `lb_all_policies_similar_with_single_server` in `[tests/lb_policy_equivalence.rs](../tests/lb_policy_equivalence.rs)` checks this under overload with constant arrivals and service times.
 
-## Approx-share (ms only)
+## AmphiQueue-share (ms only)
 
-`--lb-policy approx-share` groups replicas behind shared **sidecars** (like a service-mesh sidecar shared by a few application instances). Each server sidecar is **dual-mode**:
+`--lb-policy amphiqueue-share` groups replicas behind shared **sidecars** (like a service-mesh sidecar shared by a few application instances). Each server sidecar is **dual-mode**:
 
 | Mode | When | Semantics |
 |------|------|-----------|
 | **Push** | User ingress via `EdgeBalancer` | Enqueue on a replica's local queue (same FIFO/EDF queue as `DownstreamReturn`). `N=1`: edge → replica directly. `N>1`: edge → entry sidecar → least-occupancy owned replica (`queue.len() + in_flight`). |
-| **Pull** | Inter-service under approx-share | **Approx-share** protocol: shared intent queue, `--pull-policy` selects among target sidecars, bound/unbound via `--approx-sched`. |
+| **Pull** | Inter-service under amphiqueue-share | **AmphiQueue-share** protocol: shared intent queue, `--pull-policy` selects among target sidecars, bound/unbound via `--amphiqueue-sched`. |
 
 Pull admission uses per-replica occupancy + `pending_pulls` vs concurrency. Ingress does not use a sidecar wait queue.
 
 | Flag | Meaning |
 |------|---------|
-| `--approx-share N` | Replicas per sidecar (default `1`) |
+| `--amphiqueue-share N` | Replicas per sidecar (default `1`) |
 | `--pull-policy` | **Required**; selects among **target sidecars** on `pull_intent_load` |
-| `--approx-sched` | Same bound / unbound modes as approx |
+| `--amphiqueue-sched` | Same bound / unbound modes as amphiqueue |
 
 For a microservice with `R` replicas and share `N`:
 
@@ -323,39 +323,39 @@ For a microservice with `R` replicas and share `N`:
 
 **Client sidecar:** one shared `ReplicaBalancer` per group — shared outbound request queue and intent pushing.
 
-**Server sidecar (`ApproxServerSidecar`):**
+**Server sidecar (`AmphiQueueServerSidecar`):**
 
 - **Push (ingress):** for `N>1`, pick the owned replica with least `queue.len() + in_flight` (ties → lowest index) and enqueue there as ordinary `Upstream`. For `N=1`, edge wires directly to the replica (sidecar handles pull only). Occupancy is reported from each replica so join-the-shortest stays current.
-- **Pull (approx-share):** shared intent queue per group. A pull runs when a group replica has spare capacity; that same replica receives the work. Idle replicas are scanned in ascending index order.
+- **Pull (amphiqueue-share):** shared intent queue per group. A pull runs when a group replica has spare capacity; that same replica receives the work. Idle replicas are scanned in ascending index order.
 
-**Ingress** for `N>1` is push P2C among **entry sidecars** (not individual replicas); edge release / inflight accounting uses sidecar ids. With `--approx-share 1`, topology degenerates to one sidecar per replica and stays close to `approx` (same pull protocol and audit invariants; ingress joins each replica's local queue like approx). `--lb-subset-size > 0` is rejected with `approx-share`. The `lb` binary rejects `--lb-policy approx-share`.
+**Ingress** for `N>1` is push P2C among **entry sidecars** (not individual replicas); edge release / inflight accounting uses sidecar ids. With `--amphiqueue-share 1`, topology degenerates to one sidecar per replica and stays close to `amphiqueue` (same pull protocol and audit invariants; ingress joins each replica's local queue like amphiqueue). `--lb-subset-size > 0` is rejected with `amphiqueue-share`. The `lb` binary rejects `--lb-policy amphiqueue-share`.
 
 ## CLI flags
 
 
 | Flag                 | Required | Description                                                                                                                                                      |
 | -------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--lb-policy approx` | —        | Enable approx                                                                                                                                                    |
-| `--lb-policy approx-share` | —   | Enable shared-sidecar approx (`ms` **only**)                                                                                                                     |
-| `--approx-share`     | No       | Replicas per sidecar with `approx-share` (default `1`)                                                                                                           |
+| `--lb-policy amphiqueue` | —        | Enable amphiqueue                                                                                                                                                    |
+| `--lb-policy amphiqueue-share` | —   | Enable shared-sidecar amphiqueue (`ms` **only**)                                                                                                                     |
+| `--amphiqueue-share`     | No       | Replicas per sidecar with `amphiqueue-share` (default `1`)                                                                                                           |
 | `--pull-policy`      | **Yes**  | Server/sidecar selection for pull intents: `random`, `power-of-two`, `least-request`, `round-robin`. Reuses push policy implementations on the `pull_intent_load` slice. |
-| `--approx-sched`     | No       | Omit for bound 1:1 pulls. `fcfs`: unbound FCFS head. `edf`: unbound EDF outbound head (`ms` **only**). `edf+`: EDF outbound + EDF intent queue (`ms` **only**). Requires `approx` or `approx-share`. Independent of `--scheduling`. |
-| `--lb-subset-size`   | No       | Supported with `approx` (same as push); **not** supported with `approx-share`                                                                                    |
+| `--amphiqueue-sched`     | No       | Omit for bound 1:1 pulls. `fcfs`: unbound FCFS head. `edf`: unbound EDF outbound head (`ms` **only**). `edf+`: EDF outbound + EDF intent queue (`ms` **only**). Requires `amphiqueue` or `amphiqueue-share`. Independent of `--scheduling`. |
+| `--lb-subset-size`   | No       | Supported with `amphiqueue` (same as push); **not** supported with `amphiqueue-share`                                                                                    |
 
 
 Validation (`[src/policy.rs](../src/policy.rs)`):
 
-- `--pull-policy` required with `approx` or `approx-share`; forbidden with other `--lb-policy` values
-- `--approx-sched` only with `approx` or `approx-share`
-- `--approx-sched edf` / `edf+` only on the `ms` binary
-- `--approx-share` only with `approx-share` (must be `>= 1`); default `1` is allowed on other policies without passing the flag
+- `--pull-policy` required with `amphiqueue` or `amphiqueue-share`; forbidden with other `--lb-policy` values
+- `--amphiqueue-sched` only with `amphiqueue` or `amphiqueue-share`
+- `--amphiqueue-sched edf` / `edf+` only on the `ms` binary
+- `--amphiqueue-share` only with `amphiqueue-share` (must be `>= 1`); default `1` is allowed on other policies without passing the flag
 
 
 
 ## Incompatibilities
 
 
-| Feature                      | Supported with approx? | Reason                                                          |
+| Feature                      | Supported with amphiqueue? | Reason                                                          |
 | ---------------------------- | ---------------------- | --------------------------------------------------------------- |
 | `--expresslane` (`lb`)       | No                     | Backlog at client LBs, not server queues where eviction applies |
 | `--shed-delay` (`lb`)        | No                     | Servers do not queue tasks locally                              |
@@ -367,7 +367,7 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 ## Comparison with centralized
 
 
-|                  | Centralized                                              | Approx                                            |
+|                  | Centralized                                              | AmphiQueue                                            |
 | ---------------- | -------------------------------------------------------- | ------------------------------------------------- |
 | LB count         | 1 (`lb`) / 1 per downstream target (`ms`)                | 1 per client (`lb`) / 1 per caller replica (`ms`) |
 | Task queue       | Global (or per-target)                                   | Per-client/per-caller                             |
@@ -386,8 +386,8 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | LB topology         | One balancer per client (`lb`) / per caller replica (`ms`)                                                               |
 | Server choice       | `--pull-policy` at arrival/intent time                                                                                   |
-| Intent binding      | On by default (omit `--approx-sched`); violations panic. `--approx-sched fcfs`/`edf`/`edf+`: fulfill queue head, ignore pull id |
-| Server task queue   | Disabled under approx                                                                                                    |
+| Intent binding      | On by default (omit `--amphiqueue-sched`); violations panic. `--amphiqueue-sched fcfs`/`edf`/`edf+`: fulfill queue head, ignore pull id |
+| Server task queue   | Disabled under amphiqueue                                                                                                    |
 | Server intent queue | FIFO per server/replica for bound/`fcfs`/`edf`; EDF by deadline for `edf+` (`ms`)                                        |
 | Load for routing    | `pull_intent_load`, not `local_inflight`                                                                                 |
 | Release lifecycle   | Standard `local_inflight` via `release` on complete                                                                      |
@@ -400,23 +400,23 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 
 | File                                                                  | Responsibility                                                                                             |
 | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `[src/approx.rs](../src/approx.rs)`                                   | `PullIntent`, `PullRequest`, `fatal_pull_abort`                                                            |
-| `[src/policy.rs](../src/policy.rs)`                                   | `PullPolicyKind`, CLI validation, `ApproxPolicy` stub                                                      |
+| `[src/amphiqueue.rs](../src/amphiqueue.rs)`                                   | `PullIntent`, `PullRequest`, `fatal_pull_abort`                                                            |
+| `[src/policy.rs](../src/policy.rs)`                                   | `PullPolicyKind`, CLI validation, `AmphiQueuePolicy` stub                                                      |
 | `[src/load_balancer.rs](../src/load_balancer.rs)`                     | Client queue, pull intents, pull handler (bound and unbound)                                               |
-| `[src/server.rs](../src/server.rs)`                                   | Intent queue, `pending_pulls`, drain, approx `input`                                                       |
-| `[src/lb_pull_audit.rs](../src/lb_pull_audit.rs)`                     | Trace recorder for approx pull events; `validate_bound()` / `validate_no_bind()`                           |
-| `[src/microservice/balancer.rs](../src/microservice/balancer.rs)`     | `ReplicaBalancer` approx / approx-share outbound (bound and unbound)                                       |
-| `[src/microservice/replica.rs](../src/microservice/replica.rs)`       | Replica-side pull drain (`approx`) and sidecar occupancy/pull capacity notify (`approx-share`)               |
-| `[src/microservice/sidecar.rs](../src/microservice/sidecar.rs)`       | Dual-mode `ApproxServerSidecar` (least-occupancy ingress + pull approx-share) and grouping helpers         |
-| `[src/approx_audit.rs](../src/approx_audit.rs)`                       | Trace recorder for `ms` approx pulls; `validate_bound()` / `validate_no_bind()` / `validate_no_bind_edf()` / `validate_no_bind_edf_plus()` |
-| `[tests/lb_approx.rs](../tests/lb_approx.rs)`                         | Approx CLI validation and completion tests                                                                 |
-| `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`           | Trace-based `--approx-sched fcfs` invariant tests (`lb`)                                                   |
-| `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`           | Trace-based `--approx-sched fcfs` invariant tests (`ms`)                                                   |
-| `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`   | Trace-based `--approx-sched edf` invariant tests (`ms`)                                                    |
-| `[tests/ms_no_bind_edf_plus_audit.rs](../tests/ms_no_bind_edf_plus_audit.rs)` | Trace-based `--approx-sched edf+` invariant tests (`ms`)                                            |
-| `[tests/ms_approx_share_audit.rs](../tests/ms_approx_share_audit.rs)` | Trace-based topology, share=1≈approx, and share>1 least-occupancy balance tests                            |
+| `[src/server.rs](../src/server.rs)`                                   | Intent queue, `pending_pulls`, drain, amphiqueue `input`                                                       |
+| `[src/lb_pull_audit.rs](../src/lb_pull_audit.rs)`                     | Trace recorder for amphiqueue pull events; `validate_bound()` / `validate_no_bind()`                           |
+| `[src/microservice/balancer.rs](../src/microservice/balancer.rs)`     | `ReplicaBalancer` amphiqueue / amphiqueue-share outbound (bound and unbound)                                       |
+| `[src/microservice/replica.rs](../src/microservice/replica.rs)`       | Replica-side pull drain (`amphiqueue`) and sidecar occupancy/pull capacity notify (`amphiqueue-share`)               |
+| `[src/microservice/sidecar.rs](../src/microservice/sidecar.rs)`       | Dual-mode `AmphiQueueServerSidecar` (least-occupancy ingress + pull amphiqueue-share) and grouping helpers         |
+| `[src/amphiqueue_audit.rs](../src/amphiqueue_audit.rs)`                       | Trace recorder for `ms` amphiqueue pulls; `validate_bound()` / `validate_no_bind()` / `validate_no_bind_edf()` / `validate_no_bind_edf_plus()` |
+| `[tests/lb_amphiqueue.rs](../tests/lb_amphiqueue.rs)`                         | AmphiQueue CLI validation and completion tests                                                                 |
+| `[tests/lb_no_bind_audit.rs](../tests/lb_no_bind_audit.rs)`           | Trace-based `--amphiqueue-sched fcfs` invariant tests (`lb`)                                                   |
+| `[tests/ms_no_bind_audit.rs](../tests/ms_no_bind_audit.rs)`           | Trace-based `--amphiqueue-sched fcfs` invariant tests (`ms`)                                                   |
+| `[tests/ms_no_bind_edf_audit.rs](../tests/ms_no_bind_edf_audit.rs)`   | Trace-based `--amphiqueue-sched edf` invariant tests (`ms`)                                                    |
+| `[tests/ms_no_bind_edf_plus_audit.rs](../tests/ms_no_bind_edf_plus_audit.rs)` | Trace-based `--amphiqueue-sched edf+` invariant tests (`ms`)                                            |
+| `[tests/ms_amphiqueue_share_audit.rs](../tests/ms_amphiqueue_share_audit.rs)` | Trace-based topology, share=1≈amphiqueue, and share>1 least-occupancy balance tests                            |
 | `[tests/lb_policy_equivalence.rs](../tests/lb_policy_equivalence.rs)` | Cross-policy latency equivalence (1 client / 1 server)                                                     |
-| `[tests/ms_approx.rs](../tests/ms_approx.rs)`                         | `ms` approx / approx-share CLI integration tests                                                           |
+| `[tests/ms_amphiqueue.rs](../tests/ms_amphiqueue.rs)`                         | `ms` amphiqueue / amphiqueue-share CLI integration tests                                                           |
 
 
 
@@ -424,34 +424,34 @@ See [work-shedding.md](work-shedding.md) and [expresslane.md](expresslane.md).
 ## Tests
 
 ```bash
-cargo test lb_approx --release
+cargo test lb_amphiqueue --release
 cargo test lb_no_bind_audit --release
 cargo test ms_no_bind_audit --release
 cargo test ms_no_bind_edf_audit --release
 cargo test ms_no_bind_edf_plus_audit --release
 cargo test lb_all_policies_similar_with_single_server --release
-cargo test ms_approx --release
-cargo test ms_approx_share_audit --release
+cargo test ms_amphiqueue --release
+cargo test ms_amphiqueue_share_audit --release
 ```
 
-Manual sanity check (approx vs random should show comparable e2e under the same load):
+Manual sanity check (amphiqueue vs random should show comparable e2e under the same load):
 
 ```bash
-./target/release/lb --clients 1 --servers 1 --lb-policy approx --pull-policy random
+./target/release/lb --clients 1 --servers 1 --lb-policy amphiqueue --pull-policy random
 ./target/release/lb --clients 1 --servers 1 --lb-policy random
 ```
 
-Compare bound vs unbound approx (same topology; unbound modes may diverge under multi-client / multi-server load):
+Compare bound vs unbound amphiqueue (same topology; unbound modes may diverge under multi-client / multi-server load):
 
 ```bash
-./target/release/lb --lb-policy approx --pull-policy least-request --format human --n 10000
-./target/release/lb --lb-policy approx --pull-policy least-request --approx-sched fcfs --format human --n 10000
+./target/release/lb --lb-policy amphiqueue --pull-policy least-request --format human --n 10000
+./target/release/lb --lb-policy amphiqueue --pull-policy least-request --amphiqueue-sched fcfs --format human --n 10000
 
 ./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
-  --lb-policy approx --pull-policy least-request --format human --n 10000
+  --lb-policy amphiqueue --pull-policy least-request --format human --n 10000
 ./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
-  --lb-policy approx --pull-policy least-request --approx-sched edf --format human --n 10000
+  --lb-policy amphiqueue --pull-policy least-request --amphiqueue-sched edf --format human --n 10000
 ./target/release/ms --callgraph tests/chain/3/callgraph.json --load-file tests/chain/3/load.json \
-  --lb-policy approx --pull-policy least-request --approx-sched edf+ --format human --n 10000
+  --lb-policy amphiqueue --pull-policy least-request --amphiqueue-sched edf+ --format human --n 10000
 ```
 

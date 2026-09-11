@@ -1,4 +1,4 @@
-use crate::approx::{PullIntent, PullRequest};
+use crate::amphiqueue::{PullIntent, PullRequest};
 use crate::lb_pull_audit::LbPullAudit;
 use crate::occupancy::OccupancyAccumulator;
 use crate::prequal::{Probe, ProbeReply};
@@ -121,7 +121,7 @@ fn remove_task_from_queue(queue: &mut Vec<Task>, task_start: MonotonicTime) -> O
 pub enum DispatchMode {
     Push,
     Centralized,
-    Approx,
+    AmphiQueue,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -429,9 +429,9 @@ impl Server {
     pub async fn input(&mut self, task: Task, cx: &Context<Self>) {
         if matches!(
             self.dispatch_mode,
-            DispatchMode::Centralized | DispatchMode::Approx
+            DispatchMode::Centralized | DispatchMode::AmphiQueue
         ) {
-            if self.dispatch_mode == DispatchMode::Approx {
+            if self.dispatch_mode == DispatchMode::AmphiQueue {
                 self.pending_pulls = self.pending_pulls.saturating_sub(1);
             }
             self.begin_service(task, cx);
@@ -464,7 +464,7 @@ impl Server {
     }
 
     pub async fn receive_pull_intent(&mut self, intent: PullIntent, _cx: &Context<Self>) {
-        if self.dispatch_mode != DispatchMode::Approx {
+        if self.dispatch_mode != DispatchMode::AmphiQueue {
             return;
         }
         let queue_len_before = self.pull_intent_queue.len();
@@ -583,7 +583,7 @@ impl Server {
                     })
                     .await;
             }
-            DispatchMode::Approx => {
+            DispatchMode::AmphiQueue => {
                 self.drain_pull_intents_async().await;
             }
             DispatchMode::Push => {

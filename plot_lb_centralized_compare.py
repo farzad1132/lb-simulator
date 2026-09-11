@@ -56,8 +56,8 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("CQ", "centralized", 100, 10),
-    ExperimentConfig("Approx-P2C", "approx", 100, 10, pull_policy="power-of-two"),
-    ExperimentConfig("Approx-LR", "approx", 10, 10, pull_policy="least-request"),
+    ExperimentConfig("AmphiQueue-P2C", "amphiqueue", 100, 10, pull_policy="power-of-two"),
+    ExperimentConfig("AmphiQueue-LR", "amphiqueue", 10, 10, pull_policy="least-request"),
     ExperimentConfig("CL-2", "power-of-two", 2, 10),
     ExperimentConfig("CL-5", "power-of-two", 5, 10),
     ExperimentConfig("P2C", "power-of-two", 100, 10),
@@ -308,7 +308,7 @@ def default_output_path(metric: str) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare centralized, approx, and push LB policies at equal offered load "
+            "Compare centralized, amphiqueue, and push LB policies at equal offered load "
             "(task/s), scaling --load per server count."
         ),
     )

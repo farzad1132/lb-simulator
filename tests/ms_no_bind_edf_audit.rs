@@ -1,22 +1,22 @@
-use lb::microservice::{ApproxPullAudit, MsArgs, MsServiceDistribution, OutputFormat, run};
-use lb::policy::{ApproxSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::microservice::{AmphiQueuePullAudit, MsArgs, MsServiceDistribution, OutputFormat, run};
+use lb::policy::{AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::path::PathBuf;
 
-fn approx_args(
+fn amphiqueue_args(
     callgraph: PathBuf,
     load_file: PathBuf,
     n: u32,
     seed: u64,
-    approx_sched: ApproxSchedKind,
-    audit: Option<std::sync::Arc<ApproxPullAudit>>,
+    amphiqueue_sched: AmphiQueueSchedKind,
+    audit: Option<std::sync::Arc<AmphiQueuePullAudit>>,
 ) -> MsArgs {
     MsArgs {
         callgraph,
         load_file,
         n,
-        lb_policy: LoadBalancePolicyKind::Approx,
+        lb_policy: LoadBalancePolicyKind::AmphiQueue,
         pull_policy: Some(PullPolicyKind::LeastRequest),
         lb_subset_size: 0,
         lb_subset_policy: SubsetPolicyKind::Deterministic,
@@ -34,8 +34,8 @@ fn approx_args(
         pull_audit: audit,
         centralized_audit: None,
         jbsq_audit: None,
-        approx_sched: Some(approx_sched),
-        approx_share: 1,
+        amphiqueue_sched: Some(amphiqueue_sched),
+        amphiqueue_share: 1,
         jbsq_n: None,
     }
 }
@@ -49,13 +49,13 @@ fn run_with_audit(args: &MsArgs) -> lb::microservice::MsStats {
 #[test]
 fn ms_no_bind_edf_trace_invariants() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let audit = ApproxPullAudit::new();
-    let args = approx_args(
+    let audit = AmphiQueuePullAudit::new();
+    let args = amphiqueue_args(
         root.join("tests/chain/3/callgraph.json"),
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        ApproxSchedKind::Edf,
+        AmphiQueueSchedKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
@@ -67,13 +67,13 @@ fn ms_no_bind_edf_trace_invariants() {
 #[test]
 fn ms_no_bind_edf_pulls_earliest_deadline_not_intent_id() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let audit = ApproxPullAudit::new();
-    let args = approx_args(
+    let audit = AmphiQueuePullAudit::new();
+    let args = amphiqueue_args(
         root.join("tests/chain/3/callgraph.json"),
         root.join("tests/chain/3/load.json"),
         500,
         99,
-        ApproxSchedKind::Edf,
+        AmphiQueueSchedKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
@@ -103,13 +103,13 @@ fn ms_no_bind_edf_pulls_earliest_deadline_not_intent_id() {
 #[test]
 fn ms_no_bind_edf_multi_caller_independent() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let audit = ApproxPullAudit::new();
-    let args = approx_args(
+    let audit = AmphiQueuePullAudit::new();
+    let args = amphiqueue_args(
         root.join("tests/fanin/multi/callgraph.json"),
         root.join("tests/fanin/multi/load.json"),
         400,
         7,
-        ApproxSchedKind::Edf,
+        AmphiQueueSchedKind::Edf,
         Some(audit.clone()),
     );
     let stats = run_with_audit(&args);
@@ -124,25 +124,25 @@ fn ms_no_bind_edf_differs_from_fcfs() {
     let callgraph = root.join("tests/chain/3/callgraph.json");
     let load_file = root.join("tests/chain/3/load.json");
 
-    let fcfs_audit = ApproxPullAudit::new();
-    let fcfs_args = approx_args(
+    let fcfs_audit = AmphiQueuePullAudit::new();
+    let fcfs_args = amphiqueue_args(
         callgraph.clone(),
         load_file.clone(),
         500,
         99,
-        ApproxSchedKind::Fcfs,
+        AmphiQueueSchedKind::Fcfs,
         Some(fcfs_audit.clone()),
     );
     run_with_audit(&fcfs_args);
     fcfs_audit.validate_no_bind().expect("fcfs invariants");
 
-    let edf_audit = ApproxPullAudit::new();
-    let edf_args = approx_args(
+    let edf_audit = AmphiQueuePullAudit::new();
+    let edf_args = amphiqueue_args(
         callgraph,
         load_file,
         500,
         99,
-        ApproxSchedKind::Edf,
+        AmphiQueueSchedKind::Edf,
         Some(edf_audit.clone()),
     );
     run_with_audit(&edf_args);

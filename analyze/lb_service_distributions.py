@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from plot_cdfs import (  # noqa: E402
     DEFAULT_BIMODAL_MODES,
     DEFAULT_BIMODAL_PROBS,
-    LB_APPROX_SCHED_POLICIES,
+    LB_AMPHIQUEUE_SCHED_POLICIES,
     LB_POLICIES,
     LB_SERVICE_DISTS,
     PULL_POLICIES,
@@ -51,14 +51,14 @@ def default_output_path(
     *,
     lb_policy: str,
     pull_policy: str | None,
-    approx_sched: str | None,
+    amphiqueue_sched: str | None,
 ) -> Path:
-    """Tag the default PDF so approx/push runs do not overwrite each other."""
+    """Tag the default PDF so amphiqueue/push runs do not overwrite each other."""
     parts = [OUTPUT_BASENAME, lb_policy.replace("-", "")]
-    if lb_policy == "approx" and pull_policy is not None:
+    if lb_policy == "amphiqueue" and pull_policy is not None:
         parts.append(pull_policy.replace("-", ""))
-    if approx_sched is not None:
-        parts.append(approx_sched)
+    if amphiqueue_sched is not None:
+        parts.append(amphiqueue_sched)
     return OUTPUT_DIR / f"{'_'.join(parts)}.pdf"
 
 
@@ -560,7 +560,7 @@ def parse_args() -> argparse.Namespace:
         "--pull-policy",
         choices=PULL_POLICIES,
         default=None,
-        help="Required when --lb-policy approx",
+        help="Required when --lb-policy amphiqueue",
     )
     parser.add_argument("--lb-subset-size", type=int, default=0)
     parser.add_argument(
@@ -582,12 +582,12 @@ def parse_args() -> argparse.Namespace:
         help="SLO latency threshold in seconds (enables SLO violation panel)",
     )
     parser.add_argument(
-        "--approx-sched",
-        choices=LB_APPROX_SCHED_POLICIES,
+        "--amphiqueue-sched",
+        choices=LB_AMPHIQUEUE_SCHED_POLICIES,
         default=None,
         help=(
-            "Approx unbound queue scheduling: fcfs "
-            "(omit for bound 1:1 pulls; only valid with --lb-policy approx)"
+            "AmphiQueue unbound queue scheduling: fcfs "
+            "(omit for bound 1:1 pulls; only valid with --lb-policy amphiqueue)"
         ),
     )
     parser.add_argument(
@@ -636,12 +636,12 @@ def validate_lb_hop_data(data: dict) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.lb_policy == "approx" and args.pull_policy is None:
-        raise SystemExit("--pull-policy is required when --lb-policy approx")
-    if args.lb_policy != "approx" and args.pull_policy is not None:
-        raise SystemExit("--pull-policy is only valid with --lb-policy approx")
-    if args.approx_sched is not None and args.lb_policy != "approx":
-        raise SystemExit("--approx-sched is only valid with --lb-policy approx")
+    if args.lb_policy == "amphiqueue" and args.pull_policy is None:
+        raise SystemExit("--pull-policy is required when --lb-policy amphiqueue")
+    if args.lb_policy != "amphiqueue" and args.pull_policy is not None:
+        raise SystemExit("--pull-policy is only valid with --lb-policy amphiqueue")
+    if args.amphiqueue_sched is not None and args.lb_policy != "amphiqueue":
+        raise SystemExit("--amphiqueue-sched is only valid with --lb-policy amphiqueue")
     if args.lb_policy == "prequal" and args.lb_subset_size > 0:
         raise SystemExit("--lb-subset-size is not supported with --lb-policy prequal")
 
@@ -673,14 +673,14 @@ def main() -> None:
         service_mode_probs=service_mode_probs,
         seed=args.seed,
         slo=args.slo,
-        approx_sched=args.approx_sched,
+        amphiqueue_sched=args.amphiqueue_sched,
     )
     validate_lb_hop_data(data)
 
     output_base = args.output or default_output_path(
         lb_policy=args.lb_policy,
         pull_policy=args.pull_policy,
-        approx_sched=args.approx_sched,
+        amphiqueue_sched=args.amphiqueue_sched,
     )
     output = output_path_with_comment(output_base, args.comment)
     plot_distributions(data, hops=hop_order(data), output=output)

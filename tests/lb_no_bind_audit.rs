@@ -1,14 +1,14 @@
 use lb::lb_pull_audit::LbPullAudit;
 use lb::lb_simulate::{LbArrivalDistribution, LbRunArgs, LbServiceDistribution};
-use lb::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{AmphiQueueSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::rng;
 use lb::subset::SubsetPolicyKind;
 use std::sync::Arc;
 
-fn approx_args(
+fn amphiqueue_args(
     n: u32,
     _seed: u64,
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
     pull_policy: PullPolicyKind,
     servers: u32,
     concurrency: u32,
@@ -25,13 +25,13 @@ fn approx_args(
         service_mode_probs: None,
         servers,
         concurrency,
-        lb_policy: LoadBalancePolicyKind::Approx,
+        lb_policy: LoadBalancePolicyKind::AmphiQueue,
         pull_policy: Some(pull_policy),
         lb_subset_size: 0,
         lb_subset_policy: SubsetPolicyKind::Deterministic,
         clients,
         verbose: 0,
-        approx_sched,
+        amphiqueue_sched,
         pull_audit: audit,
         centralized_audit: None,
         express_lane: None,
@@ -51,10 +51,10 @@ fn run_with_audit(args: &LbRunArgs, seed: u64) -> lb::lb_simulate::LbServiceStat
 #[test]
 fn lb_no_bind_trace_invariants() {
     let audit = LbPullAudit::new();
-    let args = approx_args(
+    let args = amphiqueue_args(
         200,
         99,
-        Some(ApproxSchedKind::Fcfs),
+        Some(AmphiQueueSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         2,
         2,
@@ -71,10 +71,10 @@ fn lb_no_bind_trace_invariants() {
 #[test]
 fn lb_no_bind_pulls_oldest_not_intent_id() {
     let audit = LbPullAudit::new();
-    let args = approx_args(
+    let args = amphiqueue_args(
         200,
         99,
-        Some(ApproxSchedKind::Fcfs),
+        Some(AmphiQueueSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         2,
         2,
@@ -109,10 +109,10 @@ fn lb_no_bind_pulls_oldest_not_intent_id() {
 #[test]
 fn lb_no_bind_multi_client_independent_fcfs() {
     let audit = LbPullAudit::new();
-    let args = approx_args(
+    let args = amphiqueue_args(
         200,
         99,
-        Some(ApproxSchedKind::Fcfs),
+        Some(AmphiQueueSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         2,
         2,
@@ -129,7 +129,7 @@ fn lb_no_bind_multi_client_independent_fcfs() {
 #[test]
 fn lb_bound_pull_trace_regression() {
     let audit = LbPullAudit::new();
-    let args = approx_args(
+    let args = amphiqueue_args(
         100,
         42,
         None,

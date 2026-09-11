@@ -61,12 +61,12 @@ PULL_POLICY_LEGEND_SUFFIX = {
     "power-of-two": "P2C",
     "round-robin": "RR",
 }
-APPROX_SCHED_LEGEND_SUFFIX = {
+AMPHIQUEUE_SCHED_LEGEND_SUFFIX = {
     None: None,  # bound pulls
     "fcfs": "FCFS",
     "edf": "EDF",
 }
-APPROX_SCHED_CLI_CHOICES = ("bound", "fcfs", "edf")
+AMPHIQUEUE_SCHED_CLI_CHOICES = ("bound", "fcfs", "edf")
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,7 @@ class SeriesConfig:
     label: str
     lb_policy: str
     pull_policy: str | None = None
-    approx_sched: str | None = None
+    amphiqueue_sched: str | None = None
 
 
 SWEEP_PARAMS: dict[str, ParamSpec] = {
@@ -278,13 +278,13 @@ def policy_legend_label(lb_policy: str) -> str:
     return POLICY_LEGEND_LABELS.get(lb_policy, lb_policy)
 
 
-def approx_legend_label(
+def amphiqueue_legend_label(
     pull_policy: str,
-    approx_sched: str | None,
+    amphiqueue_sched: str | None,
     *,
     include_pull: bool,
 ) -> str:
-    parts = ["Approx"]
+    parts = ["AmphiQueue"]
     if include_pull:
         # Match load_compare: omit least-request; show short suffix for others.
         if pull_policy in PULL_POLICY_LEGEND_SUFFIX:
@@ -293,17 +293,17 @@ def approx_legend_label(
             pull_suffix = pull_policy
         if pull_suffix:
             parts.append(pull_suffix)
-    sched_suffix = APPROX_SCHED_LEGEND_SUFFIX.get(
-        approx_sched,
-        str(approx_sched).upper() if approx_sched is not None else None,
+    sched_suffix = AMPHIQUEUE_SCHED_LEGEND_SUFFIX.get(
+        amphiqueue_sched,
+        str(amphiqueue_sched).upper() if amphiqueue_sched is not None else None,
     )
     if sched_suffix is not None:
         parts.append(sched_suffix)
     return "-".join(parts)
 
 
-def parse_approx_sched_cli(values: list[str] | None) -> list[str | None]:
-    """Map CLI approx-sched tokens to simulator values (`bound` → None)."""
+def parse_amphiqueue_sched_cli(values: list[str] | None) -> list[str | None]:
+    """Map CLI amphiqueue-sched tokens to simulator values (`bound` → None)."""
     if not values:
         return [None]
     out: list[str | None] = []
@@ -319,46 +319,46 @@ def expand_series_configs(
     lb_policies: list[str],
     *,
     pull_policies: list[str] | None,
-    approx_scheds: list[str] | None,
+    amphiqueue_scheds: list[str] | None,
 ) -> list[SeriesConfig]:
-    """Expand `approx` into pull-policy × approx-sched series; other policies stay 1:1."""
-    has_approx = "approx" in lb_policies
-    if has_approx and not pull_policies:
-        raise SystemExit("--pull-policy is required when --lb-policy includes approx")
-    if pull_policies and not has_approx:
-        raise SystemExit("--pull-policy is only valid when --lb-policy includes approx")
-    if approx_scheds and not has_approx:
-        raise SystemExit("--approx-sched is only valid when --lb-policy includes approx")
+    """Expand `amphiqueue` into pull-policy × amphiqueue-sched series; other policies stay 1:1."""
+    has_amphiqueue = "amphiqueue" in lb_policies
+    if has_amphiqueue and not pull_policies:
+        raise SystemExit("--pull-policy is required when --lb-policy includes amphiqueue")
+    if pull_policies and not has_amphiqueue:
+        raise SystemExit("--pull-policy is only valid when --lb-policy includes amphiqueue")
+    if amphiqueue_scheds and not has_amphiqueue:
+        raise SystemExit("--amphiqueue-sched is only valid when --lb-policy includes amphiqueue")
 
-    scheds = parse_approx_sched_cli(approx_scheds)
+    scheds = parse_amphiqueue_sched_cli(amphiqueue_scheds)
     pulls = list(pull_policies) if pull_policies else []
     include_pull = len(pulls) > 1
 
     configs: list[SeriesConfig] = []
     for policy in lb_policies:
-        if policy != "approx":
+        if policy != "amphiqueue":
             configs.append(
                 SeriesConfig(label=policy_legend_label(policy), lb_policy=policy)
             )
             continue
-        for pull_policy, approx_sched in product(pulls, scheds):
+        for pull_policy, amphiqueue_sched in product(pulls, scheds):
             configs.append(
                 SeriesConfig(
-                    label=approx_legend_label(
+                    label=amphiqueue_legend_label(
                         pull_policy,
-                        approx_sched,
+                        amphiqueue_sched,
                         include_pull=include_pull,
                     ),
-                    lb_policy="approx",
+                    lb_policy="amphiqueue",
                     pull_policy=pull_policy,
-                    approx_sched=approx_sched,
+                    amphiqueue_sched=amphiqueue_sched,
                 )
             )
 
     labels = [c.label for c in configs]
     if len(labels) != len(set(labels)):
         raise SystemExit(
-            "duplicate series labels after expanding approx combinations: "
+            "duplicate series labels after expanding amphiqueue combinations: "
             + ", ".join(labels)
         )
     return configs
@@ -371,8 +371,8 @@ def sim_kwargs_for_series(
     out = {**base, "lb_policy": config.lb_policy}
     if config.pull_policy is not None:
         out["pull_policy"] = config.pull_policy
-    if config.approx_sched is not None:
-        out["approx_sched"] = config.approx_sched
+    if config.amphiqueue_sched is not None:
+        out["amphiqueue_sched"] = config.amphiqueue_sched
     return out
 
 
@@ -414,8 +414,8 @@ def format_run_summary(
     ]
     if sim_kwargs.get("pull_policy") is not None:
         parts.append(f"pull_policy={sim_kwargs['pull_policy']}")
-    if sim_kwargs.get("approx_sched") is not None:
-        parts.append(f"approx_sched={sim_kwargs['approx_sched']}")
+    if sim_kwargs.get("amphiqueue_sched") is not None:
+        parts.append(f"amphiqueue_sched={sim_kwargs['amphiqueue_sched']}")
     kind, pct = parse_metric(metric_name)
     if kind == "utilization":
         parts.append(f"utilization={metric_value:.1f}%")
@@ -692,19 +692,19 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         help=(
-            "Pull-intent policy/policies for approx (required when --lb-policy "
-            "includes approx). Multiple values expand approx into one series each "
-            "(cartesian product with --approx-sched)."
+            "Pull-intent policy/policies for amphiqueue (required when --lb-policy "
+            "includes amphiqueue). Multiple values expand amphiqueue into one series each "
+            "(cartesian product with --amphiqueue-sched)."
         ),
     )
     parser.add_argument(
-        "--approx-sched",
-        choices=APPROX_SCHED_CLI_CHOICES,
+        "--amphiqueue-sched",
+        choices=AMPHIQUEUE_SCHED_CLI_CHOICES,
         nargs="+",
         default=None,
         help=(
-            "Approx schedulers to include for each pull policy: bound (default if "
-            "omitted), fcfs, edf. Multiple values expand approx into one series each "
+            "AmphiQueue schedulers to include for each pull policy: bound (default if "
+            "omitted), fcfs, edf. Multiple values expand amphiqueue into one series each "
             "(cartesian product with --pull-policy). "
             "Note: edf is only supported by the ms simulator."
         ),
@@ -753,7 +753,7 @@ def main() -> None:
         series_configs = expand_series_configs(
             list(args.lb_policy),
             pull_policies=args.pull_policy,
-            approx_scheds=args.approx_sched,
+            amphiqueue_scheds=args.amphiqueue_sched,
         )
     else:
         raise SystemExit(f"unsupported series parameter: {args.series}")

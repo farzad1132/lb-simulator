@@ -10,9 +10,9 @@ type OutboundQueueKey = (usize, String);
 type OutboundReplayItem = (u64, MonotonicTime);
 type IntentReplayItem = (usize, u64, MonotonicTime);
 
-/// Records approx pull/intent events during a simulation run for post-hoc invariant checks.
+/// Records amphiqueue pull/intent events during a simulation run for post-hoc invariant checks.
 #[derive(Default)]
-pub struct ApproxPullAudit {
+pub struct AmphiQueuePullAudit {
     next_seq: AtomicU64,
     events: Mutex<Vec<RecordedEvent>>,
 }
@@ -20,11 +20,11 @@ pub struct ApproxPullAudit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecordedEvent {
     seq: u64,
-    kind: ApproxPullEventKind,
+    kind: AmphiQueuePullEventKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApproxPullEventKind {
+pub enum AmphiQueuePullEventKind {
     /// Upstream balancer chose a downstream target and sent a bound pull intent.
     IntentSent {
         sender_rb_id: usize,
@@ -69,12 +69,12 @@ pub enum ApproxPullEventKind {
     },
 }
 
-impl ApproxPullAudit {
+impl AmphiQueuePullAudit {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    fn record(&self, kind: ApproxPullEventKind) {
+    fn record(&self, kind: AmphiQueuePullEventKind) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         self.events.lock().unwrap().push(RecordedEvent { seq, kind });
     }
@@ -89,7 +89,7 @@ impl ApproxPullAudit {
         request_id: u64,
         deadline: MonotonicTime,
     ) {
-        self.record(ApproxPullEventKind::IntentSent {
+        self.record(AmphiQueuePullEventKind::IntentSent {
             sender_rb_id,
             sender_ms: sender_ms.to_string(),
             sender_server,
@@ -109,7 +109,7 @@ impl ApproxPullAudit {
         deadline: MonotonicTime,
         queue_len_before: usize,
     ) {
-        self.record(ApproxPullEventKind::IntentQueued {
+        self.record(AmphiQueuePullEventKind::IntentQueued {
             downstream_ms: downstream_ms.to_string(),
             downstream_server,
             sender_rb_id,
@@ -130,7 +130,7 @@ impl ApproxPullAudit {
         in_flight_before: u32,
         max_concurrency: u32,
     ) {
-        self.record(ApproxPullEventKind::IntentDrained {
+        self.record(AmphiQueuePullEventKind::IntentDrained {
             downstream_ms: downstream_ms.to_string(),
             downstream_server,
             sender_rb_id,
@@ -154,7 +154,7 @@ impl ApproxPullAudit {
         queue_len_before: usize,
         queue_head_request_id: Option<u64>,
     ) {
-        self.record(ApproxPullEventKind::PullFulfilled {
+        self.record(AmphiQueuePullEventKind::PullFulfilled {
             handler_rb_id,
             handler_ms: handler_ms.to_string(),
             handler_server,
@@ -173,7 +173,7 @@ impl ApproxPullAudit {
             .unwrap()
             .iter()
             .filter_map(|e| match &e.kind {
-                ApproxPullEventKind::PullFulfilled {
+                AmphiQueuePullEventKind::PullFulfilled {
                     intent_request_id,
                     pulled_request_id,
                     queue_head_request_id,
@@ -194,7 +194,7 @@ impl ApproxPullAudit {
             .unwrap()
             .iter()
             .filter_map(|e| match &e.kind {
-                ApproxPullEventKind::PullFulfilled {
+                AmphiQueuePullEventKind::PullFulfilled {
                     pulled_request_id,
                     ..
                 } => Some(*pulled_request_id),
@@ -209,7 +209,7 @@ impl ApproxPullAudit {
             .unwrap()
             .iter()
             .filter_map(|e| match &e.kind {
-                ApproxPullEventKind::IntentDrained { request_id, .. } => Some(*request_id),
+                AmphiQueuePullEventKind::IntentDrained { request_id, .. } => Some(*request_id),
                 _ => None,
             })
             .collect()
@@ -222,7 +222,7 @@ impl ApproxPullAudit {
             .unwrap()
             .iter()
             .filter_map(|e| match &e.kind {
-                ApproxPullEventKind::IntentSent {
+                AmphiQueuePullEventKind::IntentSent {
                     target_ms,
                     target_server,
                     ..
@@ -239,7 +239,7 @@ impl ApproxPullAudit {
             .unwrap()
             .iter()
             .filter_map(|e| match &e.kind {
-                ApproxPullEventKind::PullFulfilled {
+                AmphiQueuePullEventKind::PullFulfilled {
                     target_ms,
                     pull_from_server,
                     handler_server,
@@ -257,7 +257,7 @@ impl ApproxPullAudit {
             .unwrap()
             .iter()
             .filter_map(|e| match &e.kind {
-                ApproxPullEventKind::IntentDrained {
+                AmphiQueuePullEventKind::IntentDrained {
                     downstream_ms,
                     downstream_server,
                     request_id,
@@ -268,11 +268,11 @@ impl ApproxPullAudit {
             .collect()
     }
 
-    /// Shared invariants for bound and no-bind approx runs (depth/capacity/counts only).
+    /// Shared invariants for bound and no-bind amphiqueue runs (depth/capacity/counts only).
     pub fn validate_common(&self) -> Result<(), String> {
         let events = self.events.lock().unwrap();
         if events.is_empty() {
-            return Err("no approx pull audit events recorded".into());
+            return Err("no amphiqueue pull audit events recorded".into());
         }
 
         let mut intent_queue_depth: HashMap<(String, usize), usize> = HashMap::new();
@@ -285,7 +285,7 @@ impl ApproxPullAudit {
 
         for recorded in events.iter() {
             match &recorded.kind {
-                ApproxPullEventKind::IntentSent {
+                AmphiQueuePullEventKind::IntentSent {
                     sender_rb_id,
                     target_ms,
                     ..
@@ -295,7 +295,7 @@ impl ApproxPullAudit {
                     outbound_queue_depth.insert(key, depth + 1);
                     sent += 1;
                 }
-                ApproxPullEventKind::IntentQueued {
+                AmphiQueuePullEventKind::IntentQueued {
                     downstream_ms,
                     downstream_server,
                     queue_len_before,
@@ -314,7 +314,7 @@ impl ApproxPullAudit {
                     intent_queue_depth.insert(key, expected + 1);
                     queued += 1;
                 }
-                ApproxPullEventKind::IntentDrained {
+                AmphiQueuePullEventKind::IntentDrained {
                     downstream_ms,
                     downstream_server,
                     queue_len_before,
@@ -352,7 +352,7 @@ impl ApproxPullAudit {
                     intent_queue_depth.insert(key, expected - 1);
                     drained += 1;
                 }
-                ApproxPullEventKind::PullFulfilled {
+                AmphiQueuePullEventKind::PullFulfilled {
                     handler_rb_id,
                     target_ms,
                     pulled_request_id: _,
@@ -429,7 +429,7 @@ impl ApproxPullAudit {
 
         for recorded in events.iter() {
             match &recorded.kind {
-                ApproxPullEventKind::IntentQueued {
+                AmphiQueuePullEventKind::IntentQueued {
                     downstream_ms,
                     downstream_server,
                     sender_rb_id,
@@ -441,7 +441,7 @@ impl ApproxPullAudit {
                         .or_default()
                         .push_back((*sender_rb_id, *request_id));
                 }
-                ApproxPullEventKind::IntentDrained {
+                AmphiQueuePullEventKind::IntentDrained {
                     downstream_ms,
                     downstream_server,
                     sender_rb_id,
@@ -496,7 +496,7 @@ impl ApproxPullAudit {
 
         for recorded in events.iter() {
             match &recorded.kind {
-                ApproxPullEventKind::IntentQueued {
+                AmphiQueuePullEventKind::IntentQueued {
                     downstream_ms,
                     downstream_server,
                     sender_rb_id,
@@ -513,7 +513,7 @@ impl ApproxPullAudit {
                         *deadline,
                     );
                 }
-                ApproxPullEventKind::IntentDrained {
+                AmphiQueuePullEventKind::IntentDrained {
                     downstream_ms,
                     downstream_server,
                     sender_rb_id,
@@ -562,7 +562,7 @@ impl ApproxPullAudit {
 
         for recorded in events.iter() {
             match &recorded.kind {
-                ApproxPullEventKind::IntentSent {
+                AmphiQueuePullEventKind::IntentSent {
                     sender_rb_id,
                     target_ms,
                     request_id,
@@ -573,12 +573,12 @@ impl ApproxPullAudit {
                         .or_default()
                         .push_back(*request_id);
                 }
-                ApproxPullEventKind::IntentDrained {
+                AmphiQueuePullEventKind::IntentDrained {
                     sender_rb_id,
                     request_id,
                     ..
                 } => drained.push((*sender_rb_id, *request_id)),
-                ApproxPullEventKind::PullFulfilled {
+                AmphiQueuePullEventKind::PullFulfilled {
                     handler_rb_id,
                     target_ms,
                     intent_request_id,
@@ -675,7 +675,7 @@ impl ApproxPullAudit {
 
         for recorded in events.iter() {
             match &recorded.kind {
-                ApproxPullEventKind::IntentSent {
+                AmphiQueuePullEventKind::IntentSent {
                     sender_rb_id,
                     target_ms,
                     request_id,
@@ -686,7 +686,7 @@ impl ApproxPullAudit {
                         .or_default()
                         .push_back(*request_id);
                 }
-                ApproxPullEventKind::PullFulfilled {
+                AmphiQueuePullEventKind::PullFulfilled {
                     handler_rb_id,
                     target_ms,
                     intent_request_id,
@@ -777,7 +777,7 @@ impl ApproxPullAudit {
 
         for recorded in events.iter() {
             match &recorded.kind {
-                ApproxPullEventKind::IntentSent {
+                AmphiQueuePullEventKind::IntentSent {
                     sender_rb_id,
                     target_ms,
                     request_id,
@@ -788,7 +788,7 @@ impl ApproxPullAudit {
                     let replay = outbound_replay_queues.entry(key).or_default();
                     Self::edf_insert_replay_item(replay, *request_id, *deadline);
                 }
-                ApproxPullEventKind::PullFulfilled {
+                AmphiQueuePullEventKind::PullFulfilled {
                     handler_rb_id,
                     target_ms,
                     intent_request_id,
@@ -890,7 +890,7 @@ mod tests {
 
     #[test]
     fn validate_bound_accepts_well_formed_sequence() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         audit.record_intent_sent(3, "frontend", 3, "backend1", 4, 10, t(100));
         audit.record_intent_queued("backend1", 4, 3, 10, t(100), 0);
         audit.record_intent_drained("backend1", 4, 3, 10, 1, 0, 0, 1);
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_fifo_violation() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         audit.record_intent_sent(1, "frontend", 1, "backend1", 0, 1, t(100));
         audit.record_intent_sent(2, "frontend", 2, "backend1", 0, 2, t(120));
         audit.record_intent_queued("backend1", 0, 1, 1, t(100), 0);
@@ -912,7 +912,7 @@ mod tests {
 
     #[test]
     fn validate_no_bind_accepts_intent_mismatch() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(120));
         audit.record_intent_queued("backend1", 1, 0, 5, t(120), 0);
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn validate_no_bind_rejects_wrong_queue_head() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
         audit.record_intent_queued("backend1", 1, 0, 3, t(100), 0);
         audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn validate_no_bind_edf_accepts_intent_mismatch() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(200));
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(100));
         audit.record_intent_queued("backend1", 1, 0, 3, t(200), 0);
@@ -954,7 +954,7 @@ mod tests {
 
     #[test]
     fn validate_no_bind_edf_rejects_wrong_queue_head() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(100));
         audit.record_intent_queued("backend1", 1, 0, 3, t(100), 0);
         audit.record_intent_drained("backend1", 1, 0, 3, 1, 0, 0, 1);
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn validate_no_bind_edf_plus_accepts_intent_edf_and_outbound_mismatch() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         // Outbound EDF head is 5@100; intent EDF drains 5 then 3. First pull uses
         // intent id 5 but pulls outbound head 5; second intent 3 pulls remaining 3.
         // Force a mismatch by draining intent 3 while outbound still has both items
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn validate_no_bind_edf_plus_rejects_fifo_intent_drain() {
-        let audit = ApproxPullAudit::new();
+        let audit = AmphiQueuePullAudit::new();
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 3, t(200));
         audit.record_intent_sent(0, "frontend", 0, "backend1", 1, 5, t(100));
         audit.record_intent_queued("backend1", 1, 0, 3, t(200), 0);

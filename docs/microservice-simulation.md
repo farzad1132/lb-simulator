@@ -114,9 +114,9 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 |--------|-------|------|
 | **Poisson source** | one per API | Generates user requests at RPS from `load.json` |
 | **UserArrival** | 1 | Creates initial `Hop` and injects into the API's edge balancer |
-| **EdgeBalancer** | one per API | Push routing to entry replicas (most policies) or entry **sidecars** (`approx-share`); honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `cl-r` / `cl-rr` / `centralized` / `jbsq` / `corr` / `approx` / `approx-share` / `prequal` |
-| **ReplicaBalancer** | one per server (default, `approx`, and `prequal`); one per sidecar group (`approx-share`) | Outbound only: push dispatch (default policies), decentralized pull-intent queues (`approx` / `approx-share`), or async RIF probe pools (`prequal`) |
-| **ApproxServerSidecar** | one per sidecar group (`approx-share`) | Dual-mode: ingress fan-out to least-occupancy owned replica (`N>1`); pull approx-share intent queue for inter-service |
+| **EdgeBalancer** | one per API | Push routing to entry replicas (most policies) or entry **sidecars** (`amphiqueue-share`); honors `--lb-policy` for push policies; always power-of-two for `cl` / `cl-lr` / `cl-r` / `cl-rr` / `centralized` / `jbsq` / `corr` / `amphiqueue` / `amphiqueue-share` / `prequal` |
+| **ReplicaBalancer** | one per server (default, `amphiqueue`, and `prequal`); one per sidecar group (`amphiqueue-share`) | Outbound only: push dispatch (default policies), decentralized pull-intent queues (`amphiqueue` / `amphiqueue-share`), or async RIF probe pools (`prequal`) |
+| **AmphiQueueServerSidecar** | one per sidecar group (`amphiqueue-share`) | Dual-mode: ingress fan-out to least-occupancy owned replica (`N>1`); pull amphiqueue-share intent queue for inter-service |
 | **DownstreamBalancer** | one per downstream target (`cl`, `cl-lr`, `cl-r`, `cl-rr`, `corr`); one per subset of each target (`centralized` / `jbsq` with `k > 0`, else one per target) | Shared outbound LB: push P2C (`cl`), push least-request (`cl-lr`), push random (`cl-r`), push round-robin (`cl-rr`), pull queue with `--centralized-sched` (`centralized` / `jbsq`), or experimental push (`corr`) |
 | **OutboundGateway** | one per server (`cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `corr`) | Forwards outbound calls/releases to the correct `DownstreamBalancer` |
 | **Replica** (server) | `replicas` per microservice | Configurable queue (`fifo` default, `edf` optional; see [scheduling.md](scheduling.md)), local processing, nested dispatch/return |
@@ -126,19 +126,19 @@ frontend:g1 ─► backend1:f3 ─► (return) ─► CompletedRequest
 A callgraph microservice node becomes:
 
 - `replicas` × `Replica` (server) models, each with `max_concurrency = cpu / replicas`
-- Default push policies, `approx`, and `prequal`: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
-- `--lb-policy approx-share`: `ceil(replicas / N)` shared client `ReplicaBalancer`s and server `ApproxServerSidecar`s (`N = --approx-share`)
+- Default push policies, `amphiqueue`, and `prequal`: `replicas` × `ReplicaBalancer` models (one outbound LB per server)
+- `--lb-policy amphiqueue-share`: `ceil(replicas / N)` shared client `ReplicaBalancer`s and server `AmphiQueueServerSidecar`s (`N = --amphiqueue-share`)
 - `--lb-policy cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, or `corr`: one `DownstreamBalancer` per downstream microservice target (or `S` partitioned balancers per target when `centralized` / `jbsq` and `k > 0`), plus `replicas` × `OutboundGateway` forwarders
 
 All interfaces of a microservice share the same server pool. The queue is per-server, not per-interface.
 
-User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-microservice servers (or entry sidecars under `approx-share`).
+User ingress is handled separately: one `EdgeBalancer` per API in the callgraph, wired to that API's entry-microservice servers (or entry sidecars under `amphiqueue-share`).
 
 ### Replica subsetting
 
 When `--lb-subset-size k > 0`, **outbound** balancers only route among `min(k, replicas)` targets. Subset assignment is controlled by `--lb-subset-policy` (default `deterministic`):
 
-- **EdgeBalancer:** always uses the full entry-service pool (`k` is ignored for ingress) — all replicas, or all entry sidecars under `approx-share`. There is one edge LB per API; subsetting ingress would starve most entry targets.
+- **EdgeBalancer:** always uses the full entry-service pool (`k` is ignored for ingress) — all replicas, or all entry sidecars under `amphiqueue-share`. There is one edge LB per API; subsetting ingress would starve most entry targets.
 - **ReplicaBalancer:** client id is `server_idx` within the calling microservice. Each server balancer computes its own downstream subsets independently (for both `deterministic` and `random` policies).
 
 **Not supported with `prequal`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, or `corr`:** `--lb-subset-size > 0` is rejected at startup. Those policies require all replicas (ingress and outbound).
@@ -203,8 +203,8 @@ The **EdgeBalancer** handles **user ingress only**. It always uses **push** rout
 | `--lb-policy` | EdgeBalancer algorithm |
 |---------------|------------------------|
 | `random`, `power-of-two`, `least-request`, `round-robin` | Honors `--lb-policy` (targets = entry replicas) |
-| `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `corr`, `approx`, `prequal` | Always **power-of-two** over entry replicas (the flag changes outbound architecture only) |
-| `approx-share` | Always **power-of-two** over entry **sidecars** (`N>1`) or entry replicas (`N=1`); sidecar then joins least-occupancy replica when `N>1` |
+| `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `corr`, `amphiqueue`, `prequal` | Always **power-of-two** over entry replicas (the flag changes outbound architecture only) |
+| `amphiqueue-share` | Always **power-of-two** over entry **sidecars** (`N>1`) or entry replicas (`N=1`); sidecar then joins least-occupancy replica when `N>1` |
 
 Outbound RPC routing and returns are handled separately (see below).
 
@@ -296,22 +296,22 @@ With `--lb-subset-size k > 0`, each downstream target is partitioned into `S = r
 
 Full documentation: **[jbsq-policy.md](jbsq-policy.md)**.
 
-### Approx policy (decentralized outbound pull)
+### AmphiQueue policy (decentralized outbound pull)
 
-Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` approx. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are **bound** by `request_id` by default (omit `--approx-sched`); optional **`--approx-sched fcfs`**, **`edf`**, or **`edf+`** pops the queue head per `(rb_id, target)` (`edf+` also EDF-orders the replica intent queue) — see [approx-policy.md § Unbound pull modes](approx-policy.md#unbound-pull-modes---approx-sched).
+Per-caller-replica outbound pull with `--pull-policy`, intent binding, and the same `in_flight` / `pending_pulls` concurrency model as `lb` amphiqueue. Ingress stays push P2C on `EdgeBalancer`. Outbound pulls are **bound** by `request_id` by default (omit `--amphiqueue-sched`); optional **`--amphiqueue-sched fcfs`**, **`edf`**, or **`edf+`** pops the queue head per `(rb_id, target)` (`edf+` also EDF-orders the replica intent queue) — see [amphiqueue-policy.md § Unbound pull modes](amphiqueue-policy.md#unbound-pull-modes---amphiqueue-sched).
 
-Full documentation: **[approx-policy.md](approx-policy.md)**.
+Full documentation: **[amphiqueue-policy.md](amphiqueue-policy.md)**.
 
-### Approx-share policy (dual-mode sidecar)
+### AmphiQueue-share policy (dual-mode sidecar)
 
-`--lb-policy approx-share` groups replicas behind shared sidecars (`N = --approx-share`, default `1`; `n_sidecars = ceil(replicas / N)`). Each `ApproxServerSidecar` is **dual-mode**:
+`--lb-policy amphiqueue-share` groups replicas behind shared sidecars (`N = --amphiqueue-share`, default `1`; `n_sidecars = ceil(replicas / N)`). Each `AmphiQueueServerSidecar` is **dual-mode**:
 
 - **Push:** ingress enqueues on a replica local queue (shared with `DownstreamReturn`). `N=1`: edge → replica. `N>1`: edge P2C among entry sidecars, then least-occupancy owned replica (`queue + in_flight`).
-- **Pull:** approx-share intent protocol among target sidecars (`--pull-policy`, optional `--approx-sched`).
+- **Pull:** amphiqueue-share intent protocol among target sidecars (`--pull-policy`, optional `--amphiqueue-sched`).
 
-Client-side outbound queues are also shared per sidecar group. With `N = 1` the topology stays close to approx. `--lb-subset-size > 0` is rejected. `lb --lb-policy approx-share` is rejected at startup.
+Client-side outbound queues are also shared per sidecar group. With `N = 1` the topology stays close to amphiqueue. `--lb-subset-size > 0` is rejected. `lb --lb-policy amphiqueue-share` is rejected at startup.
 
-Full documentation: **[approx-policy.md § Approx-share](approx-policy.md#approx-share-ms-only)**.
+Full documentation: **[amphiqueue-policy.md § AmphiQueue-share](amphiqueue-policy.md#amphiqueue-share-ms-only)**.
 
 ### Prequal policy (decentralized outbound probe pool)
 
@@ -411,7 +411,7 @@ The chain SLO heatmap (`plot_ms_chain_slo_heatmap.py`) does **not** use fixture 
 | Metric | Definition |
 |--------|------------|
 | **server_utilization_pct** | `busy_time[ms][s] / (observation_time × (cpu[ms] / replicas[ms])) × 100` |
-| **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server, plus caller-side outbound LB queue depth under pull policies. Under `--lb-policy centralized`, each caller replica is credited with its own items waiting in the shared `DownstreamBalancer.queue` (identified via `hop.caller`). Under `--lb-policy approx`, each caller replica adds the sum of its `ReplicaBalancer.outbound_queues` depths. Under `--lb-policy approx-share`, each sidecar's outbound queue depth is split evenly across its owned replicas (`share=1` credits the single replica in full). Ingress sits on the replica queue. Pull intent queues are not counted. |
+| **server_avg_queue_inflight** | Time-weighted average of `queue.len() + in_flight` per server, plus caller-side outbound LB queue depth under pull policies. Under `--lb-policy centralized`, each caller replica is credited with its own items waiting in the shared `DownstreamBalancer.queue` (identified via `hop.caller`). Under `--lb-policy amphiqueue`, each caller replica adds the sum of its `ReplicaBalancer.outbound_queues` depths. Under `--lb-policy amphiqueue-share`, each sidecar's outbound queue depth is split evenly across its owned replicas (`share=1` credits the single replica in full). Ingress sits on the replica queue. Pull intent queues are not counted. |
 | **server_avg_queue** | Same attribution as `server_avg_queue_inflight`, but the replica contribution is time-weighted `queue.len()` only (excludes `in_flight` / requests being processed). Caller-side outbound LB queue depth is included unchanged. |
 
 `busy_time[ms][s]` is the sum of local hop durations executed on server `s` of microservice `ms`. Per-server utilization uses that server's concurrency slots (`cpu / replicas`) as capacity. When all servers have equal capacity, the microservice-level overall utilization equals the average of per-server utilizations.
@@ -480,9 +480,9 @@ cargo build --release
 | `--callgraph` | Path to callgraph JSON (required) |
 | `--load-file` | Path to per-API load JSON (`rps` + `slo_ms`) (required) |
 | `--n` | Total requests, split across APIs proportional to RPS |
-| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `approx` (decentralized outbound pull; requires `--pull-policy`), `prequal` (decentralized outbound RIF probe pool), `cl` (shared push P2C outbound), `cl-lr` (shared push least-request outbound), `cl-r` (shared push random outbound), `cl-rr` (shared push round-robin outbound), `centralized` (shared pull outbound; see `--centralized-sched`), `jbsq` (bounded central pull; requires `--jbsq-n`), or `corr` (experimental shared push outbound). For `cl` / `cl-lr` / `cl-r` / `cl-rr` / `centralized` / `jbsq` / `corr` / `approx` / `prequal`, ingress stays push P2C on `EdgeBalancer`. |
-| `--pull-policy` | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--approx-sched` | Omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment; independent of `--scheduling` / `--centralized-sched` |
+| `--lb-policy` | Load-balancing policy: `random`, `power-of-two` (default), `least-request`, `round-robin`, `amphiqueue` (decentralized outbound pull; requires `--pull-policy`), `prequal` (decentralized outbound RIF probe pool), `cl` (shared push P2C outbound), `cl-lr` (shared push least-request outbound), `cl-r` (shared push random outbound), `cl-rr` (shared push round-robin outbound), `centralized` (shared pull outbound; see `--centralized-sched`), `jbsq` (bounded central pull; requires `--jbsq-n`), or `corr` (experimental shared push outbound). For `cl` / `cl-lr` / `cl-r` / `cl-rr` / `centralized` / `jbsq` / `corr` / `amphiqueue` / `prequal`, ingress stays push P2C on `EdgeBalancer`. |
+| `--pull-policy` | Pull-intent server selection for `amphiqueue` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy amphiqueue` |
+| `--amphiqueue-sched` | Omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment; independent of `--scheduling` / `--centralized-sched` |
 | `--scheduling` | Server queue discipline at each replica: `fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
 | `--centralized-sched` | Shared DownstreamBalancer pull-queue discipline with `--lb-policy centralized` or `jbsq`: `fcfs` (default) or `edf`; see [scheduling.md](scheduling.md#centralized-pull-queue-scheduling---centralized-sched) |
 | `--jbsq-n` | Required with `--lb-policy jbsq` (no default): max pulled upstream occupancy per replica; see [jbsq-policy.md](jbsq-policy.md) |

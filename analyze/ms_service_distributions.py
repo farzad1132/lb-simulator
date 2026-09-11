@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from plot_cdfs import (  # noqa: E402
-    MS_APPROX_SCHED_POLICIES,
+    MS_AMPHIQUEUE_SCHED_POLICIES,
     MS_LB_POLICIES,
     MS_CENTRALIZED_SCHED_POLICIES,
     MS_SCHEDULING_POLICIES,
@@ -672,8 +672,8 @@ def parse_args() -> argparse.Namespace:
         choices=PULL_POLICIES,
         default=None,
         help=(
-            "Pull-intent server/sidecar selection for approx / approx-share "
-            "(required when --lb-policy approx or approx-share)"
+            "Pull-intent server/sidecar selection for amphiqueue / amphiqueue-share "
+            "(required when --lb-policy amphiqueue or amphiqueue-share)"
         ),
     )
     parser.add_argument("--lb-subset-size", type=int, default=0)
@@ -688,21 +688,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--approx-sched",
-        choices=MS_APPROX_SCHED_POLICIES,
+        "--amphiqueue-sched",
+        choices=MS_AMPHIQUEUE_SCHED_POLICIES,
         default=None,
         help=(
-            "Approx outbound pull scheduling: fcfs, edf, or edf+ "
-            "(only valid with --lb-policy approx or approx-share)"
+            "AmphiQueue outbound pull scheduling: fcfs, edf, or edf+ "
+            "(only valid with --lb-policy amphiqueue or amphiqueue-share)"
         ),
     )
     parser.add_argument(
-        "--approx-share",
+        "--amphiqueue-share",
         type=int,
         default=1,
         help=(
-            "Replicas per sidecar with --lb-policy approx-share "
-            "(default: 1; only valid with approx-share)"
+            "Replicas per sidecar with --lb-policy amphiqueue-share "
+            "(default: 1; only valid with amphiqueue-share)"
         ),
     )
     parser.add_argument(
@@ -736,31 +736,31 @@ def main() -> None:
         raise SystemExit(f"load file not found: {load_file}")
     if args.scale is not None and args.scale < 0:
         raise SystemExit(f"--scale must be >= 0 (got {args.scale})")
-    uses_approx = args.lb_policy in ("approx", "approx-share")
-    if uses_approx and args.pull_policy is None:
+    uses_amphiqueue = args.lb_policy in ("amphiqueue", "amphiqueue-share")
+    if uses_amphiqueue and args.pull_policy is None:
         raise SystemExit(
-            "--pull-policy is required when --lb-policy approx or approx-share"
+            "--pull-policy is required when --lb-policy amphiqueue or amphiqueue-share"
         )
-    if not uses_approx and args.pull_policy is not None:
+    if not uses_amphiqueue and args.pull_policy is not None:
         raise SystemExit(
-            "--pull-policy is only valid with --lb-policy approx or approx-share"
+            "--pull-policy is only valid with --lb-policy amphiqueue or amphiqueue-share"
         )
-    if args.approx_sched is not None and not uses_approx:
+    if args.amphiqueue_sched is not None and not uses_amphiqueue:
         raise SystemExit(
-            "--approx-sched is only valid with --lb-policy approx or approx-share"
+            "--amphiqueue-sched is only valid with --lb-policy amphiqueue or amphiqueue-share"
         )
     if args.centralized_sched != "fcfs" and args.lb_policy != "centralized":
         raise SystemExit(
             "--centralized-sched edf is only valid with --lb-policy centralized"
         )
-    if args.lb_policy == "approx-share":
-        if args.approx_share < 1:
+    if args.lb_policy == "amphiqueue-share":
+        if args.amphiqueue_share < 1:
             raise SystemExit(
-                f"--approx-share must be >= 1 with --lb-policy approx-share "
-                f"(got {args.approx_share})"
+                f"--amphiqueue-share must be >= 1 with --lb-policy amphiqueue-share "
+                f"(got {args.amphiqueue_share})"
             )
-    elif args.approx_share != 1:
-        raise SystemExit("--approx-share is only valid with --lb-policy approx-share")
+    elif args.amphiqueue_share != 1:
+        raise SystemExit("--amphiqueue-share is only valid with --lb-policy amphiqueue-share")
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)
 
     binary = args.ms_binary
@@ -783,9 +783,9 @@ def main() -> None:
         scheduling=args.scheduling,
         centralized_sched=args.centralized_sched,
         service_dist=args.service_dist,
-        approx_sched=args.approx_sched,
-        approx_share=(
-            args.approx_share if args.lb_policy == "approx-share" else None
+        amphiqueue_sched=args.amphiqueue_sched,
+        amphiqueue_share=(
+            args.amphiqueue_share if args.lb_policy == "amphiqueue-share" else None
         ),
         scale=args.scale,
     )

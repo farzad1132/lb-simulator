@@ -1,10 +1,10 @@
 use super::hop::{CallerRef, Hop, OutboundCall, OutboundRelease, ReplicaInput};
 use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
-use crate::approx::{fatal_pull_abort, PullIntent};
-use crate::approx_audit::ApproxPullAudit;
+use crate::amphiqueue::{fatal_pull_abort, PullIntent};
+use crate::amphiqueue_audit::AmphiQueuePullAudit;
 use crate::ms_centralized_audit::MsCentralizedAudit;
-use crate::policy::{ApproxSchedKind, CentralizedSchedKind};
+use crate::policy::{AmphiQueueSchedKind, CentralizedSchedKind};
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
@@ -215,9 +215,9 @@ pub struct ReplicaBalancer {
     #[serde(skip)]
     r_probe_accum: HashMap<String, f64>,
     #[serde(skip)]
-    pull_audit: Option<Arc<ApproxPullAudit>>,
+    pull_audit: Option<Arc<AmphiQueuePullAudit>>,
     #[serde(skip)]
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
     #[serde(skip)]
     caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
 }
@@ -232,8 +232,8 @@ impl ReplicaBalancer {
         downstream_indices: HashMap<String, Vec<usize>>,
         graph_server_counts: &HashMap<String, u32>,
         tracer: Option<Arc<MsTracer>>,
-        pull_audit: Option<Arc<ApproxPullAudit>>,
-        approx_sched: Option<ApproxSchedKind>,
+        pull_audit: Option<Arc<AmphiQueuePullAudit>>,
+        amphiqueue_sched: Option<AmphiQueueSchedKind>,
         caller_lb_queue_occupancy: Arc<Mutex<HashMap<(String, usize), OccupancyAccumulator>>>,
     ) -> Self {
         let mut local_outbound_inflight = HashMap::new();
@@ -283,7 +283,7 @@ impl ReplicaBalancer {
             r_remove_accum,
             r_probe_accum,
             pull_audit,
-            approx_sched,
+            amphiqueue_sched,
             caller_lb_queue_occupancy,
         }
     }
@@ -296,7 +296,7 @@ impl ReplicaBalancer {
     }
 
     fn sample_outbound_queue_occupancy(&self, now: MonotonicTime) {
-        if !self.lb_policy.uses_approx_protocol() {
+        if !self.lb_policy.uses_amphiqueue_protocol() {
             return;
         }
         let key = (self.microservice_id.clone(), self.server_idx);
@@ -309,9 +309,9 @@ impl ReplicaBalancer {
     fn enqueue_outbound_call(
         queue: &mut VecDeque<OutboundCall>,
         call: OutboundCall,
-        approx_sched: Option<ApproxSchedKind>,
+        amphiqueue_sched: Option<AmphiQueueSchedKind>,
     ) {
-        if approx_sched.is_some_and(|s| s.outbound_uses_edf()) {
+        if amphiqueue_sched.is_some_and(|s| s.outbound_uses_edf()) {
             let deadline = call.hop.deadline;
             let insert_at = edf_insert_index(
                 queue.iter().map(|c| c.hop.deadline),
@@ -400,7 +400,7 @@ impl ReplicaBalancer {
             inflight[server_idx] += 1;
         }
 
-        if self.lb_policy.uses_approx_protocol() {
+        if self.lb_policy.uses_amphiqueue_protocol() {
             call.hop.slot_release = Some(OutboundRelease {
                 target_microservice: target.to_string(),
                 target_server: server_idx,
@@ -535,14 +535,14 @@ impl ReplicaBalancer {
             return;
         }
 
-        if self.lb_policy.uses_approx_protocol() {
+        if self.lb_policy.uses_amphiqueue_protocol() {
             if let Some(tracer) = &self.tracer {
                 tracer.log(
                     call.hop.trace,
                     cx.time(),
                     call.hop.request_id,
                     &format!(
-                        "ReplicaBalancer({}/{}) approx enqueue target={target} queue={} endpoint={}",
+                        "ReplicaBalancer({}/{}) amphiqueue enqueue target={target} queue={} endpoint={}",
                         self.microservice_id,
                         self.server_idx,
                         self.outbound_queues
@@ -559,7 +559,7 @@ impl ReplicaBalancer {
                 .outbound_queues
                 .entry(target.clone())
                 .or_default();
-            Self::enqueue_outbound_call(queue, call, self.approx_sched);
+            Self::enqueue_outbound_call(queue, call, self.amphiqueue_sched);
             self.sample_outbound_queue_occupancy(cx.time());
             self.send_pull_intent_for_target(&target, request_id, deadline).await;
             return;
@@ -617,7 +617,7 @@ impl ReplicaBalancer {
     }
 
     pub async fn pull(&mut self, pull: ReplicaPull, cx: &Context<Self>) {
-        if !self.lb_policy.uses_approx_protocol() {
+        if !self.lb_policy.uses_amphiqueue_protocol() {
             return;
         }
         let target = pull.target_microservice;
@@ -638,12 +638,12 @@ impl ReplicaBalancer {
         let queue_len_before = queue.len();
         let queue_head_request_id = queue.front().map(|c| c.hop.request_id);
 
-        let call = if self.approx_sched.is_some() {
+        let call = if self.amphiqueue_sched.is_some() {
             if queue.is_empty() {
                 fatal_pull_abort(
                     "ms",
                     format!(
-                        "no queued outbound call for approx pull (rb_id={}, microservice_id={}, \
+                        "no queued outbound call for amphiqueue pull (rb_id={}, microservice_id={}, \
                          server_idx={}, target={}, ignored_request_id={}, queue_len=0)",
                         self.rb_id, self.microservice_id, server_idx, target, intent_request_id,
                     ),
@@ -692,7 +692,7 @@ impl ReplicaBalancer {
                 cx.time(),
                 call.hop.request_id,
                 &format!(
-                    "ReplicaBalancer({}/{}) approx dispatch target={target} -> server={server_idx} endpoint={}",
+                    "ReplicaBalancer({}/{}) amphiqueue dispatch target={target} -> server={server_idx} endpoint={}",
                     self.microservice_id, self.server_idx, call.hop.endpoint
                 ),
             );
@@ -1086,14 +1086,14 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    fn test_rb(approx_sched: Option<ApproxSchedKind>) -> ReplicaBalancer {
+    fn test_rb(amphiqueue_sched: Option<AmphiQueueSchedKind>) -> ReplicaBalancer {
         let mut downstream_indices = HashMap::new();
         downstream_indices.insert("backend1".to_string(), vec![0]);
         let mut graph_server_counts = HashMap::new();
         graph_server_counts.insert("backend1".to_string(), 1);
         ReplicaBalancer::new(
             Box::new(PowerOfTwoPolicy),
-            LoadBalancePolicyKind::Approx,
+            LoadBalancePolicyKind::AmphiQueue,
             0,
             "frontend".to_string(),
             0,
@@ -1101,7 +1101,7 @@ mod tests {
             &graph_server_counts,
             None,
             None,
-            approx_sched,
+            amphiqueue_sched,
             Arc::new(Mutex::new(HashMap::new())),
         )
     }
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn no_bind_pull_takes_oldest_not_bound_id() {
-        let mut rb = test_rb(Some(ApproxSchedKind::Fcfs));
+        let mut rb = test_rb(Some(AmphiQueueSchedKind::Fcfs));
         rb.outbound_queues
             .get_mut("backend1")
             .unwrap()
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn no_bind_empty_queue_aborts() {
-        let rb = test_rb(Some(ApproxSchedKind::Fcfs));
+        let rb = test_rb(Some(AmphiQueueSchedKind::Fcfs));
         assert!(rb.outbound_queues.get("backend1").unwrap().is_empty());
     }
 }

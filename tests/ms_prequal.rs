@@ -107,7 +107,7 @@ fn ms_rejects_pull_policy_with_prequal() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--pull-policy is only valid with --lb-policy approx"),
+        stderr.contains("--pull-policy is only valid with --lb-policy amphiqueue"),
         "unexpected stderr: {stderr}"
     );
 }

@@ -76,8 +76,8 @@ class MsExperimentConfig:
     lb_policy: str
     lb_subset_size: int = 0
     pull_policy: str | None = None
-    approx_sched: str | None = None
-    approx_share: int = 1  # replicas per sidecar; only for approx-share
+    amphiqueue_sched: str | None = None
+    amphiqueue_share: int = 1  # replicas per sidecar; only for amphiqueue-share
     scheduling: str = "fifo"
     centralized_sched: str = "fcfs"  # centralized / jbsq shared pull queue
     jbsq_n: int | None = None  # required when lb_policy == jbsq
@@ -87,8 +87,8 @@ class MsExperimentConfig:
     slo_ms: float | None = None  # None = calibrate from unloaded p99 × multiplier
 
 
-def uses_approx_protocol(config: MsExperimentConfig) -> bool:
-    return config.lb_policy in ("approx", "approx-share")
+def uses_amphiqueue_protocol(config: MsExperimentConfig) -> bool:
+    return config.lb_policy in ("amphiqueue", "amphiqueue-share")
 
 
 def uses_central_pull_queue(config: MsExperimentConfig) -> bool:
@@ -118,21 +118,21 @@ DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     #MsExperimentConfig("LR", "least-request"),
     #MsExperimentConfig("RR", "round-robin"),
     #MsExperimentConfig("R", "random"),
-    #MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
-    #MsExperimentConfig("Approx-S2", "approx-share", pull_policy="least-request", approx_share=2),
-    #MsExperimentConfig("Approx-K10", "approx", pull_policy="least-request", lb_subset_size=10),
-    #MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs",),
-    #MsExperimentConfig("Approx-FCFS-S2", "approx-share", pull_policy="least-request", approx_sched="fcfs", approx_share=2),
-    #MsExperimentConfig("Approx-FCFS-K10", "approx", pull_policy="least-request", approx_sched="fcfs", lb_subset_size=10),
-    MsExperimentConfig("Approx-EDF+FCFS", "approx", pull_policy="least-request", approx_sched="edf"),
-    #MsExperimentConfig("Approx-EDF-K20", "approx", pull_policy="least-request", approx_sched="edf", lb_subset_size=20),
-    #MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
-    #MsExperimentConfig("Approx-EDF-S2", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=2),
-    #MsExperimentConfig("Approx-EDF-S3", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=3),
-    #MsExperimentConfig("ApproxShare-1", "approx-share", pull_policy="least-request", approx_share=1),
-    #MsExperimentConfig("ApproxShare-EDF-S1", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=1),
-    #MsExperimentConfig("ApproxShare-EDF-S2", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=2),
-    #MsExperimentConfig("ApproxShare-EDF-S5", "approx-share", pull_policy="least-request", approx_sched="edf", approx_share=5),
+    #MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
+    #MsExperimentConfig("AmphiQueue-S2", "amphiqueue-share", pull_policy="least-request", amphiqueue_share=2),
+    #MsExperimentConfig("AmphiQueue-K10", "amphiqueue", pull_policy="least-request", lb_subset_size=10),
+    #MsExperimentConfig("AmphiQueue-FCFS", "amphiqueue", pull_policy="least-request", amphiqueue_sched="fcfs",),
+    #MsExperimentConfig("AmphiQueue-FCFS-S2", "amphiqueue-share", pull_policy="least-request", amphiqueue_sched="fcfs", amphiqueue_share=2),
+    #MsExperimentConfig("AmphiQueue-FCFS-K10", "amphiqueue", pull_policy="least-request", amphiqueue_sched="fcfs", lb_subset_size=10),
+    MsExperimentConfig("AmphiQueue-EDF+FCFS", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
+    #MsExperimentConfig("AmphiQueue-EDF-K20", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf", lb_subset_size=20),
+    #MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
+    #MsExperimentConfig("AmphiQueue-EDF-S2", "amphiqueue-share", pull_policy="least-request", amphiqueue_sched="edf", amphiqueue_share=2),
+    #MsExperimentConfig("AmphiQueue-EDF-S3", "amphiqueue-share", pull_policy="least-request", amphiqueue_sched="edf", amphiqueue_share=3),
+    #MsExperimentConfig("AmphiQueueShare-1", "amphiqueue-share", pull_policy="least-request", amphiqueue_share=1),
+    #MsExperimentConfig("AmphiQueueShare-EDF-S1", "amphiqueue-share", pull_policy="least-request", amphiqueue_sched="edf", amphiqueue_share=1),
+    #MsExperimentConfig("AmphiQueueShare-EDF-S2", "amphiqueue-share", pull_policy="least-request", amphiqueue_sched="edf", amphiqueue_share=2),
+    #MsExperimentConfig("AmphiQueueShare-EDF-S5", "amphiqueue-share", pull_policy="least-request", amphiqueue_sched="edf", amphiqueue_share=5),
 ]
 
 
@@ -150,20 +150,20 @@ def resolve_config_service_dist(
 
 def validate_ms_config(config: MsExperimentConfig) -> None:
     label = config.label
-    if uses_approx_protocol(config) and config.pull_policy is None:
+    if uses_amphiqueue_protocol(config) and config.pull_policy is None:
         raise SystemExit(
             f"config {label!r}: pull_policy is required when lb_policy is "
             f"{config.lb_policy}"
         )
-    if not uses_approx_protocol(config) and config.pull_policy is not None:
+    if not uses_amphiqueue_protocol(config) and config.pull_policy is not None:
         raise SystemExit(
             f"config {label!r}: pull_policy is only valid when lb_policy is "
-            "approx or approx-share"
+            "amphiqueue or amphiqueue-share"
         )
-    if config.approx_sched is not None and not uses_approx_protocol(config):
+    if config.amphiqueue_sched is not None and not uses_amphiqueue_protocol(config):
         raise SystemExit(
-            f"config {label!r}: approx_sched is only valid when lb_policy is "
-            "approx or approx-share"
+            f"config {label!r}: amphiqueue_sched is only valid when lb_policy is "
+            "amphiqueue or amphiqueue-share"
         )
     if config.centralized_sched != "fcfs" and not uses_central_pull_queue(config):
         raise SystemExit(
@@ -181,14 +181,14 @@ def validate_ms_config(config: MsExperimentConfig) -> None:
         raise SystemExit(
             f"config {label!r}: jbsq_n is only valid when lb_policy is jbsq"
         )
-    if config.lb_policy == "approx-share":
-        if config.approx_share < 1:
+    if config.lb_policy == "amphiqueue-share":
+        if config.amphiqueue_share < 1:
             raise SystemExit(
-                f"config {label!r}: approx_share must be >= 1 (got {config.approx_share})"
+                f"config {label!r}: amphiqueue_share must be >= 1 (got {config.amphiqueue_share})"
             )
-    elif config.approx_share != 1:
+    elif config.amphiqueue_share != 1:
         raise SystemExit(
-            f"config {label!r}: approx_share is only valid when lb_policy is approx-share"
+            f"config {label!r}: amphiqueue_share is only valid when lb_policy is amphiqueue-share"
         )
     if config.scale is not None and config.scale < 0:
         raise SystemExit(f"config {label!r}: scale must be >= 0 (got {config.scale})")
@@ -305,9 +305,9 @@ def calibrate_topology_slo(
         centralized_sched=config.centralized_sched,
         seed=seed,
         service_dist=service_dist,
-        approx_sched=config.approx_sched,
-        approx_share=(
-            config.approx_share if config.lb_policy == "approx-share" else None
+        amphiqueue_sched=config.amphiqueue_sched,
+        amphiqueue_share=(
+            config.amphiqueue_share if config.lb_policy == "amphiqueue-share" else None
         ),
         jbsq_n=config.jbsq_n,
         scale=config.scale,
@@ -341,14 +341,14 @@ def format_run_summary(
     ]
     if config.pull_policy is not None:
         parts.append(f"pull_policy={config.pull_policy}")
-    if config.approx_sched is not None:
-        parts.append(f"approx_sched={config.approx_sched}")
+    if config.amphiqueue_sched is not None:
+        parts.append(f"amphiqueue_sched={config.amphiqueue_sched}")
     if uses_central_pull_queue(config) and config.centralized_sched != "fcfs":
         parts.append(f"centralized_sched={config.centralized_sched}")
     if config.jbsq_n is not None:
         parts.append(f"jbsq_n={config.jbsq_n}")
-    if config.lb_policy == "approx-share":
-        parts.append(f"approx_share={config.approx_share}")
+    if config.lb_policy == "amphiqueue-share":
+        parts.append(f"amphiqueue_share={config.amphiqueue_share}")
     if config.scale is not None:
         parts.append(f"scale={config.scale}")
     if config.service_dist is not None:
@@ -406,9 +406,9 @@ def run_load_compare_sweep(
             rps=rps,
             slo_ms=slo_ms,
             service_dist=service_dist,
-            approx_sched=config.approx_sched,
-            approx_share=(
-                config.approx_share if config.lb_policy == "approx-share" else None
+            amphiqueue_sched=config.amphiqueue_sched,
+            amphiqueue_share=(
+                config.amphiqueue_share if config.lb_policy == "amphiqueue-share" else None
             ),
             jbsq_n=config.jbsq_n,
             scale=config.scale,

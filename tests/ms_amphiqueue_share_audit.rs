@@ -1,8 +1,8 @@
 use lb::microservice::{
-    ApproxPullAudit, MsArgs, MsServiceDistribution, OutputFormat, n_sidecars, run, sidecar_id,
+    AmphiQueuePullAudit, MsArgs, MsServiceDistribution, OutputFormat, n_sidecars, run, sidecar_id,
     sidecar_replicas,
 };
-use lb::policy::{ApproxSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::collections::HashMap;
@@ -11,17 +11,17 @@ use std::path::PathBuf;
 fn chain3_args(
     n: u32,
     seed: u64,
-    approx_share: u32,
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_share: u32,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
     pull_policy: PullPolicyKind,
-    audit: Option<std::sync::Arc<ApproxPullAudit>>,
+    audit: Option<std::sync::Arc<AmphiQueuePullAudit>>,
 ) -> MsArgs {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     MsArgs {
         callgraph: root.join("tests/chain/3/callgraph.json"),
         load_file: root.join("tests/chain/3/load.json"),
         n,
-        lb_policy: LoadBalancePolicyKind::ApproxShare,
+        lb_policy: LoadBalancePolicyKind::AmphiQueueShare,
         pull_policy: Some(pull_policy),
         lb_subset_size: 0,
         lb_subset_policy: SubsetPolicyKind::Deterministic,
@@ -38,8 +38,10 @@ fn chain3_args(
         service_dist: MsServiceDistribution::Exp,
         pull_audit: audit,
         centralized_audit: None,
-        approx_sched,
-        approx_share,
+        jbsq_audit: None,
+        amphiqueue_sched,
+        amphiqueue_share,
+        jbsq_n: None,
     }
 }
 
@@ -52,8 +54,8 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 #[test]
-fn ms_approx_share_one_bound_audit_matches_approx_invariants() {
-    let audit = ApproxPullAudit::new();
+fn ms_amphiqueue_share_one_bound_audit_matches_amphiqueue_invariants() {
+    let audit = AmphiQueuePullAudit::new();
     let stats = run(&chain3_args(
         500,
         42,
@@ -69,13 +71,13 @@ fn ms_approx_share_one_bound_audit_matches_approx_invariants() {
 }
 
 #[test]
-fn ms_approx_share_one_fcfs_audit_matches_approx_invariants() {
-    let audit = ApproxPullAudit::new();
+fn ms_amphiqueue_share_one_fcfs_audit_matches_amphiqueue_invariants() {
+    let audit = AmphiQueuePullAudit::new();
     let stats = run(&chain3_args(
         500,
         99,
         1,
-        Some(ApproxSchedKind::Fcfs),
+        Some(AmphiQueueSchedKind::Fcfs),
         PullPolicyKind::LeastRequest,
         Some(audit.clone()),
     ))
@@ -87,15 +89,15 @@ fn ms_approx_share_one_fcfs_audit_matches_approx_invariants() {
 }
 
 #[test]
-fn ms_approx_share_one_latency_close_to_approx() {
+fn ms_amphiqueue_share_one_latency_close_to_amphiqueue() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let n = 800u32;
     let seed = 42u64;
-    let approx = run(&MsArgs {
+    let amphiqueue = run(&MsArgs {
         callgraph: root.join("tests/chain/3/callgraph.json"),
         load_file: root.join("tests/chain/3/load.json"),
         n,
-        lb_policy: LoadBalancePolicyKind::Approx,
+        lb_policy: LoadBalancePolicyKind::AmphiQueue,
         pull_policy: Some(PullPolicyKind::LeastRequest),
         lb_subset_size: 0,
         lb_subset_policy: SubsetPolicyKind::Deterministic,
@@ -113,12 +115,12 @@ fn ms_approx_share_one_latency_close_to_approx() {
         pull_audit: None,
         centralized_audit: None,
         jbsq_audit: None,
-        approx_sched: None,
-        approx_share: 1,
+        amphiqueue_sched: None,
+        amphiqueue_share: 1,
         jbsq_n: None,
     })
     .unwrap()
-    .expect("approx");
+    .expect("amphiqueue");
     let share = run(&chain3_args(
         n,
         seed,
@@ -128,9 +130,9 @@ fn ms_approx_share_one_latency_close_to_approx() {
         None,
     ))
     .unwrap()
-    .expect("approx-share");
+    .expect("amphiqueue-share");
 
-    let mut a = approx.by_api["handle"].e2e_ms.clone();
+    let mut a = amphiqueue.by_api["handle"].e2e_ms.clone();
     let mut s = share.by_api["handle"].e2e_ms.clone();
     a.sort_by(|x, y| x.partial_cmp(y).unwrap());
     s.sort_by(|x, y| x.partial_cmp(y).unwrap());
@@ -139,28 +141,28 @@ fn ms_approx_share_one_latency_close_to_approx() {
     let a_p99 = percentile(&a, 99.0);
     let s_p99 = percentile(&s, 99.0);
     let ratio = |x: f64, y: f64| (x / y).max(y / x);
-    // Residual gap from pull-side sidecar hop (ingress matches approx at share=1).
+    // Residual gap from pull-side sidecar hop (ingress matches amphiqueue at share=1).
     assert!(
         ratio(a_p50, s_p50) < 1.05,
-        "p50 diverged: approx={a_p50} share1={s_p50}"
+        "p50 diverged: amphiqueue={a_p50} share1={s_p50}"
     );
     assert!(
         ratio(a_p99, s_p99) < 1.05,
-        "p99 diverged: approx={a_p99} share1={s_p99}"
+        "p99 diverged: amphiqueue={a_p99} share1={s_p99}"
     );
 }
 
-/// share=1 enqueues ingress on the replica (same queue as returns); entry occupancy ≈ approx.
+/// share=1 enqueues ingress on the replica (same queue as returns); entry occupancy ≈ amphiqueue.
 #[test]
-fn ms_approx_share_one_entry_occupancy_close_to_approx() {
+fn ms_amphiqueue_share_one_entry_occupancy_close_to_amphiqueue() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let n = 800u32;
     let seed = 42u64;
-    let approx = run(&MsArgs {
+    let amphiqueue = run(&MsArgs {
         callgraph: root.join("tests/chain/3/callgraph.json"),
         load_file: root.join("tests/chain/3/load.json"),
         n,
-        lb_policy: LoadBalancePolicyKind::Approx,
+        lb_policy: LoadBalancePolicyKind::AmphiQueue,
         pull_policy: Some(PullPolicyKind::LeastRequest),
         lb_subset_size: 0,
         lb_subset_policy: SubsetPolicyKind::Deterministic,
@@ -178,12 +180,12 @@ fn ms_approx_share_one_entry_occupancy_close_to_approx() {
         pull_audit: None,
         centralized_audit: None,
         jbsq_audit: None,
-        approx_sched: None,
-        approx_share: 1,
+        amphiqueue_sched: None,
+        amphiqueue_share: 1,
         jbsq_n: None,
     })
     .unwrap()
-    .expect("approx");
+    .expect("amphiqueue");
     let share = run(&chain3_args(
         n,
         seed,
@@ -193,33 +195,33 @@ fn ms_approx_share_one_entry_occupancy_close_to_approx() {
         None,
     ))
     .unwrap()
-    .expect("approx-share");
+    .expect("amphiqueue-share");
 
     let mean_occ = |servers: &HashMap<usize, f64>| -> f64 {
         servers.values().sum::<f64>() / servers.len() as f64
     };
-    let a_mean = mean_occ(&approx.server_avg_queue_inflight["frontend"]);
+    let a_mean = mean_occ(&amphiqueue.server_avg_queue_inflight["frontend"]);
     let s_mean = mean_occ(&share.server_avg_queue_inflight["frontend"]);
     assert!(
         a_mean > 0.0 && s_mean > 0.0,
-        "approx={a_mean} share1={s_mean}"
+        "amphiqueue={a_mean} share1={s_mean}"
     );
     let ratio = (a_mean / s_mean).max(s_mean / a_mean);
     assert!(
         ratio < 1.07,
-        "frontend occupancy diverged: approx={a_mean} share1={s_mean} ratio={ratio}"
+        "frontend occupancy diverged: amphiqueue={a_mean} share1={s_mean} ratio={ratio}"
     );
 }
 
 #[test]
-fn ms_approx_share_three_targets_sidecars_and_remainder() {
+fn ms_amphiqueue_share_three_targets_sidecars_and_remainder() {
     // chain/3: 10 replicas/service, share=3 → 4 sidecars (remainder replica 9 alone).
     let share = 3u32;
     let replicas = 10usize;
     assert_eq!(n_sidecars(replicas, share), 4);
     assert_eq!(sidecar_replicas(3, replicas, share), vec![9]);
 
-    let audit = ApproxPullAudit::new();
+    let audit = AmphiQueuePullAudit::new();
     let stats = run(&chain3_args(
         600,
         7,
@@ -269,10 +271,10 @@ fn ms_approx_share_three_targets_sidecars_and_remainder() {
 }
 
 #[test]
-fn ms_approx_share_idle_replica_drain_stays_in_group() {
+fn ms_amphiqueue_share_idle_replica_drain_stays_in_group() {
     let share = 3u32;
     let replicas = 10usize;
-    let audit = ApproxPullAudit::new();
+    let audit = AmphiQueuePullAudit::new();
     run(&chain3_args(
         400,
         11,
@@ -311,7 +313,7 @@ fn ms_approx_share_idle_replica_drain_stays_in_group() {
 /// share>1 ingress joins the least-occupancy replica in the sidecar group.
 /// Entry-tier per-replica occupancy should stay balanced within each pair.
 #[test]
-fn ms_approx_share_two_entry_occupancy_balanced_within_groups() {
+fn ms_amphiqueue_share_two_entry_occupancy_balanced_within_groups() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let n = 800u32;
     let seed = 42u64;
@@ -323,7 +325,7 @@ fn ms_approx_share_two_entry_occupancy_balanced_within_groups() {
         callgraph: root.join("tests/chain/3/callgraph.json"),
         load_file: root.join("tests/chain/3/load.json"),
         n,
-        lb_policy: LoadBalancePolicyKind::ApproxShare,
+        lb_policy: LoadBalancePolicyKind::AmphiQueueShare,
         pull_policy: Some(PullPolicyKind::LeastRequest),
         lb_subset_size: 0,
         lb_subset_policy: SubsetPolicyKind::Deterministic,
@@ -341,8 +343,8 @@ fn ms_approx_share_two_entry_occupancy_balanced_within_groups() {
         pull_audit: None,
         centralized_audit: None,
         jbsq_audit: None,
-        approx_sched: None,
-        approx_share: share,
+        amphiqueue_sched: None,
+        amphiqueue_share: share,
         jbsq_n: None,
     })
     .unwrap()

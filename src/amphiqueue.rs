@@ -8,7 +8,7 @@ pub struct PullIntent {
     pub sender_id: usize,
     /// Bound request id for the queued item this intent will pull.
     pub request_id: u64,
-    /// Request deadline (used for `--approx-sched edf+` intent-queue ordering).
+    /// Request deadline (used for `--amphiqueue-sched edf+` intent-queue ordering).
     pub deadline: MonotonicTime,
 }
 
@@ -16,11 +16,11 @@ pub struct PullIntent {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PullRequest {
     pub server_idx: usize,
-    /// Bound request id for approx pulls; `None` for centralized warm-start pulls.
+    /// Bound request id for amphiqueue pulls; `None` for centralized warm-start pulls.
     pub request_id: Option<u64>,
 }
 
 pub fn fatal_pull_abort(simulator: &str, details: impl std::fmt::Display) -> ! {
-    eprintln!("FATAL approx pull abort ({simulator}): {details}");
-    panic!("approx pull abort ({simulator}): {details}");
+    eprintln!("FATAL amphiqueue pull abort ({simulator}): {details}");
+    panic!("amphiqueue pull abort ({simulator}): {details}");
 }

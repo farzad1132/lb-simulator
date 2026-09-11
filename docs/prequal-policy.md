@@ -143,7 +143,7 @@ flowchart LR
 ## Incompatibilities
 
 - `--lb-subset-size > 0` — rejected (both `lb` and `ms`)
-- `--pull-policy` / `--approx-sched` — rejected (approx-only flags)
+- `--pull-policy` / `--amphiqueue-sched` — rejected (amphiqueue-only flags)
 
 Express lane and work shedding remain allowed on the `lb` push path, same as other push policies.
 

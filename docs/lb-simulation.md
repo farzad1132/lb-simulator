@@ -112,7 +112,7 @@ A **Task** is the unit of work flowing through the simulation.
 | Field | Set when | Purpose |
 |-------|----------|---------|
 | `start` | Arrival source | E2e latency start time |
-| `task_id` | LoadBalancer on approx arrival | Per-client-LB monotonic id; carried on pull intents; used for bound pull lookup unless `--approx-sched` is set |
+| `task_id` | LoadBalancer on amphiqueue arrival | Per-client-LB monotonic id; carried on pull intents; used for bound pull lookup unless `--amphiqueue-sched` is set |
 | `duration` | Arrival source | Sampled service time (exponential, constant, or bimodal) |
 | `finish` | `Server::complete` | E2e latency end time |
 | `lb_id` | LoadBalancer before dispatch | Routes release notification back to the correct LB |
@@ -159,11 +159,11 @@ How subsetting interacts with the load-balancing policy:
 
 | Policy family | Subsetting |
 |---------------|------------|
-| **Push** (`random`, `power-of-two`, `least-request`, `round-robin`) and **approx** | Per-client LB; leftovers allowed (`n % k` backends unused); `--lb-subset-policy` may be `deterministic` or `random` |
+| **Push** (`random`, `power-of-two`, `least-request`, `round-robin`) and **amphiqueue** | Per-client LB; leftovers allowed (`n % k` backends unused); `--lb-subset-policy` may be `deterministic` or `random` |
 | **Centralized** | Strict partition only; see [Centralized subsetting](#centralized-subsetting) below |
 | **Prequal** | Rejected (`--lb-subset-size > 0` is an error) |
 
-#### Push / approx subsetting
+#### Push / amphiqueue subsetting
 
 **Subset policies** (`--lb-subset-policy`, default `deterministic`):
 
@@ -176,7 +176,7 @@ Each client has its own load balancer. The load-balancing policy only chooses am
 
 #### Centralized subsetting
 
-Centralized subsetting is more restrictive than push/approx:
+Centralized subsetting is more restrictive than push/amphiqueue:
 
 | Constraint | Rule |
 |------------|------|
@@ -221,10 +221,10 @@ flowchart LR
 | **random** | `--lb-policy random` | Uniform random server from the subset (ignores load slice) |
 | **round-robin** | `--lb-policy round-robin` | Cycle through a randomly shuffled order of subset servers (ignores load slice) |
 | **centralized** | `--lb-policy centralized` | Pull-based: FIFO queue(s) at central dispatcher(s); servers request work on spare capacity ([details below](#centralized-policy-pull-based)); [restricted subsetting](#centralized-subsetting) |
-| **approx** | `--lb-policy approx` + `--pull-policy` | Decentralized pull: per-client FIFO queues; `--pull-policy` selects pull-intent target ([details in approx-policy.md](approx-policy.md)) |
+| **amphiqueue** | `--lb-policy amphiqueue` + `--pull-policy` | Decentralized pull: per-client FIFO queues; `--pull-policy` selects pull-intent target ([details in amphiqueue-policy.md](amphiqueue-policy.md)) |
 | **prequal** | `--lb-policy prequal` | Decentralized push with async RIF probe pool; rejects `--lb-subset-size > 0` ([details in prequal-policy.md](prequal-policy.md)) |
 
-Local inflight tracking runs for all push policies so switching among them does not require different wiring. Under **approx**, server selection uses outstanding pull-intent counts instead of local inflight. Under **prequal**, routing uses the candidate pool of probed server RIF values (still updating `local_inflight` for release accounting).
+Local inflight tracking runs for all push policies so switching among them does not require different wiring. Under **amphiqueue**, server selection uses outstanding pull-intent counts instead of local inflight. Under **prequal**, routing uses the candidate pool of probed server RIF values (still updating `local_inflight` for release accounting).
 
 ## Centralized policy (pull-based)
 
@@ -294,13 +294,13 @@ With `--lb-subset-size k > 0`, the pool is partitioned into `S = servers / k` di
 5. **Completion.** `Server::complete` sets `finish`, sends the task to the stats sink, sends `server_idx` on `release_outputs[0]`, decrements `in_flight`, and sends a new pull.
 6. **Release.** The load balancer's `release` handler decrements `local_inflight[server_idx]`.
 
-## Approx policy
+## AmphiQueue policy
 
 Decentralized pull with per-client FIFO queues, pull intents, and `--pull-policy` for server selection. Concurrency is enforced via `in_flight` and `pending_pulls` on servers; client-side queue wait is included in e2e latency as `finish - start`.
 
-Optional **`--approx-sched fcfs`**: pull fulfillment pops the oldest queued task and ignores `pull.request_id`; intents still carry bound ids on the wire. See [approx-policy.md § Unbound pull modes](approx-policy.md#unbound-pull-modes---approx-sched).
+Optional **`--amphiqueue-sched fcfs`**: pull fulfillment pops the oldest queued task and ignores `pull.request_id`; intents still carry bound ids on the wire. See [amphiqueue-policy.md § Unbound pull modes](amphiqueue-policy.md#unbound-pull-modes---amphiqueue-sched).
 
-Full documentation: **[approx-policy.md](approx-policy.md)** (wire protocol, counter semantics, intent binding, port wiring, `ms` differences, tests).
+Full documentation: **[amphiqueue-policy.md](amphiqueue-policy.md)** (wire protocol, counter semantics, intent binding, port wiring, `ms` differences, tests).
 
 ## Prequal policy
 
@@ -452,20 +452,20 @@ Output format is controlled by `--format human` (percentile tables) or `--format
 - Centralized policy in the `ms` simulator (per-downstream-target outbound pull layer)
 - Prequal policy in the `ms` simulator
 - Express lane with client `--lb-policy centralized`
-- Work shedding with client `--lb-policy centralized` or `approx`
+- Work shedding with client `--lb-policy centralized` or `amphiqueue`
 
 ## Source file map
 
 | File | Responsibility |
 |------|----------------|
 | `src/main.rs` | CLI, simulation assembly, arrival source, metrics |
-| `src/load_balancer.rs` | Routing, local inflight tracking, release handler, approx pull queues, prequal pool |
-| `src/server.rs` | Queueing, concurrency, completion, release notifications, approx pull drain, prequal probes |
+| `src/load_balancer.rs` | Routing, local inflight tracking, release handler, amphiqueue pull queues, prequal pool |
+| `src/server.rs` | Queueing, concurrency, completion, release notifications, amphiqueue pull drain, prequal probes |
 | `src/policy.rs` | Load-balancing algorithms, pull-policy / prequal / centralized-subset validation |
-| `src/approx.rs` | `PullIntent` / `PullRequest` wire types |
+| `src/amphiqueue.rs` | `PullIntent` / `PullRequest` wire types |
 | `src/prequal.rs` | `Probe` / `ProbeReply` wire types and candidate pool |
 | `src/lb_centralized_audit.rs` | Optional enqueue/dispatch audit for centralized subset invariants |
 | `src/ms_centralized_audit.rs` | Optional MS centralized enqueue/dispatch audit (per-target subset invariants) |
 | `src/subset.rs` | Server subset assignment (`deterministic` / `random`) |
 
-Approx policy details: [approx-policy.md](approx-policy.md). Prequal: [prequal-policy.md](prequal-policy.md).
+AmphiQueue policy details: [amphiqueue-policy.md](amphiqueue-policy.md). Prequal: [prequal-policy.md](prequal-policy.md).

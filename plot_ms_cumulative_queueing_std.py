@@ -67,18 +67,18 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
-    MsExperimentConfig("Idealized LB", "centralized"),
+    MsExperimentConfig("Ideal", "centralized"),
     #MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
     #MsExperimentConfig("CPush", "cl"),
     MsExperimentConfig("P2C", "power-of-two"),
-    #MsExperimentConfig("Prequal", "prequal"),
-    MsExperimentConfig("P2C+TailClipper", "power-of-two", scheduling="edf"),
-    #MsExperimentConfig("LR", "least-request"),
-    #MsExperimentConfig("RR", "round-robin"),
-    #MsExperimentConfig("R", "random"),
-    #MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
-    #MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs"),
-    #MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
+    MsExperimentConfig("Prequal", "prequal"),
+    #MsExperimentConfig("P2C+TailClipper", "power-of-two", scheduling="edf"),
+    MsExperimentConfig("LR", "least-request"),
+    MsExperimentConfig("RR", "round-robin"),
+    MsExperimentConfig("R", "random"),
+    #MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
+    #MsExperimentConfig("AmphiQueue-FCFS", "amphiqueue", pull_policy="least-request", amphiqueue_sched="fcfs"),
+    #MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
 ]
 
 
@@ -153,10 +153,10 @@ def format_run_summary(
     ]
     if config.pull_policy is not None:
         parts.append(f"pull_policy={config.pull_policy}")
-    if config.approx_sched is not None:
-        parts.append(f"approx_sched={config.approx_sched}")
-    if config.lb_policy == "approx-share":
-        parts.append(f"approx_share={config.approx_share}")
+    if config.amphiqueue_sched is not None:
+        parts.append(f"amphiqueue_sched={config.amphiqueue_sched}")
+    if config.lb_policy == "amphiqueue-share":
+        parts.append(f"amphiqueue_share={config.amphiqueue_share}")
     if config.lb_policy == "centralized" and config.centralized_sched != "fcfs":
         parts.append(f"centralized_sched={config.centralized_sched}")
     if config.scale is not None:
@@ -204,9 +204,9 @@ def run_cum_queueing_var_compare(
             seed=seed,
             rps=rps,
             service_dist=service_dist,
-            approx_sched=config.approx_sched,
-            approx_share=(
-                config.approx_share if config.lb_policy == "approx-share" else None
+            amphiqueue_sched=config.amphiqueue_sched,
+            amphiqueue_share=(
+                config.amphiqueue_share if config.lb_policy == "amphiqueue-share" else None
             ),
             jbsq_n=config.jbsq_n,
             scale=config.scale,

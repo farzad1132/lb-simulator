@@ -8,7 +8,7 @@ There are three independent scheduling surfaces:
 |------|-------|--------|
 | `--scheduling` | Replica local work queues | `fifo` (default), `edf` |
 | `--centralized-sched` | Shared `DownstreamBalancer` pull queues only (`centralized` / `jbsq`); never replica queues | `fcfs` (default), `edf` |
-| `--approx-sched` | Approx unbound outbound queues (and intent queues for `edf+`) | see [approx-policy.md](approx-policy.md) |
+| `--amphiqueue-sched` | AmphiQueue unbound outbound queues (and intent queues for `edf+`) | see [amphiqueue-policy.md](amphiqueue-policy.md) |
 
 See also: [microservice-simulation.md](microservice-simulation.md) for overall request flow and replica queue semantics; [lb-vs-ms.md](lb-vs-ms.md) for feature comparison with the flat `lb` simulator.
 
@@ -18,7 +18,7 @@ Each replica (server) has a local queue. By default, the queue is **FIFO** (`--s
 
 `--scheduling` applies only to **replica queues**. Shared `DownstreamBalancer` pull queues use [`--centralized-sched`](#centralized-pull-queue-scheduling---centralized-sched) instead.
 
-For **approx unbound outbound queues** on `ReplicaBalancer`, use [`--approx-sched`](approx-policy.md#outbound-queue-scheduling---approx-sched) (`fcfs`, `edf`, or `edf+`) instead. That flag is independent of `--scheduling` and `--centralized-sched`. With `edf+`, the replica **pull-intent queue** is also EDF-ordered (still separate from this work-queue `--scheduling`).
+For **amphiqueue unbound outbound queues** on `ReplicaBalancer`, use [`--amphiqueue-sched`](amphiqueue-policy.md#outbound-queue-scheduling---amphiqueue-sched) (`fcfs`, `edf`, or `edf+`) instead. That flag is independent of `--scheduling` and `--centralized-sched`. With `edf+`, the replica **pull-intent queue** is also EDF-ordered (still separate from this work-queue `--scheduling`).
 
 ### CLI
 

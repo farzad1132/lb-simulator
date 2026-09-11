@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare lb experiment configs while sweeping lb-subset-size on the x-axis.
 
-Each config may differ in policy, topology, pull_policy, and approx_sched.
+Each config may differ in policy, topology, pull_policy, and amphiqueue_sched.
 All configs share the same subset-size values from --lb-subset-size.
 ExperimentConfig.lb_subset_size is ignored (the sweep supplies k).
 """
@@ -64,8 +64,8 @@ DEFAULT_CONFIGS: list[ExperimentConfig] = [
     ExperimentConfig("LR", "least-request", 20, 100),
     ExperimentConfig("R", "random", 20, 100),
     ExperimentConfig("RR", "round-robin", 20, 100),
-    ExperimentConfig("Approx", "approx", 20, 100, pull_policy="least-request"),
-    ExperimentConfig("Approx-FCFS", "approx", 20, 100, pull_policy="least-request", approx_sched="fcfs"),
+    ExperimentConfig("AmphiQueue", "amphiqueue", 20, 100, pull_policy="least-request"),
+    ExperimentConfig("AmphiQueue-FCFS", "amphiqueue", 20, 100, pull_policy="least-request", amphiqueue_sched="fcfs"),
 ]
 
 
@@ -127,8 +127,8 @@ def format_run_summary(
     ]
     if uses_pull_policy(config):
         parts.append(f"pull_policy={config.pull_policy}")
-    if config.approx_sched is not None:
-        parts.append(f"approx_sched={config.approx_sched}")
+    if config.amphiqueue_sched is not None:
+        parts.append(f"amphiqueue_sched={config.amphiqueue_sched}")
     if uses_express_lane(config):
         parts.append(f"express_size={config.express_size}")
         if config.express_del_th is not None:
@@ -185,8 +185,8 @@ def run_subset_sweep(
         }
         if uses_pull_policy(config):
             sim_kwargs["pull_policy"] = config.pull_policy
-            if config.approx_sched is not None:
-                sim_kwargs["approx_sched"] = config.approx_sched
+            if config.amphiqueue_sched is not None:
+                sim_kwargs["amphiqueue_sched"] = config.amphiqueue_sched
         if uses_express_lane(config):
             sim_kwargs.update(
                 expresslane=True,

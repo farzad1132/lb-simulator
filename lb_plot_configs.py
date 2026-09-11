@@ -13,18 +13,18 @@ class ExperimentConfig:
     servers: int
     concurrency: int = 1
     lb_subset_size: int = 0  # 0 = full pool; centralized requires k divides servers
-    pull_policy: str | None = None  # required when lb_policy == "approx"
+    pull_policy: str | None = None  # required when lb_policy == "amphiqueue"
     expresslane: bool = False
     express_size: int | None = None
     express_del_th: float | None = None
     express_th: int | None = None
     ideal: bool = False
     shed_delay: float | None = None
-    approx_sched: str | None = None  # fcfs, edf, or edf+; only valid when lb_policy == "approx"
+    amphiqueue_sched: str | None = None  # fcfs, edf, or edf+; only valid when lb_policy == "amphiqueue"
 
 
 def uses_pull_policy(config: ExperimentConfig) -> bool:
-    return config.lb_policy == "approx"
+    return config.lb_policy == "amphiqueue"
 
 
 def uses_express_lane(config: ExperimentConfig) -> bool:
@@ -51,18 +51,18 @@ def validate_config(config: ExperimentConfig) -> None:
     if uses_pull_policy(config):
         if config.pull_policy is None:
             raise SystemExit(
-                f"config {label!r}: pull_policy is required when lb_policy is approx"
+                f"config {label!r}: pull_policy is required when lb_policy is amphiqueue"
             )
     elif config.pull_policy is not None:
         raise SystemExit(
-            f"config {label!r}: pull_policy is only valid when lb_policy is approx"
+            f"config {label!r}: pull_policy is only valid when lb_policy is amphiqueue"
         )
-    if config.approx_sched is not None and not uses_pull_policy(config):
+    if config.amphiqueue_sched is not None and not uses_pull_policy(config):
         raise SystemExit(
-            f"config {label!r}: approx_sched is only valid when lb_policy is approx"
+            f"config {label!r}: amphiqueue_sched is only valid when lb_policy is amphiqueue"
         )
     if uses_work_shedding(config):
-        if config.lb_policy in ("centralized", "approx"):
+        if config.lb_policy in ("centralized", "amphiqueue"):
             raise SystemExit(
                 f"config {label!r}: shed_delay is incompatible with {config.lb_policy} policy"
             )
@@ -76,7 +76,7 @@ def validate_config(config: ExperimentConfig) -> None:
             )
     if not uses_express_lane(config):
         return
-    if config.lb_policy in ("centralized", "approx"):
+    if config.lb_policy in ("centralized", "amphiqueue"):
         raise SystemExit(
             f"config {label!r}: expresslane is incompatible with {config.lb_policy} policy"
         )

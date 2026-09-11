@@ -35,7 +35,7 @@ LB_POLICIES = (
     "least-request",
     "round-robin",
     "centralized",
-    "approx",
+    "amphiqueue",
     "prequal",
 )
 PULL_POLICIES = ("random", "power-of-two", "least-request", "round-robin")
@@ -45,8 +45,8 @@ MS_LB_POLICIES = (
     "least-request",
     "round-robin",
     "centralized",
-    "approx",
-    "approx-share",
+    "amphiqueue",
+    "amphiqueue-share",
     "prequal",
     "cl",
     "cl-lr",
@@ -54,8 +54,8 @@ MS_LB_POLICIES = (
 )
 MS_SCHEDULING_POLICIES = ("fifo", "edf")
 MS_CENTRALIZED_SCHED_POLICIES = ("fcfs", "edf")
-MS_APPROX_SCHED_POLICIES = ("fcfs", "edf", "edf+")
-LB_APPROX_SCHED_POLICIES = ("fcfs",)
+MS_AMPHIQUEUE_SCHED_POLICIES = ("fcfs", "edf", "edf+")
+LB_AMPHIQUEUE_SCHED_POLICIES = ("fcfs",)
 MS_SERVICE_DISTS = ("exp", "fixed", "bimodal")
 LB_SERVICE_DISTS = ("exponential", "constant", "bimodal")
 SIMULATORS = ("lb", "ms")
@@ -266,7 +266,7 @@ def run_simulation(
     express_th: int | None = None,
     ideal: bool = False,
     shed_delay: float | None = None,
-    approx_sched: str | None = None,
+    amphiqueue_sched: str | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -311,8 +311,8 @@ def run_simulation(
             cmd.append("--ideal")
     if shed_delay is not None:
         cmd.extend(["--shed-delay", str(shed_delay)])
-    if approx_sched is not None:
-        cmd.extend(["--approx-sched", approx_sched])
+    if amphiqueue_sched is not None:
+        cmd.extend(["--amphiqueue-sched", amphiqueue_sched])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
@@ -334,8 +334,8 @@ def run_ms_simulation(
     scheduling: str = "fifo",
     centralized_sched: str = "fcfs",
     service_dist: str = "exp",
-    approx_sched: str | None = None,
-    approx_share: int | None = None,
+    amphiqueue_sched: str | None = None,
+    amphiqueue_share: int | None = None,
     jbsq_n: int | None = None,
     scale: int | None = None,
 ) -> dict:
@@ -368,10 +368,10 @@ def run_ms_simulation(
         cmd.extend(["--rps", str(rps)])
     if slo_ms is not None:
         cmd.extend(["--slo-ms", str(slo_ms)])
-    if approx_sched is not None:
-        cmd.extend(["--approx-sched", approx_sched])
-    if approx_share is not None:
-        cmd.extend(["--approx-share", str(approx_share)])
+    if amphiqueue_sched is not None:
+        cmd.extend(["--amphiqueue-sched", amphiqueue_sched])
+    if amphiqueue_share is not None:
+        cmd.extend(["--amphiqueue-share", str(amphiqueue_share)])
     if jbsq_n is not None:
         cmd.extend(["--jbsq-n", str(jbsq_n)])
     if scale is not None and scale != 0:
@@ -518,8 +518,8 @@ def validate_lb_args(args: argparse.Namespace) -> None:
 def validate_prequal_subset(lb_policy: str, lb_subset_size: int) -> None:
     if lb_policy == "prequal" and lb_subset_size > 0:
         raise SystemExit("--lb-subset-size is not supported with --lb-policy prequal")
-    if lb_policy == "approx-share" and lb_subset_size > 0:
-        raise SystemExit("--lb-subset-size is not supported with --lb-policy approx-share")
+    if lb_policy == "amphiqueue-share" and lb_subset_size > 0:
+        raise SystemExit("--lb-subset-size is not supported with --lb-policy amphiqueue-share")
 
 
 def validate_ms_args(args: argparse.Namespace) -> None:

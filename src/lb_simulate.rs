@@ -2,7 +2,7 @@ use crate::lb_centralized_audit::LbCentralizedAudit;
 use crate::lb_pull_audit::LbPullAudit;
 use crate::load_balancer::LoadBalancer;
 use crate::occupancy::OccupancyAccumulator;
-use crate::policy::{ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use crate::policy::{AmphiQueueSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use crate::server::{
     DispatchMode, ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task,
 };
@@ -79,7 +79,7 @@ pub struct LbRunArgs {
     pub lb_subset_policy: SubsetPolicyKind,
     pub clients: u32,
     pub verbose: u8,
-    pub approx_sched: Option<ApproxSchedKind>,
+    pub amphiqueue_sched: Option<AmphiQueueSchedKind>,
     pub pull_audit: Option<Arc<LbPullAudit>>,
     pub centralized_audit: Option<Arc<LbCentralizedAudit>>,
     pub express_lane: Option<ExpressLaneConfig>,
@@ -806,7 +806,7 @@ fn run_push_simulation(
         n_servers
     };
 
-    let is_approx = args.lb_policy.is_approx();
+    let is_amphiqueue = args.lb_policy.is_amphiqueue();
     let is_prequal = args.lb_policy.is_prequal();
     let pull_audit = args.pull_audit.clone();
 
@@ -820,12 +820,12 @@ fn run_push_simulation(
         if args.verbose >= 1 {
             eprintln!("client {i} subset: {server_indices:?}");
         }
-        let (policy, lb_policy) = if is_approx {
+        let (policy, lb_policy) = if is_amphiqueue {
             (
                 args.pull_policy
                     .expect("pull_policy validated before simulation")
                     .build(),
-                LoadBalancePolicyKind::Approx,
+                LoadBalancePolicyKind::AmphiQueue,
             )
         } else {
             (args.lb_policy.build(), args.lb_policy)
@@ -837,14 +837,14 @@ fn run_push_simulation(
             server_indices,
             i,
             false,
-            args.approx_sched,
+            args.amphiqueue_sched,
             pull_audit.clone(),
             None,
             Some(hop_telemetry.client_queue_occupancy.clone()),
         );
         for j in 0..client_lb_pool {
             load_balancer.outputs[j].connect(Server::input, &server_mailboxes[j]);
-            if is_approx {
+            if is_amphiqueue {
                 load_balancer.pull_intent_outputs[j]
                     .connect(Server::receive_pull_intent, &server_mailboxes[j]);
             }
@@ -930,8 +930,8 @@ fn run_push_simulation(
 
         let dispatch_mode = if is_express {
             DispatchMode::Centralized
-        } else if is_approx {
-            DispatchMode::Approx
+        } else if is_amphiqueue {
+            DispatchMode::AmphiQueue
         } else {
             DispatchMode::Push
         };
@@ -942,7 +942,7 @@ fn run_push_simulation(
             None
         };
 
-        let server_pull_audit = if is_approx && !is_express {
+        let server_pull_audit = if is_amphiqueue && !is_express {
             pull_audit.clone()
         } else {
             None
@@ -961,7 +961,7 @@ fn run_push_simulation(
             Some(hop_telemetry.server_occupancy.clone()),
             Some(hop_telemetry.server_busy_time.clone()),
         );
-        if is_approx && !is_express {
+        if is_amphiqueue && !is_express {
             let mut pull_outputs: Vec<_> = (0..n_clients).map(|_| Output::default()).collect();
             for (lb_id, lb_address) in lb_addresses.iter().enumerate() {
                 pull_outputs[lb_id].connect(LoadBalancer::pull, lb_address);

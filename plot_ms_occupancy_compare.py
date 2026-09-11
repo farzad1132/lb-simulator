@@ -70,9 +70,9 @@ DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     MsExperimentConfig("LR", "least-request"),
     MsExperimentConfig("RR", "round-robin"),
     MsExperimentConfig("R", "random"),
-    MsExperimentConfig("Approx", "approx", pull_policy="least-request"),
-    #MsExperimentConfig("Approx-FCFS", "approx", pull_policy="least-request", approx_sched="fcfs"),
-    #MsExperimentConfig("Approx-EDF", "approx", pull_policy="least-request", approx_sched="edf"),
+    MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
+    #MsExperimentConfig("AmphiQueue-FCFS", "amphiqueue", pull_policy="least-request", amphiqueue_sched="fcfs"),
+    #MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
 ]
 
 
@@ -123,8 +123,8 @@ def format_run_summary(
     ]
     if config.pull_policy is not None:
         parts.append(f"pull_policy={config.pull_policy}")
-    if config.approx_sched is not None:
-        parts.append(f"approx_sched={config.approx_sched}")
+    if config.amphiqueue_sched is not None:
+        parts.append(f"amphiqueue_sched={config.amphiqueue_sched}")
     if config.lb_policy in ("centralized", "jbsq") and config.centralized_sched != "fcfs":
         parts.append(f"centralized_sched={config.centralized_sched}")
     if config.jbsq_n is not None:
@@ -179,7 +179,7 @@ def run_occupancy_compare(
             seed=seed,
             rps=rps,
             service_dist=service_dist,
-            approx_sched=config.approx_sched,
+            amphiqueue_sched=config.amphiqueue_sched,
             jbsq_n=config.jbsq_n,
             scale=config.scale,
         )

@@ -2,7 +2,7 @@ use std::env;
 use std::process::Command;
 
 #[test]
-fn lb_approx_no_bind_completes_with_sane_utilization() {
+fn lb_amphiqueue_no_bind_completes_with_sane_utilization() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -16,10 +16,10 @@ fn lb_approx_no_bind_completes_with_sane_utilization() {
             "--clients",
             "2",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "least-request",
-            "--approx-sched",
+            "--amphiqueue-sched",
             "fcfs",
             "--seed",
             "42",
@@ -29,7 +29,7 @@ fn lb_approx_no_bind_completes_with_sane_utilization() {
 
     assert!(
         output.status.success(),
-        "lb approx no-bind run failed: {}",
+        "lb amphiqueue no-bind run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -44,7 +44,7 @@ fn lb_approx_no_bind_completes_with_sane_utilization() {
 }
 
 #[test]
-fn lb_rejects_approx_sched_without_approx() {
+fn lb_rejects_amphiqueue_sched_without_amphiqueue() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -57,7 +57,7 @@ fn lb_rejects_approx_sched_without_approx() {
             "2",
             "--lb-policy",
             "power-of-two",
-            "--approx-sched",
+            "--amphiqueue-sched",
             "fcfs",
         ])
         .output()
@@ -66,13 +66,13 @@ fn lb_rejects_approx_sched_without_approx() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--approx-sched is only valid with --lb-policy approx"),
+        stderr.contains("--amphiqueue-sched is only valid with --lb-policy amphiqueue"),
         "unexpected stderr: {stderr}"
     );
 }
 
 #[test]
-fn lb_approx_completes_with_sane_utilization() {
+fn lb_amphiqueue_completes_with_sane_utilization() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -86,7 +86,7 @@ fn lb_approx_completes_with_sane_utilization() {
             "--clients",
             "2",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "least-request",
             "--seed",
@@ -97,7 +97,7 @@ fn lb_approx_completes_with_sane_utilization() {
 
     assert!(
         output.status.success(),
-        "lb approx run failed: {}",
+        "lb amphiqueue run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -112,7 +112,7 @@ fn lb_approx_completes_with_sane_utilization() {
 }
 
 #[test]
-fn lb_approx_requires_pull_policy() {
+fn lb_amphiqueue_requires_pull_policy() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -124,7 +124,7 @@ fn lb_approx_requires_pull_policy() {
             "--servers",
             "2",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
         ])
         .output()
         .expect("failed to spawn lb");
@@ -132,13 +132,13 @@ fn lb_approx_requires_pull_policy() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--pull-policy is required with --lb-policy approx"),
+        stderr.contains("--pull-policy is required with --lb-policy amphiqueue"),
         "unexpected stderr: {stderr}"
     );
 }
 
 #[test]
-fn lb_rejects_pull_policy_without_approx() {
+fn lb_rejects_pull_policy_without_amphiqueue() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -160,13 +160,13 @@ fn lb_rejects_pull_policy_without_approx() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--pull-policy is only valid with --lb-policy approx"),
+        stderr.contains("--pull-policy is only valid with --lb-policy amphiqueue"),
         "unexpected stderr: {stderr}"
     );
 }
 
 #[test]
-fn lb_approx_rejects_expresslane() {
+fn lb_amphiqueue_rejects_expresslane() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -183,7 +183,7 @@ fn lb_approx_rejects_expresslane() {
             "--express-th",
             "5",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "power-of-two",
         ])
@@ -193,13 +193,13 @@ fn lb_approx_rejects_expresslane() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not supported with --lb-policy approx"),
+        stderr.contains("not supported with --lb-policy amphiqueue"),
         "unexpected stderr: {stderr}"
     );
 }
 
 #[test]
-fn lb_approx_rejects_shed_delay() {
+fn lb_amphiqueue_rejects_shed_delay() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -213,7 +213,7 @@ fn lb_approx_rejects_shed_delay() {
             "--shed-delay",
             "0.5",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "power-of-two",
         ])
@@ -223,7 +223,7 @@ fn lb_approx_rejects_shed_delay() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not supported with --lb-policy approx"),
+        stderr.contains("not supported with --lb-policy amphiqueue"),
         "unexpected stderr: {stderr}"
     );
 }

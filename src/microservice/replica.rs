@@ -8,10 +8,10 @@ use super::microservice_stats::MicroserviceVisitTracker;
 use super::sidecar::SidecarCapacityEvent;
 use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
-use crate::approx::PullIntent;
-use crate::approx_audit::ApproxPullAudit;
+use crate::amphiqueue::PullIntent;
+use crate::amphiqueue_audit::AmphiQueuePullAudit;
 use crate::ms_jbsq_audit::MsJbsqAudit;
-use crate::policy::ApproxSchedKind;
+use crate::policy::AmphiQueueSchedKind;
 use crate::prequal::Probe;
 use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
 use nexosim::model::{Context, Model, schedulable};
@@ -48,18 +48,18 @@ pub struct ReplicaConfig {
     pub completed: Output<CompletedRequest>,
     pub tracer: Option<Arc<MsTracer>>,
     pub pull_output: Option<Output<usize>>,
-    pub approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
-    /// When set, this replica uses a shared ApproxServerSidecar for intents / occupancy.
+    pub amphiqueue_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
+    /// When set, this replica uses a shared AmphiQueueServerSidecar for intents / occupancy.
     pub sidecar_capacity: Option<Output<SidecarCapacityEvent>>,
-    /// Index sent on edge release (replica idx, or sidecar id under approx-share).
+    /// Index sent on edge release (replica idx, or sidecar id under amphiqueue-share).
     pub edge_release_idx: usize,
     pub probe_reply_outputs: HashMap<usize, Output<ReplicaProbeReply>>,
-    pub pull_audit: Option<Arc<ApproxPullAudit>>,
+    pub pull_audit: Option<Arc<AmphiQueuePullAudit>>,
     pub jbsq_audit: Option<Arc<MsJbsqAudit>>,
     /// When set, this replica uses jbsq pull threshold `n` instead of spare concurrency.
     pub jbsq_n: Option<u32>,
     pub scheduling: SchedulingPolicyKind,
-    pub approx_sched: Option<ApproxSchedKind>,
+    pub amphiqueue_sched: Option<AmphiQueueSchedKind>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -96,7 +96,7 @@ pub struct Replica {
     #[serde(skip)]
     pull_output: Option<Output<usize>>,
     #[serde(skip)]
-    approx_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
+    amphiqueue_pull_outputs: HashMap<usize, Output<ReplicaPull>>,
     #[serde(skip)]
     sidecar_capacity: Option<Output<SidecarCapacityEvent>>,
     edge_release_idx: usize,
@@ -105,7 +105,7 @@ pub struct Replica {
     #[serde(skip)]
     pull_intent_queue: VecDeque<PullIntent>,
     #[serde(skip)]
-    pull_audit: Option<Arc<ApproxPullAudit>>,
+    pull_audit: Option<Arc<AmphiQueuePullAudit>>,
     #[serde(skip)]
     jbsq_audit: Option<Arc<MsJbsqAudit>>,
     #[serde(skip)]
@@ -113,7 +113,7 @@ pub struct Replica {
     #[serde(skip)]
     scheduling: SchedulingPolicyKind,
     #[serde(skip)]
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
 }
 
 impl Replica {
@@ -137,7 +137,7 @@ impl Replica {
             completed: config.completed,
             tracer: config.tracer,
             pull_output: config.pull_output,
-            approx_pull_outputs: config.approx_pull_outputs,
+            amphiqueue_pull_outputs: config.amphiqueue_pull_outputs,
             sidecar_capacity: config.sidecar_capacity,
             edge_release_idx: config.edge_release_idx,
             probe_reply_outputs: config.probe_reply_outputs,
@@ -146,7 +146,7 @@ impl Replica {
             jbsq_audit: config.jbsq_audit,
             jbsq_n: config.jbsq_n,
             scheduling: config.scheduling,
-            approx_sched: config.approx_sched,
+            amphiqueue_sched: config.amphiqueue_sched,
         }
     }
 
@@ -209,8 +209,8 @@ impl Replica {
         }
     }
 
-    fn uses_local_approx_pulls(&self) -> bool {
-        !self.approx_pull_outputs.is_empty()
+    fn uses_local_amphiqueue_pulls(&self) -> bool {
+        !self.amphiqueue_pull_outputs.is_empty()
     }
 
     fn uses_shared_sidecar(&self) -> bool {
@@ -257,7 +257,7 @@ impl Replica {
             );
         }
         self.pending_pulls += 1;
-        if let Some(output) = self.approx_pull_outputs.get_mut(&intent.sender_id) {
+        if let Some(output) = self.amphiqueue_pull_outputs.get_mut(&intent.sender_id) {
             output
                 .send(ReplicaPull {
                     target_microservice: self.microservice_id.clone(),
@@ -572,14 +572,14 @@ impl Replica {
                         &hop,
                         cx,
                         &format!(
-                            "Server({}/{}) approx upstream endpoint={} inflight={}",
+                            "Server({}/{}) amphiqueue upstream endpoint={} inflight={}",
                             self.microservice_id,
                             self.server_idx,
                             hop.endpoint,
                             self.in_flight
                         ),
                     );
-                    if self.uses_local_approx_pulls() {
+                    if self.uses_local_amphiqueue_pulls() {
                         self.pending_pulls = self.pending_pulls.saturating_sub(1);
                     }
                     if self.uses_shared_sidecar() {
@@ -643,7 +643,7 @@ impl Replica {
     }
 
     pub async fn receive_pull_intent(&mut self, intent: PullIntent, _cx: &Context<Self>) {
-        if self.approx_pull_outputs.is_empty() {
+        if self.amphiqueue_pull_outputs.is_empty() {
             return;
         }
         let queue_len_before = self.pull_intent_queue.len();
@@ -658,7 +658,7 @@ impl Replica {
             );
         }
         if self
-            .approx_sched
+            .amphiqueue_sched
             .is_some_and(|s| s.intent_queue_uses_edf())
         {
             let insert_at = edf_insert_index(
@@ -722,7 +722,7 @@ impl Replica {
                     output.send(self.server_idx).await;
                 }
             }
-            if self.uses_local_approx_pulls() {
+            if self.uses_local_amphiqueue_pulls() {
                 self.drain_pull_intents_async().await;
             }
             if self.uses_shared_sidecar() {

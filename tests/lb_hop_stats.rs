@@ -92,7 +92,7 @@ fn push_queueing_is_mostly_on_server_hop() {
 }
 
 #[test]
-fn approx_queueing_is_mostly_on_client_hop() {
+fn amphiqueue_queueing_is_mostly_on_client_hop() {
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
 
     let output = Command::new(&lb_binary)
@@ -114,7 +114,7 @@ fn approx_queueing_is_mostly_on_client_hop() {
             "--arrival",
             "exponential",
             "--lb-policy",
-            "approx",
+            "amphiqueue",
             "--pull-policy",
             "power-of-two",
             "--seed",
@@ -125,7 +125,7 @@ fn approx_queueing_is_mostly_on_client_hop() {
 
     assert!(
         output.status.success(),
-        "approx hop run failed: {}",
+        "amphiqueue hop run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -135,10 +135,10 @@ fn approx_queueing_is_mostly_on_client_hop() {
     let client_q = f64_array(&stats, &["by_hop", "client", "queueing_delay"]);
     let server_q = f64_array(&stats, &["by_hop", "server", "queueing_delay"]);
 
-    assert!(mean(&server_q) < 1e-9, "approx server queueing should be ~0");
+    assert!(mean(&server_q) < 1e-9, "amphiqueue server queueing should be ~0");
     assert!(
         mean(&client_q) > 0.01,
-        "approx client queueing should be positive under load, got {}",
+        "amphiqueue client queueing should be positive under load, got {}",
         mean(&client_q)
     );
 

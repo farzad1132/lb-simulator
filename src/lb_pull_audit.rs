@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Records approx pull/intent events during an `lb` simulation run for post-hoc invariant checks.
+/// Records amphiqueue pull/intent events during an `lb` simulation run for post-hoc invariant checks.
 #[derive(Default)]
 pub struct LbPullAudit {
     next_seq: AtomicU64,
@@ -154,7 +154,7 @@ impl LbPullAudit {
             .collect()
     }
 
-    /// Shared invariants for bound and no-bind approx runs.
+    /// Shared invariants for bound and no-bind amphiqueue runs.
     pub fn validate_common(&self) -> Result<(), String> {
         let events = self.events.lock().unwrap();
         if events.is_empty() {

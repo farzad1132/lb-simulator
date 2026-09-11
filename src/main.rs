@@ -4,8 +4,8 @@ use lb::lb_simulate::{
 };
 use std::collections::HashMap;
 use lb::policy::{
-    validate_approx_sched, validate_centralized_subset, validate_prequal_subset,
-    validate_pull_policy, ApproxSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    validate_amphiqueue_sched, validate_centralized_subset, validate_prequal_subset,
+    validate_pull_policy, AmphiQueueSchedKind, LoadBalancePolicyKind, PullPolicyKind,
 };
 use lb::subset::SubsetPolicyKind;
 use serde::Serialize;
@@ -289,7 +289,7 @@ struct Args {
     #[arg(long)]
     shed_delay: Option<f64>,
     #[arg(long, value_enum)]
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -324,11 +324,11 @@ fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String
         || args.express_th.is_some()
         || args.express_del_th.is_some();
 
-    if args.lb_policy.is_centralized() || args.lb_policy.is_approx() {
+    if args.lb_policy.is_centralized() || args.lb_policy.is_amphiqueue() {
         let policy = if args.lb_policy.is_centralized() {
             "centralized"
         } else {
-            "approx"
+            "amphiqueue"
         };
         if args.expresslane || has_express_flags {
             return Err(format!(
@@ -409,11 +409,11 @@ fn validate_work_shedding(args: &Args) -> Result<Option<Duration>, String> {
         return Ok(None);
     }
 
-    if args.lb_policy.is_centralized() || args.lb_policy.is_approx() {
+    if args.lb_policy.is_centralized() || args.lb_policy.is_amphiqueue() {
         let policy = if args.lb_policy.is_centralized() {
             "centralized"
         } else {
-            "approx"
+            "amphiqueue"
         };
         return Err(format!(
             "--shed-delay is not supported with --lb-policy {policy}"
@@ -499,7 +499,7 @@ fn lb_run_args_from_cli(
         lb_subset_policy: args.lb_subset_policy,
         clients: args.clients,
         verbose: args.verbose,
-        approx_sched: args.approx_sched,
+        amphiqueue_sched: args.amphiqueue_sched,
         pull_audit: None,
         centralized_audit: None,
         express_lane: express_lane.map(|cfg| lb::lb_simulate::ExpressLaneConfig {
@@ -619,7 +619,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             LoadBalancePolicyKind::ClR => "cl-r",
             LoadBalancePolicyKind::ClRr => "cl-rr",
             LoadBalancePolicyKind::Corr => "corr",
-            LoadBalancePolicyKind::ApproxShare => "approx-share",
+            LoadBalancePolicyKind::AmphiQueueShare => "amphiqueue-share",
             LoadBalancePolicyKind::Jbsq => "jbsq",
             _ => unreachable!(),
         };
@@ -629,7 +629,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     validate_pull_policy(args.lb_policy, args.pull_policy).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
-    validate_approx_sched(args.lb_policy, args.approx_sched, false).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    validate_amphiqueue_sched(args.lb_policy, args.amphiqueue_sched, false).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)
         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     validate_centralized_subset(
@@ -797,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_expresslane_rejects_approx_policy() {
+    fn validate_expresslane_rejects_amphiqueue_policy() {
         let err = validate_expresslane(
             &Args::try_parse_from([
                 "lb",
@@ -807,25 +807,25 @@ mod tests {
                 "--express-th",
                 "5",
                 "--lb-policy",
-                "approx",
+                "amphiqueue",
                 "--pull-policy",
                 "power-of-two",
             ])
             .unwrap(),
         )
         .unwrap_err();
-        assert!(err.contains("not supported with --lb-policy approx"));
+        assert!(err.contains("not supported with --lb-policy amphiqueue"));
     }
 
     #[test]
-    fn validate_pull_policy_required_for_approx() {
-        let args = Args::try_parse_from(["lb", "--lb-policy", "approx"]).unwrap();
+    fn validate_pull_policy_required_for_amphiqueue() {
+        let args = Args::try_parse_from(["lb", "--lb-policy", "amphiqueue"]).unwrap();
         let err = validate_pull_policy(args.lb_policy, args.pull_policy).unwrap_err();
         assert!(err.contains("--pull-policy is required"));
     }
 
     #[test]
-    fn validate_pull_policy_rejected_without_approx() {
+    fn validate_pull_policy_rejected_without_amphiqueue() {
         let args = Args::try_parse_from([
             "lb",
             "--lb-policy",
@@ -839,17 +839,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_approx_sched_rejected_without_approx() {
+    fn validate_amphiqueue_sched_rejected_without_amphiqueue() {
         let args = Args::try_parse_from([
             "lb",
             "--lb-policy",
             "power-of-two",
-            "--approx-sched",
+            "--amphiqueue-sched",
             "fcfs",
         ])
         .unwrap();
-        let err = validate_approx_sched(args.lb_policy, args.approx_sched, false).unwrap_err();
-        assert!(err.contains("--approx-sched is only valid with --lb-policy approx"));
+        let err = validate_amphiqueue_sched(args.lb_policy, args.amphiqueue_sched, false).unwrap_err();
+        assert!(err.contains("--amphiqueue-sched is only valid with --lb-policy amphiqueue"));
     }
 
     #[test]
@@ -1150,21 +1150,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_work_shedding_rejects_approx() {
+    fn validate_work_shedding_rejects_amphiqueue() {
         let err = validate_work_shedding(
             &Args::try_parse_from([
                 "lb",
                 "--shed-delay",
                 "0.5",
                 "--lb-policy",
-                "approx",
+                "amphiqueue",
                 "--pull-policy",
                 "power-of-two",
             ])
             .unwrap(),
         )
         .unwrap_err();
-        assert!(err.contains("not supported with --lb-policy approx"));
+        assert!(err.contains("not supported with --lb-policy amphiqueue"));
     }
 
     #[test]

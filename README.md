@@ -31,8 +31,8 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 - **round-robin** — cycle through servers in a randomly shuffled order (per load balancer)
 - **centralized** — pull-based: FIFO queue(s) at central dispatcher(s); servers request work when they have spare capacity (`lb`: full pool or [strict partition subsets](docs/lb-simulation.md#centralized-subsetting); incompatible with `--expresslane`). In `ms`, `centralized` applies to outbound routing only (one pull queue per downstream target, or partitioned subsets when `k > 0`); see [microservice-simulation.md](docs/microservice-simulation.md#centralized-policy-pull-based-layer).
 - **jbsq** — ms-only bounded central pull: same shared pull queues as `centralized`, but replicas pull while occupancy is below **`--jbsq-n`** (required; no default) and may buffer pulled work locally; see [docs/jbsq-policy.md](docs/jbsq-policy.md)
-- **approx** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); optional **`--approx-sched fcfs`**, **`edf`**, or **`edf+`** (`ms`) for unbound queue-head pulls; see [docs/approx-policy.md](docs/approx-policy.md)
-- **approx-share** — ms-only: dual-mode sidecars (`--approx-share N` replicas per sidecar; ingress joins least-occupancy replica in the group, pull = approx-share); default `N=1` ≈ approx; see [docs/approx-policy.md](docs/approx-policy.md#approx-share-ms-only)
+- **amphiqueue** — decentralized pull: per-client FIFO queues in `lb`; per-caller-replica outbound queues in `ms` (ingress stays P2C); optional **`--amphiqueue-sched fcfs`**, **`edf`**, or **`edf+`** (`ms`) for unbound queue-head pulls; see [docs/amphiqueue-policy.md](docs/amphiqueue-policy.md)
+- **amphiqueue-share** — ms-only: dual-mode sidecars (`--amphiqueue-share N` replicas per sidecar; ingress joins least-occupancy replica in the group, pull = amphiqueue-share); default `N=1` ≈ amphiqueue; see [docs/amphiqueue-policy.md](docs/amphiqueue-policy.md#amphiqueue-share-ms-only)
 - **prequal** — decentralized push with async RIF probe pool (`lb` and `ms` outbound; `--lb-subset-size > 0` rejected); see [docs/prequal-policy.md](docs/prequal-policy.md)
 - **cl** — shared push power-of-two outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
 - **cl-lr** — shared push least-request outbound layer (`ms` only; ingress stays P2C; `--lb-subset-size > 0` rejected)
@@ -42,7 +42,7 @@ Load-balancing policies live in [`src/policy.rs`](src/policy.rs). Available poli
 
 Each load balancer can be restricted to a subset of servers via `--lb-subset-size`. With the default (`0`), every LB sees the full server pool. With `k > 0`:
 
-- **Push / approx:** each client LB routes among `min(k, servers)` servers; leftovers (`n % k`) may be unused; `--lb-subset-policy` may be `deterministic` or `random`.
+- **Push / amphiqueue:** each client LB routes among `min(k, servers)` servers; leftovers (`n % k`) may be unused; `--lb-subset-policy` may be `deterministic` or `random`.
 - **Centralized (`lb`):** `k` must divide `--servers`; one shared pull LB per subset; `--clients` must be divisible by the subset count; only `deterministic` subset policy. See [docs/lb-simulation.md — Server subset](docs/lb-simulation.md#server-subset).
 - **Not supported:** `prequal`, and in `ms` also `cl`, `cl-lr`, `cl-r`, `cl-rr`, and `corr`. Both simulators support restricted partition subsetting for `centralized` and `jbsq`.
 
@@ -138,10 +138,10 @@ cargo build --release
 | `--callgraph` | (required) | Path to callgraph JSON |
 | `--load-file` | (required) | Path to per-API load JSON (`rps` + `slo_ms`) |
 | `--n` | `1000000` | Total requests, split across APIs by RPS weight |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, `approx`, `approx-share`, `prequal`, `corr`) |
-| `--pull-policy` | (none) | Pull-intent server/sidecar selection for `approx` / `approx-share` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with those policies |
-| `--approx-sched` | (omit) | With `approx` / `approx-share`: omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` (ms only; `edf+` also EDF-orders intent queues) for unbound queue-head fulfillment; see [docs/approx-policy.md](docs/approx-policy.md) |
-| `--approx-share` | `1` | Replicas per sidecar with `--lb-policy approx-share` (`ceil` partitioning; remainder gets its own sidecar) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, `amphiqueue`, `amphiqueue-share`, `prequal`, `corr`) |
+| `--pull-policy` | (none) | Pull-intent server/sidecar selection for `amphiqueue` / `amphiqueue-share` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with those policies |
+| `--amphiqueue-sched` | (omit) | With `amphiqueue` / `amphiqueue-share`: omit for bound 1:1 pulls; `fcfs`, `edf`, or `edf+` (ms only; `edf+` also EDF-orders intent queues) for unbound queue-head fulfillment; see [docs/amphiqueue-policy.md](docs/amphiqueue-policy.md) |
+| `--amphiqueue-share` | `1` | Replicas per sidecar with `--lb-policy amphiqueue-share` (`ceil` partitioning; remainder gets its own sidecar) |
 | `--jbsq-n` | (none) | Max pulled occupancy per replica with `--lb-policy jbsq` (**required**; no default; `>= 1`); see [docs/jbsq-policy.md](docs/jbsq-policy.md) |
 | `--lb-subset-size` | `0` | Replicas each balancer can route to (`0` = all; not supported with `prequal`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, or `corr` in `ms`; `centralized` / `jbsq` require `k` divides servers/replicas and callers divisible by `S`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
@@ -192,9 +192,9 @@ Options:
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server (CPU cores) |
 | `--clients` | `1` | Number of independent clients (each with its own load balancer) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`, `prequal`) |
-| `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--approx-sched` | (omit) | With `approx`: omit for bound 1:1 pulls; `fcfs` for unbound FCFS queue-head fulfillment |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `amphiqueue`, `prequal`) |
+| `--pull-policy` | (none) | Pull-intent server selection for `amphiqueue` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy amphiqueue` |
+| `--amphiqueue-sched` | (omit) | With `amphiqueue`: omit for bound 1:1 pulls; `fcfs` for unbound FCFS queue-head fulfillment |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all servers; not supported with `prequal`; centralized requires partition constraints) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible runs |
@@ -267,9 +267,9 @@ Plot script options mirror the simulator (`--load`, `--n`, `--service-dist`, `--
 | `--servers` | `1` | Number of servers |
 | `--concurrency` | `1` | Concurrent tasks per server |
 | `--clients` | `1` | Number of independent clients |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `approx`, `prequal`) |
-| `--pull-policy` | (none) | Pull-intent server selection for `approx` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy approx` |
-| `--approx-sched` | (omit) | With `approx`: pass `fcfs`, `edf`, or `edf+` to the simulator subprocess |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `centralized`, `amphiqueue`, `prequal`) |
+| `--pull-policy` | (none) | Pull-intent server selection for `amphiqueue` (`random`, `power-of-two`, `least-request`, `round-robin`); **required** with `--lb-policy amphiqueue` |
+| `--amphiqueue-sched` | (omit) | With `amphiqueue`: pass `fcfs`, `edf`, or `edf+` to the simulator subprocess |
 | `--lb-subset-size` | `0` | Servers each LB can route to (`0` = all; not supported with `prequal`) |
 | `--lb-subset-policy` | `deterministic` | Subset assignment (`deterministic` or `random`) |
 | `--seed` | (none) | RNG seed for reproducible simulation |
@@ -303,12 +303,12 @@ python plot_cdfs.py \
   --output output/e2e_cdf.pdf
 ```
 
-Approx with oldest-FCFS pulls (`lb` only):
+AmphiQueue with oldest-FCFS pulls (`lb` only):
 
 ```bash
 python plot_cdfs.py \
-  --lb-policy approx --pull-policy least-request \
-  --approx-sched fcfs --n 100000
+  --lb-policy amphiqueue --pull-policy least-request \
+  --amphiqueue-sched fcfs --n 100000
 ```
 
 On failure, `plot_cdfs.py` prints the simulator command, exit code, and full stderr/stdout. Set `RUST_BACKTRACE=1` for panic backtraces when debugging the Rust binary.
@@ -438,11 +438,11 @@ python plot_lb_sweep.py \
 
 ## Plot LB config load compare
 
-`plot_lb_load_compare.py` compares named experiment configs while sweeping **raw load** on the x-axis. Each config can differ in LB policy, client/server counts, concurrency, `lb_subset_size`, and (for approx) `approx_sched`. All configs share the same load values (target utilization).
+`plot_lb_load_compare.py` compares named experiment configs while sweeping **raw load** on the x-axis. Each config can differ in LB policy, client/server counts, concurrency, `lb_subset_size`, and (for amphiqueue) `amphiqueue_sched`. All configs share the same load values (target utilization).
 
 Use this when you want to compare specific topologies at equal utilization. Use [`plot_lb_sweep.py`](plot_lb_sweep.py) for generic one-parameter sweeps with one line per policy. Use [`plot_lb_centralized_compare.py`](plot_lb_centralized_compare.py) when the x-axis should be equal offered load (task/s) across different server counts.
 
-Edit experiment configs in the `DEFAULT_CONFIGS` list at the top of [`plot_lb_load_compare.py`](plot_lb_load_compare.py) (or shared [`lb_plot_configs.py`](lb_plot_configs.py) types). Use `--config-index` to run a subset without editing the file. For approx configs, set `approx_sched="fcfs"` on individual `ExperimentConfig` entries to enable unbound FCFS pull fulfillment.
+Edit experiment configs in the `DEFAULT_CONFIGS` list at the top of [`plot_lb_load_compare.py`](plot_lb_load_compare.py) (or shared [`lb_plot_configs.py`](lb_plot_configs.py) types). Use `--config-index` to run a subset without editing the file. For amphiqueue configs, set `amphiqueue_sched="fcfs"` on individual `ExperimentConfig` entries to enable unbound FCFS pull fulfillment.
 
 ```bash
 python plot_lb_load_compare.py --n 100000 --seed 42
@@ -474,7 +474,7 @@ python plot_lb_load_compare.py \
 # writes output/lb_load_compare_p99_subset.pdf
 ```
 
-Example comparing bound vs unbound approx (per-config `approx_sched` in `DEFAULT_CONFIGS`):
+Example comparing bound vs unbound amphiqueue (per-config `amphiqueue_sched` in `DEFAULT_CONFIGS`):
 
 ```bash
 python plot_lb_load_compare.py \
@@ -485,7 +485,7 @@ python plot_lb_load_compare.py \
 
 ## Plot LB config subset-size compare
 
-`plot_lb_subset_compare.py` compares named experiment configs while sweeping **`--lb-subset-size`** on the x-axis at a fixed load. Each config can differ in LB policy, client/server counts, concurrency, `pull_policy`, and `approx_sched`. All configs share the same subset-size list. `ExperimentConfig.lb_subset_size` is ignored (the sweep supplies `k`).
+`plot_lb_subset_compare.py` compares named experiment configs while sweeping **`--lb-subset-size`** on the x-axis at a fixed load. Each config can differ in LB policy, client/server counts, concurrency, `pull_policy`, and `amphiqueue_sched`. All configs share the same subset-size list. `ExperimentConfig.lb_subset_size` is ignored (the sweep supplies `k`).
 
 Edit configs in `DEFAULT_CONFIGS` at the top of [`plot_lb_subset_compare.py`](plot_lb_subset_compare.py). Use `--config-index` to run a subset. Centralized configs reject subset sizes that do not partition the pool (`k` must divide `servers`, and `clients` must be divisible by `servers/k`).
 
@@ -627,11 +627,11 @@ python plot_ms_chain_slo_heatmap.py --n 100000
 | `--comment` | (none) | Suffix appended to output filename before `.pdf` |
 | `--load-min` / `--load-max` / `--load-step` | `0.1` / `0.9` / `0.1` | Load sweep range |
 | `--n` | `100000` | Requests per load-sweep run (calibration always uses `n=300000`) |
-| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, `approx`, `approx-share`, `prequal`, `corr`) |
-| `--pull-policy` | (none) | Pull-intent server/sidecar selection for `approx` / `approx-share` |
-| `--approx-sched` | (omit) | With `approx` / `approx-share`: omit for bound pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment |
-| `--approx-share` | `1` | Replicas per sidecar when `--lb-policy approx-share` |
-| `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas; not supported with `prequal` or `approx-share`) |
+| `--lb-policy` | `power-of-two` | Load-balancing policy (`random`, `power-of-two`, `least-request`, `round-robin`, `cl`, `cl-lr`, `cl-r`, `cl-rr`, `centralized`, `jbsq`, `amphiqueue`, `amphiqueue-share`, `prequal`, `corr`) |
+| `--pull-policy` | (none) | Pull-intent server/sidecar selection for `amphiqueue` / `amphiqueue-share` |
+| `--amphiqueue-sched` | (omit) | With `amphiqueue` / `amphiqueue-share`: omit for bound pulls; `fcfs`, `edf`, or `edf+` for unbound queue-head fulfillment |
+| `--amphiqueue-share` | `1` | Replicas per sidecar when `--lb-policy amphiqueue-share` |
+| `--lb-subset-size` | `0` | Subset size per LB (`0` = all replicas; not supported with `prequal` or `amphiqueue-share`) |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`) |
 | `--service-dist` | `exp` | Service-time distribution (`exp`, `fixed`, `bimodal`); affects calibrated SLO |
 | `--binary` | (build release) | Use a prebuilt ms binary and skip `cargo build --release` |

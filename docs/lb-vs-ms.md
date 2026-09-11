@@ -13,9 +13,9 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 
 | Feature | lb | ms | Notes |
 |---------|:--:|:--:|-------|
-| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **JBSQ** (`jbsq`, ms-only): same shared pull queues as centralized with occupancy bound `--jbsq-n`. **Approx** (`approx`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **Approx-share** (`approx-share`, ms-only): approx protocol with shared sidecars (`--approx-share`). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), **CL-R** (`cl-r`), **CL-RR** (`cl-rr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
+| Load-balancing policies | yes | yes | Push: `random`, `power-of-two`, `least-request`, `round-robin`. **Centralized** (`centralized`): lb = global flat pool; ms = per-downstream-target pull layer. **JBSQ** (`jbsq`, ms-only): same shared pull queues as centralized with occupancy bound `--jbsq-n`. **AmphiQueue** (`amphiqueue`): lb = per-client decentralized pull; ms = per-caller-replica outbound pull with `--pull-policy` (ingress stays P2C). **AmphiQueue-share** (`amphiqueue-share`, ms-only): amphiqueue protocol with shared sidecars (`--amphiqueue-share`). **Prequal** (`prequal`): async RIF probe pool (lb = per-client LB; ms = per-caller-replica outbound; ingress stays P2C). **CL** (`cl`), **CL-LR** (`cl-lr`), **CL-R** (`cl-r`), **CL-RR** (`cl-rr`), and **Corr** (`corr`, experimental) are ms-only shared push layers. |
 | Local inflight load view | yes | yes | Typical push policies use each balancer's **local inflight** counters; **prequal** additionally probes server/replica `queue.len + in_flight` |
-| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, `approx-share`, or with `cl`, `cl-lr`, `cl-r`, `cl-rr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` / `jbsq` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
+| Subset routing | yes | yes | `--lb-subset-size`, `--lb-subset-policy` (`deterministic`, `random`). Not supported with `prequal`, `amphiqueue-share`, or with `cl`, `cl-lr`, `cl-r`, `cl-rr`, or `corr` in ms. Both simulators support restricted partition subsetting for `centralized` / `jbsq` (see [lb-simulation.md](lb-simulation.md#centralized-subsetting)). |
 | `--seed`, `--format`, `--verbose` | yes | yes | |
 | FCFS queue + concurrency | yes | yes | lb: `--concurrency` per server; ms: `cpu / replicas` per replica |
 | Server queue scheduling | — | yes | ms: `--scheduling fifo` (default) or `edf`; see [scheduling.md](scheduling.md) |
@@ -28,12 +28,12 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | **Work shedding** | yes | — | lb-only; `--shed-delay`; see [work-shedding.md](work-shedding.md) |
 | **Centralized pull dispatch** | yes | yes | lb: one queue per subset (or one global queue); servers pull on spare capacity. ms: one pull queue per downstream target (or `S` partitioned queues when `k > 0`; outbound only; ingress P2C). See [lb-simulation.md](lb-simulation.md#centralized-policy-pull-based) and [microservice-simulation.md](microservice-simulation.md#centralized-policy-pull-based-layer). |
 | **JBSQ bounded central pull** | — | yes (outbound only) | Same topology as ms `centralized`; pull while occupancy `< --jbsq-n`; see [jbsq-policy.md](jbsq-policy.md) |
-| **Approx decentralized pull** | yes | yes (outbound only) | See [approx-policy.md](approx-policy.md) |
-| **Approx-share (shared sidecars)** | — | yes (outbound only) | `--approx-share N` replicas per sidecar; see [approx-policy.md](approx-policy.md#approx-share-ms-only) |
+| **AmphiQueue decentralized pull** | yes | yes (outbound only) | See [amphiqueue-policy.md](amphiqueue-policy.md) |
+| **AmphiQueue-share (shared sidecars)** | — | yes (outbound only) | `--amphiqueue-share N` replicas per sidecar; see [amphiqueue-policy.md](amphiqueue-policy.md#amphiqueue-share-ms-only) |
 | **Prequal async probe pool** | yes | yes (outbound only) | See [prequal-policy.md](prequal-policy.md); ms ingress stays P2C |
-| **`--approx-sched fcfs` (unbound approx pulls)** | yes | yes | Outbound approx only in `ms`; see [approx-policy.md](approx-policy.md) |
-| **`--approx-sched edf` (outbound approx queue)** | — | yes | `ms` only; see [approx-policy.md](approx-policy.md) |
-| **`--approx-sched edf+` (outbound + intent EDF)** | — | yes | `ms` only; EDF outbound and intent queues; see [approx-policy.md](approx-policy.md) |
+| **`--amphiqueue-sched fcfs` (unbound amphiqueue pulls)** | yes | yes | Outbound amphiqueue only in `ms`; see [amphiqueue-policy.md](amphiqueue-policy.md) |
+| **`--amphiqueue-sched edf` (outbound amphiqueue queue)** | — | yes | `ms` only; see [amphiqueue-policy.md](amphiqueue-policy.md) |
+| **`--amphiqueue-sched edf+` (outbound + intent EDF)** | — | yes | `ms` only; EDF outbound and intent queues; see [amphiqueue-policy.md](amphiqueue-policy.md) |
 | **CL centralized-layer outbound** | — | yes | One shared push P2C balancer per downstream microservice target. See [microservice-simulation.md](microservice-simulation.md#cl-policy-centralized-layer). |
 | **CL-LR shared least-request outbound** | — | yes | Same shared topology as `cl`; downstream uses least-request on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-lr-policy-shared-least-request-outbound). |
 | **CL-R shared random outbound** | — | yes | Same shared topology as `cl`; downstream uses random on aggregate inflight. See [microservice-simulation.md](microservice-simulation.md#cl-r-policy-shared-random-outbound). |
@@ -135,7 +135,7 @@ Both simulators call `subset::assign_subset(policy, n, client_id, subset_size)` 
 
 | Balancer | `client_id` |
 |----------|-------------|
-| lb push/approx `LoadBalancer` | Load balancer index (`0 .. clients-1`) |
+| lb push/amphiqueue `LoadBalancer` | Load balancer index (`0 .. clients-1`) |
 | lb centralized subset LB | Subset index (`0 .. S-1`) |
 | ms `EdgeBalancer` | n/a — always full entry replica pool (`k` ignored for ingress) |
 | ms `ReplicaBalancer` | `replica_idx` within the calling service |

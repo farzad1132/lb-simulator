@@ -37,8 +37,8 @@ fn chain3_jbsq_sched_args(
         pull_audit: None,
         centralized_audit: audit,
         jbsq_audit: None,
-        approx_sched: None,
-        approx_share: 1,
+        amphiqueue_sched: None,
+        amphiqueue_share: 1,
         jbsq_n: Some(jbsq_n),
     }
 }

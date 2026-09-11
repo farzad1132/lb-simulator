@@ -37,8 +37,8 @@ fn chain3_args(
         pull_audit: None,
         centralized_audit: None,
         jbsq_audit,
-        approx_sched: None,
-        approx_share: 1,
+        amphiqueue_sched: None,
+        amphiqueue_share: 1,
         jbsq_n,
     }
 }

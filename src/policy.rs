@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-pub enum ApproxSchedKind {
+pub enum AmphiQueueSchedKind {
     Fcfs,
     Edf,
     #[value(name = "edf+")]
@@ -25,7 +25,7 @@ impl CentralizedSchedKind {
     }
 }
 
-impl ApproxSchedKind {
+impl AmphiQueueSchedKind {
     /// Outbound balancer queues use EDF insert for `edf` and `edf+`.
     pub fn outbound_uses_edf(self) -> bool {
         matches!(self, Self::Edf | Self::EdfPlus)
@@ -123,9 +123,9 @@ impl LoadBalancePolicy for CentralizedPolicy {
     }
 }
 
-pub struct ApproxPolicy;
+pub struct AmphiQueuePolicy;
 
-impl LoadBalancePolicy for ApproxPolicy {
+impl LoadBalancePolicy for AmphiQueuePolicy {
     fn select(&mut self, loads: &[u32]) -> usize {
         let _ = loads;
         0
@@ -172,10 +172,10 @@ pub enum LoadBalancePolicyKind {
     Centralized,
     #[value(name = "jbsq")]
     Jbsq,
-    #[value(name = "approx")]
-    Approx,
-    #[value(name = "approx-share")]
-    ApproxShare,
+    #[value(name = "amphiqueue")]
+    AmphiQueue,
+    #[value(name = "amphiqueue-share")]
+    AmphiQueueShare,
     #[value(name = "prequal")]
     Prequal,
     #[value(name = "cl")]
@@ -201,7 +201,7 @@ impl LoadBalancePolicyKind {
             }),
             Self::LeastRequest => Box::new(LeastRequestPolicy),
             Self::Centralized | Self::Jbsq => Box::new(CentralizedPolicy),
-            Self::Approx | Self::ApproxShare => Box::new(ApproxPolicy),
+            Self::AmphiQueue | Self::AmphiQueueShare => Box::new(AmphiQueuePolicy),
             Self::Prequal => Box::new(PrequalPolicy),
             Self::Cl | Self::ClLr | Self::ClR | Self::ClRr | Self::Corr => {
                 Box::new(PowerOfTwoPolicy)
@@ -222,17 +222,17 @@ impl LoadBalancePolicyKind {
         matches!(self, Self::Centralized | Self::Jbsq)
     }
 
-    pub fn is_approx(self) -> bool {
-        matches!(self, Self::Approx)
+    pub fn is_amphiqueue(self) -> bool {
+        matches!(self, Self::AmphiQueue)
     }
 
-    pub fn is_approx_share(self) -> bool {
-        matches!(self, Self::ApproxShare)
+    pub fn is_amphiqueue_share(self) -> bool {
+        matches!(self, Self::AmphiQueueShare)
     }
 
-    /// Approx pull-intent protocol (decentralized or shared-sidecar).
-    pub fn uses_approx_protocol(self) -> bool {
-        matches!(self, Self::Approx | Self::ApproxShare)
+    /// AmphiQueue pull-intent protocol (decentralized or shared-sidecar).
+    pub fn uses_amphiqueue_protocol(self) -> bool {
+        matches!(self, Self::AmphiQueue | Self::AmphiQueueShare)
     }
 
     pub fn is_prequal(self) -> bool {
@@ -242,7 +242,7 @@ impl LoadBalancePolicyKind {
     pub fn is_pull_based(self) -> bool {
         matches!(
             self,
-            Self::Centralized | Self::Jbsq | Self::Approx | Self::ApproxShare
+            Self::Centralized | Self::Jbsq | Self::AmphiQueue | Self::AmphiQueueShare
         )
     }
 
@@ -262,7 +262,7 @@ impl LoadBalancePolicyKind {
                 | Self::ClR
                 | Self::ClRr
                 | Self::Corr
-                | Self::ApproxShare
+                | Self::AmphiQueueShare
                 | Self::Jbsq
         )
     }
@@ -289,8 +289,8 @@ impl LoadBalancePolicyKind {
             | Self::Centralized
             | Self::Jbsq
             | Self::Corr
-            | Self::Approx
-            | Self::ApproxShare
+            | Self::AmphiQueue
+            | Self::AmphiQueueShare
             | Self::Prequal => Box::new(PowerOfTwoPolicy),
             other => other.build(),
         }
@@ -314,32 +314,32 @@ pub fn validate_pull_policy(
     lb_policy: LoadBalancePolicyKind,
     pull_policy: Option<PullPolicyKind>,
 ) -> Result<(), String> {
-    match (lb_policy.uses_approx_protocol(), pull_policy) {
+    match (lb_policy.uses_amphiqueue_protocol(), pull_policy) {
         (true, None) => Err(
-            "--pull-policy is required with --lb-policy approx or approx-share".into(),
+            "--pull-policy is required with --lb-policy amphiqueue or amphiqueue-share".into(),
         ),
         (false, Some(_)) => Err(
-            "--pull-policy is only valid with --lb-policy approx or approx-share".into(),
+            "--pull-policy is only valid with --lb-policy amphiqueue or amphiqueue-share".into(),
         ),
         _ => Ok(()),
     }
 }
 
-pub fn validate_approx_sched(
+pub fn validate_amphiqueue_sched(
     lb_policy: LoadBalancePolicyKind,
-    approx_sched: Option<ApproxSchedKind>,
+    amphiqueue_sched: Option<AmphiQueueSchedKind>,
     allow_edf: bool,
 ) -> Result<(), String> {
-    let Some(approx_sched) = approx_sched else {
+    let Some(amphiqueue_sched) = amphiqueue_sched else {
         return Ok(());
     };
-    if !lb_policy.uses_approx_protocol() {
+    if !lb_policy.uses_amphiqueue_protocol() {
         return Err(
-            "--approx-sched is only valid with --lb-policy approx or approx-share".into(),
+            "--amphiqueue-sched is only valid with --lb-policy amphiqueue or amphiqueue-share".into(),
         );
     }
-    if approx_sched.requires_ms() && !allow_edf {
-        return Err("--approx-sched edf/edf+ is only supported by the ms simulator".into());
+    if amphiqueue_sched.requires_ms() && !allow_edf {
+        return Err("--amphiqueue-sched edf/edf+ is only supported by the ms simulator".into());
     }
     Ok(())
 }
@@ -372,18 +372,18 @@ pub fn validate_jbsq_n(
     }
 }
 
-pub fn validate_approx_share(
+pub fn validate_amphiqueue_share(
     lb_policy: LoadBalancePolicyKind,
-    approx_share: u32,
+    amphiqueue_share: u32,
 ) -> Result<(), String> {
-    if lb_policy.is_approx_share() {
-        if approx_share == 0 {
-            return Err("--approx-share must be >= 1 with --lb-policy approx-share".into());
+    if lb_policy.is_amphiqueue_share() {
+        if amphiqueue_share == 0 {
+            return Err("--amphiqueue-share must be >= 1 with --lb-policy amphiqueue-share".into());
         }
         return Ok(());
     }
-    if approx_share != 1 {
-        return Err("--approx-share is only valid with --lb-policy approx-share".into());
+    if amphiqueue_share != 1 {
+        return Err("--amphiqueue-share is only valid with --lb-policy amphiqueue-share".into());
     }
     Ok(())
 }
@@ -395,8 +395,8 @@ pub fn validate_prequal_subset(
     if lb_policy.is_prequal() && lb_subset_size > 0 {
         return Err("--lb-subset-size is not supported with --lb-policy prequal".into());
     }
-    if lb_policy.is_approx_share() && lb_subset_size > 0 {
-        return Err("--lb-subset-size is not supported with --lb-policy approx-share".into());
+    if lb_policy.is_amphiqueue_share() && lb_subset_size > 0 {
+        return Err("--lb-subset-size is not supported with --lb-policy amphiqueue-share".into());
     }
     Ok(())
 }
@@ -457,13 +457,13 @@ mod tests {
     }
 
     #[test]
-    fn approx_policy_kind_is_approx() {
-        assert!(LoadBalancePolicyKind::Approx.is_approx());
-        assert!(!LoadBalancePolicyKind::ApproxShare.is_approx());
-        assert!(LoadBalancePolicyKind::Approx.uses_approx_protocol());
-        assert!(LoadBalancePolicyKind::ApproxShare.uses_approx_protocol());
-        assert!(LoadBalancePolicyKind::ApproxShare.is_approx_share());
-        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_approx());
+    fn amphiqueue_policy_kind_is_amphiqueue() {
+        assert!(LoadBalancePolicyKind::AmphiQueue.is_amphiqueue());
+        assert!(!LoadBalancePolicyKind::AmphiQueueShare.is_amphiqueue());
+        assert!(LoadBalancePolicyKind::AmphiQueue.uses_amphiqueue_protocol());
+        assert!(LoadBalancePolicyKind::AmphiQueueShare.uses_amphiqueue_protocol());
+        assert!(LoadBalancePolicyKind::AmphiQueueShare.is_amphiqueue_share());
+        assert!(!LoadBalancePolicyKind::PowerOfTwo.is_amphiqueue());
     }
 
     #[test]
@@ -574,26 +574,26 @@ mod tests {
     }
 
     #[test]
-    fn approx_ingress_is_power_of_two() {
+    fn amphiqueue_ingress_is_power_of_two() {
         crate::rng::enter_run(Some(42));
-        let mut approx = LoadBalancePolicyKind::Approx.ingress_policy();
+        let mut amphiqueue = LoadBalancePolicyKind::AmphiQueue.ingress_policy();
         let loads = [3u32, 0, 7, 2];
-        let approx_pick = approx.select(&loads);
+        let amphiqueue_pick = amphiqueue.select(&loads);
 
         crate::rng::enter_run(Some(42));
         let mut centralized = LoadBalancePolicyKind::Centralized.ingress_policy();
-        assert_eq!(centralized.select(&loads), approx_pick);
+        assert_eq!(centralized.select(&loads), amphiqueue_pick);
         crate::rng::exit_run();
     }
 
     #[test]
-    fn validate_pull_policy_required_for_approx() {
-        let err = validate_pull_policy(LoadBalancePolicyKind::Approx, None).unwrap_err();
+    fn validate_pull_policy_required_for_amphiqueue() {
+        let err = validate_pull_policy(LoadBalancePolicyKind::AmphiQueue, None).unwrap_err();
         assert!(err.contains("--pull-policy is required"));
     }
 
     #[test]
-    fn validate_pull_policy_rejected_without_approx() {
+    fn validate_pull_policy_rejected_without_amphiqueue() {
         let err = validate_pull_policy(
             LoadBalancePolicyKind::PowerOfTwo,
             Some(PullPolicyKind::LeastRequest),
@@ -646,15 +646,15 @@ mod tests {
     }
 
     #[test]
-    fn is_ms_only_for_cl_cl_lr_corr_and_approx_share() {
+    fn is_ms_only_for_cl_cl_lr_corr_and_amphiqueue_share() {
         assert!(LoadBalancePolicyKind::Cl.is_ms_only());
         assert!(LoadBalancePolicyKind::ClLr.is_ms_only());
         assert!(LoadBalancePolicyKind::ClR.is_ms_only());
         assert!(LoadBalancePolicyKind::ClRr.is_ms_only());
         assert!(LoadBalancePolicyKind::Corr.is_ms_only());
-        assert!(LoadBalancePolicyKind::ApproxShare.is_ms_only());
+        assert!(LoadBalancePolicyKind::AmphiQueueShare.is_ms_only());
         assert!(LoadBalancePolicyKind::Jbsq.is_ms_only());
-        assert!(!LoadBalancePolicyKind::Approx.is_ms_only());
+        assert!(!LoadBalancePolicyKind::AmphiQueue.is_ms_only());
         assert!(!LoadBalancePolicyKind::Centralized.is_ms_only());
         assert!(!LoadBalancePolicyKind::PowerOfTwo.is_ms_only());
     }
@@ -688,16 +688,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_approx_share_rules() {
-        assert!(validate_approx_share(LoadBalancePolicyKind::ApproxShare, 1).is_ok());
-        assert!(validate_approx_share(LoadBalancePolicyKind::ApproxShare, 3).is_ok());
-        let err = validate_approx_share(LoadBalancePolicyKind::ApproxShare, 0).unwrap_err();
+    fn validate_amphiqueue_share_rules() {
+        assert!(validate_amphiqueue_share(LoadBalancePolicyKind::AmphiQueueShare, 1).is_ok());
+        assert!(validate_amphiqueue_share(LoadBalancePolicyKind::AmphiQueueShare, 3).is_ok());
+        let err = validate_amphiqueue_share(LoadBalancePolicyKind::AmphiQueueShare, 0).unwrap_err();
         assert!(err.contains("must be >= 1"));
-        assert!(validate_approx_share(LoadBalancePolicyKind::Approx, 1).is_ok());
-        let err = validate_approx_share(LoadBalancePolicyKind::Approx, 2).unwrap_err();
-        assert!(err.contains("only valid with --lb-policy approx-share"));
-        assert!(validate_prequal_subset(LoadBalancePolicyKind::ApproxShare, 0).is_ok());
-        let err = validate_prequal_subset(LoadBalancePolicyKind::ApproxShare, 3).unwrap_err();
+        assert!(validate_amphiqueue_share(LoadBalancePolicyKind::AmphiQueue, 1).is_ok());
+        let err = validate_amphiqueue_share(LoadBalancePolicyKind::AmphiQueue, 2).unwrap_err();
+        assert!(err.contains("only valid with --lb-policy amphiqueue-share"));
+        assert!(validate_prequal_subset(LoadBalancePolicyKind::AmphiQueueShare, 0).is_ok());
+        let err = validate_prequal_subset(LoadBalancePolicyKind::AmphiQueueShare, 3).unwrap_err();
         assert!(err.contains("--lb-subset-size is not supported"));
     }
 
@@ -769,52 +769,52 @@ mod tests {
     }
 
     #[test]
-    fn validate_approx_sched_requires_approx_and_ms_for_edf() {
-        assert!(validate_approx_sched(
-            LoadBalancePolicyKind::Approx,
-            Some(ApproxSchedKind::Edf),
+    fn validate_amphiqueue_sched_requires_amphiqueue_and_ms_for_edf() {
+        assert!(validate_amphiqueue_sched(
+            LoadBalancePolicyKind::AmphiQueue,
+            Some(AmphiQueueSchedKind::Edf),
             true,
         )
         .is_ok());
-        assert!(validate_approx_sched(
-            LoadBalancePolicyKind::ApproxShare,
-            Some(ApproxSchedKind::EdfPlus),
+        assert!(validate_amphiqueue_sched(
+            LoadBalancePolicyKind::AmphiQueueShare,
+            Some(AmphiQueueSchedKind::EdfPlus),
             true,
         )
         .is_ok());
-        assert!(validate_approx_sched(
-            LoadBalancePolicyKind::Approx,
-            Some(ApproxSchedKind::Fcfs),
+        assert!(validate_amphiqueue_sched(
+            LoadBalancePolicyKind::AmphiQueue,
+            Some(AmphiQueueSchedKind::Fcfs),
             false,
         )
         .is_ok());
-        assert!(validate_approx_sched(LoadBalancePolicyKind::Approx, None, false).is_ok());
-        let err = validate_approx_sched(
+        assert!(validate_amphiqueue_sched(LoadBalancePolicyKind::AmphiQueue, None, false).is_ok());
+        let err = validate_amphiqueue_sched(
             LoadBalancePolicyKind::PowerOfTwo,
-            Some(ApproxSchedKind::Fcfs),
+            Some(AmphiQueueSchedKind::Fcfs),
             false,
         )
         .unwrap_err();
-        assert!(err.contains("approx"));
-        let err = validate_approx_sched(
-            LoadBalancePolicyKind::Approx,
-            Some(ApproxSchedKind::Edf),
-            false,
-        )
-        .unwrap_err();
-        assert!(err.contains("ms simulator"));
-        let err = validate_approx_sched(
-            LoadBalancePolicyKind::Approx,
-            Some(ApproxSchedKind::EdfPlus),
+        assert!(err.contains("amphiqueue"));
+        let err = validate_amphiqueue_sched(
+            LoadBalancePolicyKind::AmphiQueue,
+            Some(AmphiQueueSchedKind::Edf),
             false,
         )
         .unwrap_err();
         assert!(err.contains("ms simulator"));
-        assert!(ApproxSchedKind::Edf.outbound_uses_edf());
-        assert!(ApproxSchedKind::EdfPlus.outbound_uses_edf());
-        assert!(!ApproxSchedKind::Fcfs.outbound_uses_edf());
-        assert!(ApproxSchedKind::EdfPlus.intent_queue_uses_edf());
-        assert!(!ApproxSchedKind::Edf.intent_queue_uses_edf());
+        let err = validate_amphiqueue_sched(
+            LoadBalancePolicyKind::AmphiQueue,
+            Some(AmphiQueueSchedKind::EdfPlus),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("ms simulator"));
+        assert!(AmphiQueueSchedKind::Edf.outbound_uses_edf());
+        assert!(AmphiQueueSchedKind::EdfPlus.outbound_uses_edf());
+        assert!(!AmphiQueueSchedKind::Fcfs.outbound_uses_edf());
+        assert!(AmphiQueueSchedKind::EdfPlus.intent_queue_uses_edf());
+        assert!(!AmphiQueueSchedKind::Edf.intent_queue_uses_edf());
     }
 
     #[test]

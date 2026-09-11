@@ -27,7 +27,7 @@ fn centralized_args(
         lb_subset_policy: SubsetPolicyKind::Deterministic,
         clients,
         verbose: 0,
-        approx_sched: None,
+        amphiqueue_sched: None,
         pull_audit: None,
         centralized_audit: audit,
         express_lane: None,
