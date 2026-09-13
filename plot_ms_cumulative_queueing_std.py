@@ -67,18 +67,20 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
-    MsExperimentConfig("Ideal", "centralized"),
+    MsExperimentConfig("CPull", "centralized"),
     #MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
-    #MsExperimentConfig("CPush", "cl"),
+    #MsExperimentConfig("C-P2C", "cl"),
+    #MsExperimentConfig("C-RR", "cl-rr"),
+    #MsExperimentConfig("C-R", "cl-r"),
     MsExperimentConfig("P2C", "power-of-two"),
-    MsExperimentConfig("Prequal", "prequal"),
-    #MsExperimentConfig("P2C+TailClipper", "power-of-two", scheduling="edf"),
-    MsExperimentConfig("LR", "least-request"),
+    #MsExperimentConfig("Prequal", "prequal"),
+    #MsExperimentConfig("P2C", "power-of-two", scheduling="edf"),
+    #MsExperimentConfig("LR", "least-request"),
     MsExperimentConfig("RR", "round-robin"),
-    MsExperimentConfig("R", "random"),
-    #MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
+    #MsExperimentConfig("R", "random"),
+    MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
     #MsExperimentConfig("AmphiQueue-FCFS", "amphiqueue", pull_policy="least-request", amphiqueue_sched="fcfs"),
-    #MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
+    MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
 ]
 
 

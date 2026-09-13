@@ -63,11 +63,13 @@ Y_TICK_STEP = 0.5
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     MsExperimentConfig("CPull", "centralized"),
-    MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
-    MsExperimentConfig("C-P2C", "cl"),
-    MsExperimentConfig("Prequal", "prequal"),
+    #MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
+    #MsExperimentConfig("C-P2C", "cl"),
+    #MsExperimentConfig("C-RR", "cl-lr"),
+    #MsExperimentConfig("C-R", "cl-r"),
+    #MsExperimentConfig("Prequal", "prequal"),
     MsExperimentConfig("P2C", "power-of-two"),
-    MsExperimentConfig("LR", "least-request"),
+    #MsExperimentConfig("LR", "least-request"),
     MsExperimentConfig("RR", "round-robin"),
     MsExperimentConfig("R", "random"),
     MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
