@@ -42,9 +42,11 @@ from plot_cdfs import (
     run_ms_simulation,
 )
 from plot_ms_chain_load_compare import (
+    BASE_CPU,
     CHAIN_FIXTURES,
-    EQ_SCALE_HELP,
+    DEFAULT_RPS,
     MsExperimentConfig,
+    add_scale_eq_scale_args,
     eq_scale_filename_suffix,
     format_eq_scale_parts,
     ms_eq_scale_kwargs,
@@ -409,22 +411,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override load.json for the selected chain",
     )
-    parser.add_argument(
-        "--scale",
-        type=int,
-        default=None,
-        help=(
-            "Override scale for all configs "
-            "(add this many cpu cores and replicas to every microservice)"
-        ),
-    )
-    parser.add_argument(
-        "--eq-scale",
-        nargs="+",
-        default=None,
-        metavar="SPEC",
-        help=EQ_SCALE_HELP,
-    )
+    add_scale_eq_scale_args(parser)
     parser.add_argument(
         "--lb-subset-size",
         type=int,
@@ -456,15 +443,9 @@ def parse_args() -> argparse.Namespace:
         "--load",
         type=float,
         default=0.7,
-        help="Single load level (simulator rps = load × config rps; default: 0.7)",
-    )
-    parser.add_argument(
-        "--rps",
-        type=float,
-        default=None,
         help=(
-            "Override base rps for all configs "
-            "(simulator rps = load × rps)"
+            "Single load level (simulator rps = load × "
+            f"{DEFAULT_RPS:g} × ({BASE_CPU:g} + scale) / {BASE_CPU:g}; default: 0.7)"
         ),
     )
     parser.add_argument("--n", type=int, default=1_000_000)
@@ -500,7 +481,6 @@ def main() -> None:
         lb_subset_size=args.lb_subset_size,
         scale=args.scale,
         eq_scale_override=parse_eq_scale_specs(args.eq_scale),
-        rps=args.rps,
         service_dist=args.service_dist,
     )
     if not configs:

@@ -605,7 +605,7 @@ python optimize_express_lane.py --resume optimizer_logs/express_lane_20250702_15
 
 ## Plot microservice chain load compare
 
-`plot_ms_chain_load_compare.py` compares named MS experiment configs on **one** chain topology while sweeping load. Requires `--chain {3,6,10}`. X-axis is load; Y-axis is SLO violation rate (%); one line per config in `DEFAULT_CONFIGS`. SLO is calibrated once (processing p99 × 2) and shared across all configs. Optional `--scale N` adds N cpu cores and N replicas to every microservice (ms `--scale`, grows capacity). Optional `--eq-scale N` / `--eq-scale NAME=N` adds cpu+replicas and stretches `avg_rt` so that tier's processing capacity stays equivalent (ms `--eq-scale`). Output defaults to `output/ms_chain{N}_load_compare_slo.pdf`.
+`plot_ms_chain_load_compare.py` compares named MS experiment configs on **one** chain topology while sweeping load. Requires `--chain {3,6,10}`. X-axis is load; Y-axis is SLO violation rate (%); one line per config in `DEFAULT_CONFIGS`. SLO is calibrated once (processing p99 × 2) and shared across all configs. Optional `--scale N` adds N cpu cores and N replicas to every microservice (ms `--scale`, grows capacity) and scales offered RPS by `(BASE_CPU + N) / BASE_CPU` so load stays constant. Optional `--eq-scale N` / `--eq-scale NAME=N` adds cpu+replicas and stretches `avg_rt` so that tier's processing capacity stays equivalent (ms `--eq-scale`). `--scale` and `--eq-scale` are mutually exclusive. Output defaults to `output/ms_chain{N}_load_compare_slo.pdf`.
 
 ```bash
 .venv/bin/python plot_ms_chain_load_compare.py --chain 3 --n 100000

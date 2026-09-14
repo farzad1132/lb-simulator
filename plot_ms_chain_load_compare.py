@@ -66,6 +66,8 @@ CHAIN_FIXTURES = {
     ),
 }
 DEFAULT_RPS = 10_000.0
+# Chain fixtures have cpu=10 and avg_rt=1ms; DEFAULT_RPS = cpu / E[S].
+BASE_CPU = 10
 CALIBRATION_N = 300_000
 SLO_UNLOADED_LATENCY_MULTIPLIER = 2.0
 
@@ -84,7 +86,6 @@ class MsExperimentConfig:
     scale: int | None = None
     eq_scale: int | None = None  # all-tier equivalent-scale delta
     tier_eq_scale: tuple[tuple[str, int], ...] = ()  # named deltas after eq_scale
-    rps: float | None = None  # base rate; simulator rps = load * rps
     service_dist: str | None = None  # None = CLI override or "exp"
     slo_ms: float | None = None  # None = calibrate from unloaded p99 × multiplier
 
@@ -139,7 +140,8 @@ DEFAULT_CONFIGS: list[MsExperimentConfig] = [
 
 
 def resolve_config_rps(config: MsExperimentConfig) -> float:
-    return DEFAULT_RPS if config.rps is None else config.rps
+    delta = config.scale or 0
+    return DEFAULT_RPS * (BASE_CPU + delta) / BASE_CPU
 
 
 def resolve_config_service_dist(
@@ -221,8 +223,37 @@ def eq_scale_filename_suffix(
 EQ_SCALE_HELP = (
     "Override equivalent-scale for all configs: N adds N cpu and N replicas "
     "to every microservice and stretches avg_rt by (cpu+N)/cpu; NAME=N does "
-    "the same for one tier. Repeatable; named deltas add on top of N"
+    "the same for one tier. Repeatable; named deltas add on top of N. "
+    "Cannot be combined with --scale"
 )
+SCALE_HELP = (
+    "Override scale for all configs (add this many cpu cores and replicas "
+    "to every microservice). Offered RPS is scaled by "
+    f"(BASE_CPU + N) / BASE_CPU so load stays constant. "
+    "Cannot be combined with --eq-scale"
+)
+
+
+def config_has_scale(config: MsExperimentConfig) -> bool:
+    return config.scale is not None and config.scale != 0
+
+
+def config_has_eq_scale(config: MsExperimentConfig) -> bool:
+    if config.eq_scale is not None and config.eq_scale != 0:
+        return True
+    return any(delta != 0 for _, delta in config.tier_eq_scale)
+
+
+def add_scale_eq_scale_args(parser: argparse.ArgumentParser) -> None:
+    scale_group = parser.add_mutually_exclusive_group()
+    scale_group.add_argument("--scale", type=int, default=None, help=SCALE_HELP)
+    scale_group.add_argument(
+        "--eq-scale",
+        nargs="+",
+        default=None,
+        metavar="SPEC",
+        help=EQ_SCALE_HELP,
+    )
 
 
 def validate_ms_config(config: MsExperimentConfig) -> None:
@@ -286,8 +317,10 @@ def validate_ms_config(config: MsExperimentConfig) -> None:
                 f"config {label!r}: duplicate tier_eq_scale microservice {name}"
             )
         seen_tiers.add(name)
-    if config.rps is not None and config.rps <= 0:
-        raise SystemExit(f"config {label!r}: rps must be > 0 (got {config.rps})")
+    if config_has_scale(config) and config_has_eq_scale(config):
+        raise SystemExit(
+            f"config {label!r}: scale and eq-scale cannot be used together"
+        )
     if config.service_dist is not None and config.service_dist not in MS_SERVICE_DISTS:
         raise SystemExit(
             f"config {label!r}: service_dist must be one of "
@@ -305,7 +338,6 @@ def select_configs(
     lb_subset_size: int | None = None,
     scale: int | None = None,
     eq_scale_override: tuple[int | None, tuple[tuple[str, int], ...]] | None = None,
-    rps: float | None = None,
     service_dist: str | None = None,
     slo_ms: float | None = None,
 ) -> list[MsExperimentConfig]:
@@ -335,10 +367,6 @@ def select_configs(
             replace(config, eq_scale=eq_scale, tier_eq_scale=tier_eq_scale)
             for config in selected
         ]
-    if rps is not None:
-        if rps <= 0:
-            raise SystemExit(f"--rps must be > 0 (got {rps})")
-        selected = [replace(config, rps=rps) for config in selected]
     if service_dist is not None:
         if service_dist not in MS_SERVICE_DISTS:
             raise SystemExit(
@@ -651,22 +679,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override load.json for the selected chain",
     )
-    parser.add_argument(
-        "--scale",
-        type=int,
-        default=None,
-        help=(
-            "Override scale for all configs "
-            "(add this many cpu cores and replicas to every microservice)"
-        ),
-    )
-    parser.add_argument(
-        "--eq-scale",
-        nargs="+",
-        default=None,
-        metavar="SPEC",
-        help=EQ_SCALE_HELP,
-    )
+    add_scale_eq_scale_args(parser)
     parser.add_argument(
         "--lb-subset-size",
         type=int,
@@ -698,15 +711,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--load-min", type=float, default=0.1)
     parser.add_argument("--load-max", type=float, default=0.9)
     parser.add_argument("--load-step", type=float, default=0.1)
-    parser.add_argument(
-        "--rps",
-        type=float,
-        default=None,
-        help=(
-            f"Override base rps for all configs "
-            f"(simulator rps = load × rps; default per config or {DEFAULT_RPS:g})"
-        ),
-    )
     parser.add_argument("--n", type=int, default=100_000)
     parser.add_argument(
         "--config-index",
@@ -756,7 +760,6 @@ def main() -> None:
         lb_subset_size=args.lb_subset_size,
         scale=args.scale,
         eq_scale_override=parse_eq_scale_specs(args.eq_scale),
-        rps=args.rps,
         service_dist=args.service_dist,
         slo_ms=args.slo_ms,
     )
