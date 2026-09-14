@@ -2,13 +2,13 @@ use clap::{Parser, ValueEnum};
 use lb::lb_simulate::{
     HopStats as LbHopStats, LbArrivalDistribution, LbRunArgs, LbServiceDistribution, LbServiceStats,
 };
-use std::collections::HashMap;
 use lb::policy::{
-    validate_amphiqueue_sched, validate_centralized_subset, validate_prequal_subset,
-    validate_pull_policy, AmphiQueueSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    AmphiQueueSchedKind, LoadBalancePolicyKind, PullPolicyKind, validate_amphiqueue_sched,
+    validate_centralized_subset, validate_prequal_subset, validate_pull_policy,
 };
 use lb::subset::SubsetPolicyKind;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -137,9 +137,7 @@ struct RunOutput {
 fn validate_slo(slo: Option<f64>) -> Result<Option<f64>, String> {
     match slo {
         None => Ok(None),
-        Some(s) if s <= 0.0 || !s.is_finite() => {
-            Err("--slo must be positive and finite".into())
-        }
+        Some(s) if s <= 0.0 || !s.is_finite() => Err("--slo must be positive and finite".into()),
         Some(s) => Ok(Some(s)),
     }
 }
@@ -175,12 +173,18 @@ fn print_section_header(label: &str, count: usize) {
 }
 
 fn print_human_stats(stats: &ServiceStats, rates: &Rates, slo: Option<f64>) {
-    println!("total service rate: {:.4} tasks/s", rates.total_service_rate);
+    println!(
+        "total service rate: {:.4} tasks/s",
+        rates.total_service_rate
+    );
     println!(
         "per-server service rate: {:.4} tasks/s",
         rates.per_server_service_rate
     );
-    println!("total arrival rate: {:.4} tasks/s", rates.total_arrival_rate);
+    println!(
+        "total arrival rate: {:.4} tasks/s",
+        rates.total_arrival_rate
+    );
     println!(
         "per-client arrival rate: {:.4} tasks/s",
         rates.per_client_arrival_rate
@@ -206,12 +210,7 @@ fn print_human_stats(stats: &ServiceStats, rates: &Rates, slo: Option<f64>) {
     print_percentile_table("processing time (s):", &mut stats.processing_times.clone());
     print_percentile_table("queueing delay (s):", &mut stats.queueing_delays.clone());
 
-    if let (
-        Some(regular_e2e),
-        Some(regular_q),
-        Some(express_e2e),
-        Some(express_q),
-    ) = (
+    if let (Some(regular_e2e), Some(regular_q), Some(express_e2e), Some(express_q)) = (
         stats.regular_e2e.as_ref(),
         stats.regular_queueing_delays.as_ref(),
         stats.express_e2e.as_ref(),
@@ -320,9 +319,8 @@ fn validate_express_del_th(value: f64) -> Result<Duration, String> {
 }
 
 fn validate_expresslane(args: &Args) -> Result<Option<ExpressLaneConfig>, String> {
-    let has_express_flags = args.express_size.is_some()
-        || args.express_th.is_some()
-        || args.express_del_th.is_some();
+    let has_express_flags =
+        args.express_size.is_some() || args.express_th.is_some() || args.express_del_th.is_some();
 
     if args.lb_policy.is_centralized() || args.lb_policy.is_amphiqueue() {
         let policy = if args.lb_policy.is_centralized() {
@@ -428,8 +426,7 @@ fn validate_work_shedding(args: &Args) -> Result<Option<Duration>, String> {
         return Err("--shed-delay cannot be combined with --expresslane".into());
     }
 
-    validate_shed_delay(args.shed_delay.expect("checked above"))
-        .map(Some)
+    validate_shed_delay(args.shed_delay.expect("checked above")).map(Some)
 }
 
 fn hop_stats_from_lb(stats: LbHopStats) -> HopStats {
@@ -536,10 +533,7 @@ fn run_simulation(
 
 fn run_output(stats: Option<ServiceStats>, rates: &Rates, slo: Option<f64>) -> RunOutput {
     let (slo_latency, top_prob_latency_gt_slo) = match (stats.as_ref(), slo) {
-        (Some(stats), Some(slo)) => (
-            Some(slo),
-            Some(prob_latency_gt_slo(&stats.e2e, slo)),
-        ),
+        (Some(stats), Some(slo)) => (Some(slo), Some(prob_latency_gt_slo(&stats.e2e, slo))),
         _ => (None, None),
     };
     match stats {
@@ -623,13 +617,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             LoadBalancePolicyKind::Jbsq => "jbsq",
             _ => unreachable!(),
         };
-        return Err(format!(
-            "--lb-policy {name} is not supported by the lb simulator"
-        )
-        .into());
+        return Err(format!("--lb-policy {name} is not supported by the lb simulator").into());
     }
-    validate_pull_policy(args.lb_policy, args.pull_policy).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
-    validate_amphiqueue_sched(args.lb_policy, args.amphiqueue_sched, false).map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    validate_pull_policy(args.lb_policy, args.pull_policy)
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    validate_amphiqueue_sched(args.lb_policy, args.amphiqueue_sched, false)
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     validate_prequal_subset(args.lb_policy, args.lb_subset_size)
         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     validate_centralized_subset(
@@ -848,28 +841,25 @@ mod tests {
             "fcfs",
         ])
         .unwrap();
-        let err = validate_amphiqueue_sched(args.lb_policy, args.amphiqueue_sched, false).unwrap_err();
+        let err =
+            validate_amphiqueue_sched(args.lb_policy, args.amphiqueue_sched, false).unwrap_err();
         assert!(err.contains("--amphiqueue-sched is only valid with --lb-policy amphiqueue"));
     }
 
     #[test]
     fn validate_expresslane_rejects_orphan_flags() {
-        let err = validate_expresslane(
-            &Args::try_parse_from(["lb", "--express-size", "2"]).unwrap(),
-        )
-        .unwrap_err();
+        let err =
+            validate_expresslane(&Args::try_parse_from(["lb", "--express-size", "2"]).unwrap())
+                .unwrap_err();
         assert!(err.contains("--expresslane"));
 
-        let err = validate_expresslane(
-            &Args::try_parse_from(["lb", "--express-th", "5"]).unwrap(),
-        )
-        .unwrap_err();
+        let err = validate_expresslane(&Args::try_parse_from(["lb", "--express-th", "5"]).unwrap())
+            .unwrap_err();
         assert!(err.contains("--expresslane"));
 
-        let err = validate_expresslane(
-            &Args::try_parse_from(["lb", "--express-del-th", "0.5"]).unwrap(),
-        )
-        .unwrap_err();
+        let err =
+            validate_expresslane(&Args::try_parse_from(["lb", "--express-del-th", "0.5"]).unwrap())
+                .unwrap_err();
         assert!(err.contains("--expresslane"));
     }
 
@@ -924,8 +914,7 @@ mod tests {
                 assert_eq!(depth_threshold, 5);
                 assert_eq!(delay_threshold, Duration::from_secs_f64(0.5));
             }
-            ExpressEvictionConfig::QueueDepth(_)
-            | ExpressEvictionConfig::QueueDelay { .. } => {
+            ExpressEvictionConfig::QueueDepth(_) | ExpressEvictionConfig::QueueDelay { .. } => {
                 panic!("expected combined eviction")
             }
         }
@@ -1116,34 +1105,26 @@ mod tests {
 
     #[test]
     fn validate_work_shedding_accepts_positive_threshold() {
-        let threshold = validate_work_shedding(
-            &Args::try_parse_from(["lb", "--shed-delay", "0.5"]).unwrap(),
-        )
-        .unwrap()
-        .expect("expected work shedding config");
+        let threshold =
+            validate_work_shedding(&Args::try_parse_from(["lb", "--shed-delay", "0.5"]).unwrap())
+                .unwrap()
+                .expect("expected work shedding config");
         assert_eq!(threshold, Duration::from_secs_f64(0.5));
     }
 
     #[test]
     fn validate_work_shedding_rejects_non_positive_threshold() {
-        let err = validate_work_shedding(
-            &Args::try_parse_from(["lb", "--shed-delay", "0"]).unwrap(),
-        )
-        .unwrap_err();
+        let err =
+            validate_work_shedding(&Args::try_parse_from(["lb", "--shed-delay", "0"]).unwrap())
+                .unwrap_err();
         assert!(err.contains("--shed-delay must be positive"));
     }
 
     #[test]
     fn validate_work_shedding_rejects_centralized() {
         let err = validate_work_shedding(
-            &Args::try_parse_from([
-                "lb",
-                "--shed-delay",
-                "0.5",
-                "--lb-policy",
-                "centralized",
-            ])
-            .unwrap(),
+            &Args::try_parse_from(["lb", "--shed-delay", "0.5", "--lb-policy", "centralized"])
+                .unwrap(),
         )
         .unwrap_err();
         assert!(err.contains("not supported with --lb-policy centralized"));

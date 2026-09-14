@@ -1,4 +1,4 @@
-use crate::amphiqueue::{fatal_pull_abort, PullIntent, PullRequest};
+use crate::amphiqueue::{PullIntent, PullRequest, fatal_pull_abort};
 use crate::lb_centralized_audit::LbCentralizedAudit;
 use crate::lb_pull_audit::LbPullAudit;
 use crate::occupancy::OccupancyAccumulator;
@@ -7,8 +7,8 @@ use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
 use crate::prequal::{
-    apply_r_probe, apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe,
-    ProbeReply, B_REUSE, R_PROBE, R_REMOVE,
+    B_REUSE, CandidatePool, Probe, ProbeReply, R_PROBE, R_REMOVE, apply_r_probe, apply_r_remove,
+    pool_cap, sample_probe_targets,
 };
 use crate::rng;
 use crate::server::Task;
@@ -323,8 +323,7 @@ impl LoadBalancer {
                     queue_head_task_id,
                 );
             }
-            self.pull_intent_load[server_idx] =
-                self.pull_intent_load[server_idx].saturating_sub(1);
+            self.pull_intent_load[server_idx] = self.pull_intent_load[server_idx].saturating_sub(1);
             self.dispatch_to_server(server_idx, task, cx).await;
             return;
         }

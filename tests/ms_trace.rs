@@ -10,8 +10,12 @@ fn run_ms_trace(args: &[&str]) -> (String, String, i32) {
         .stderr(Stdio::piped())
         .output()
         .expect("failed to run ms");
-    let stdout = str::from_utf8(&output.stdout).expect("stdout utf8").to_string();
-    let stderr = str::from_utf8(&output.stderr).expect("stderr utf8").to_string();
+    let stdout = str::from_utf8(&output.stdout)
+        .expect("stdout utf8")
+        .to_string();
+    let stderr = str::from_utf8(&output.stderr)
+        .expect("stderr utf8")
+        .to_string();
     let code = output.status.code().unwrap_or(-1);
     (stdout, stderr, code)
 }

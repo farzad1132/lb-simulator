@@ -43,7 +43,12 @@ from plot_cdfs import (
 )
 from plot_ms_chain_load_compare import (
     CHAIN_FIXTURES,
+    EQ_SCALE_HELP,
     MsExperimentConfig,
+    eq_scale_filename_suffix,
+    format_eq_scale_parts,
+    ms_eq_scale_kwargs,
+    parse_eq_scale_specs,
     resolve_config_rps,
     resolve_config_service_dist,
     select_configs,
@@ -163,6 +168,7 @@ def format_run_summary(
         parts.append(f"centralized_sched={config.centralized_sched}")
     if config.scale is not None:
         parts.append(f"scale={config.scale}")
+    parts.extend(format_eq_scale_parts(config))
     if config.service_dist is not None:
         parts.append(f"service_dist={config.service_dist}")
     parts.append(f"rps={rps:g}")
@@ -212,6 +218,7 @@ def run_cum_queueing_var_compare(
             ),
             jbsq_n=config.jbsq_n,
             scale=config.scale,
+            **ms_eq_scale_kwargs(config),
         )
         order = microservice_order(data)
         if microservices is None:
@@ -356,11 +363,14 @@ def default_output_path(
     chain: int,
     *,
     scale: int | None = None,
+    eq_scale: int | None = None,
+    tier_eq_scale: tuple[tuple[str, int], ...] = (),
     lb_subset_size: int | None = None,
 ) -> Path:
     name = f"ms_chain{chain}_cumulative_queueing_var"
     if scale is not None and scale != 0:
         name += f"_scale{scale}"
+    name += eq_scale_filename_suffix(eq_scale, tier_eq_scale)
     if lb_subset_size is not None:
         name += f"_k{lb_subset_size}"
     return DEFAULT_OUTPUT_DIR / f"{name}.pdf"
@@ -407,6 +417,13 @@ def parse_args() -> argparse.Namespace:
             "Override scale for all configs "
             "(add this many cpu cores and replicas to every microservice)"
         ),
+    )
+    parser.add_argument(
+        "--eq-scale",
+        nargs="+",
+        default=None,
+        metavar="SPEC",
+        help=EQ_SCALE_HELP,
     )
     parser.add_argument(
         "--lb-subset-size",
@@ -482,6 +499,7 @@ def main() -> None:
         args.config_index,
         lb_subset_size=args.lb_subset_size,
         scale=args.scale,
+        eq_scale_override=parse_eq_scale_specs(args.eq_scale),
         rps=args.rps,
         service_dist=args.service_dist,
     )
@@ -504,6 +522,8 @@ def main() -> None:
     output_path = args.output or default_output_path(
         args.chain,
         scale=args.scale,
+        eq_scale=configs[0].eq_scale if configs else None,
+        tier_eq_scale=configs[0].tier_eq_scale if configs else (),
         lb_subset_size=args.lb_subset_size,
     )
     output_path = output_path_with_comment(output_path, args.comment)

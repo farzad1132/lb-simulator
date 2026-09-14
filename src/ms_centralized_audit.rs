@@ -46,7 +46,10 @@ impl MsCentralizedAudit {
 
     fn record(&self, kind: CentralizedEventKind) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.events.lock().unwrap().push(RecordedEvent { seq, kind });
+        self.events
+            .lock()
+            .unwrap()
+            .push(RecordedEvent { seq, kind });
     }
 
     pub fn record_call_enqueued(
@@ -347,17 +350,14 @@ impl MsCentralizedAudit {
                 } => {
                     let queue = queues.entry(lb_id).or_default();
                     if edf {
-                        let insert_at =
-                            edf_insert_index(queue.iter().map(|(_, d)| *d), deadline);
+                        let insert_at = edf_insert_index(queue.iter().map(|(_, d)| *d), deadline);
                         queue.insert(insert_at, (request_id, deadline));
                     } else {
                         queue.push_back((request_id, deadline));
                     }
                 }
                 CentralizedEventKind::CallDispatched {
-                    lb_id,
-                    request_id,
-                    ..
+                    lb_id, request_id, ..
                 } => {
                     saw_dispatch = true;
                     let queue = queues.get_mut(&lb_id).ok_or_else(|| {
@@ -384,7 +384,9 @@ impl MsCentralizedAudit {
         }
 
         if !saw_dispatch {
-            return Err(format!("target {target}: no centralized dispatches recorded"));
+            return Err(format!(
+                "target {target}: no centralized dispatches recorded"
+            ));
         }
         for (lb_id, queue) in &queues {
             if !queue.is_empty() {
@@ -443,9 +445,7 @@ mod tests {
         audit.record_call_enqueued("backend1", 0, 0, 2, t(100), 1);
         audit.record_call_dispatched("backend1", 0, 0, 2, t(100));
         audit.record_call_dispatched("backend1", 0, 0, 1, t(200));
-        audit
-            .validate_centralized_edf("backend1")
-            .expect("edf ok");
+        audit.validate_centralized_edf("backend1").expect("edf ok");
     }
 
     #[test]

@@ -77,7 +77,11 @@ struct PendingShed {
     event_key: EventKey,
 }
 
-fn remaining_service_time(started_at: MonotonicTime, duration: Duration, now: MonotonicTime) -> Duration {
+fn remaining_service_time(
+    started_at: MonotonicTime,
+    duration: Duration,
+    now: MonotonicTime,
+) -> Duration {
     let elapsed = now.duration_since(started_at);
     duration.saturating_sub(elapsed)
 }
@@ -103,7 +107,10 @@ fn ideal_queue_delay_estimate(
     in_flight: &[InFlightService],
     now: MonotonicTime,
 ) -> Duration {
-    let queue_work: Duration = queue.iter().map(|t| t.duration).fold(Duration::ZERO, |a, b| a + b);
+    let queue_work: Duration = queue
+        .iter()
+        .map(|t| t.duration)
+        .fold(Duration::ZERO, |a, b| a + b);
     let min_remaining = in_flight
         .iter()
         .map(|svc| remaining_service_time(svc.started_at, svc.duration, now))
@@ -289,11 +296,8 @@ impl Server {
                     delay_threshold,
                 ) {
                     self.evict_newest(cx).await;
-                } else if ideal_queue_delay_estimate(
-                    &self.queue,
-                    &self.in_flight_services,
-                    now,
-                ) > delay_threshold
+                } else if ideal_queue_delay_estimate(&self.queue, &self.in_flight_services, now)
+                    > delay_threshold
                 {
                     self.schedule_monitored_eviction(task_start, delay_threshold, cx);
                 }
@@ -337,15 +341,18 @@ impl Server {
         self.forward_shed(shed, cx).await;
     }
 
-    async fn apply_work_shedding_on_enqueue(&mut self, task_start: MonotonicTime, cx: &Context<Self>) {
+    async fn apply_work_shedding_on_enqueue(
+        &mut self,
+        task_start: MonotonicTime,
+        cx: &Context<Self>,
+    ) {
         let Some(threshold) = self.work_shedding else {
             return;
         };
         let now = cx.time();
         if head_of_line_exceeds_threshold(&self.in_flight_services, now, threshold) {
             self.shed_newest(cx).await;
-        } else if ideal_queue_delay_estimate(&self.queue, &self.in_flight_services, now)
-            > threshold
+        } else if ideal_queue_delay_estimate(&self.queue, &self.in_flight_services, now) > threshold
         {
             self.schedule_monitored_shed(task_start, threshold, cx);
         }
@@ -380,9 +387,7 @@ impl Server {
         task.shed_at = Some(cx.time());
         self.record_occupancy(cx.time());
         let lb_id = task.lb_id;
-        self.release_outputs[lb_id]
-            .send(self.server_idx)
-            .await;
+        self.release_outputs[lb_id].send(self.server_idx).await;
         self.shed_outputs[lb_id].send(task).await;
     }
 
@@ -455,12 +460,7 @@ impl Server {
         let Some(output) = self.probe_reply_outputs.get_mut(probe.sender_id) else {
             return;
         };
-        output
-            .send(ProbeReply {
-                server_idx,
-                rif,
-            })
-            .await;
+        output.send(ProbeReply { server_idx, rif }).await;
     }
 
     pub async fn receive_pull_intent(&mut self, intent: PullIntent, _cx: &Context<Self>) {
@@ -481,7 +481,8 @@ impl Server {
     }
 
     pub async fn request_pull(&mut self, _: (), _cx: &Context<Self>) {
-        if self.dispatch_mode == DispatchMode::Centralized && self.in_flight < self.max_concurrency {
+        if self.dispatch_mode == DispatchMode::Centralized && self.in_flight < self.max_concurrency
+        {
             self.pull_output
                 .send(PullRequest {
                     server_idx: self.server_idx,
@@ -527,7 +528,8 @@ impl Server {
 
     #[nexosim(schedulable)]
     async fn evict_task(&mut self, task_start: MonotonicTime, cx: &Context<Self>) {
-        self.pending_evictions.retain(|(start, _)| *start != task_start);
+        self.pending_evictions
+            .retain(|(start, _)| *start != task_start);
         if let Some(task) = remove_task_from_queue(&mut self.queue, task_start) {
             self.forward_evicted(task, cx).await;
         }
@@ -564,13 +566,9 @@ impl Server {
             self.release_outputs[express_lb_id]
                 .send(self.server_idx)
                 .await;
-            self.release_outputs[lb_id]
-                .send(origin_server_idx)
-                .await;
+            self.release_outputs[lb_id].send(origin_server_idx).await;
         } else {
-            self.release_outputs[lb_id]
-                .send(self.server_idx)
-                .await;
+            self.release_outputs[lb_id].send(self.server_idx).await;
         }
         self.in_flight -= 1;
         self.record_occupancy(cx.time());
@@ -646,14 +644,8 @@ mod tests {
 
     #[test]
     fn ideal_queue_delay_estimate_sums_queue_and_min_remaining() {
-        let queue = vec![
-            task_with_duration(0.0, 1.0),
-            task_with_duration(0.0, 2.0),
-        ];
-        let in_flight = vec![
-            in_flight(0.0, 4.0),
-            in_flight(0.0, 1.5),
-        ];
+        let queue = vec![task_with_duration(0.0, 1.0), task_with_duration(0.0, 2.0)];
+        let in_flight = vec![in_flight(0.0, 4.0), in_flight(0.0, 1.5)];
         let now = MonotonicTime::EPOCH + Duration::from_secs_f64(1.0);
         let delay = ideal_queue_delay_estimate(&queue, &in_flight, now);
         assert_eq!(delay, Duration::from_secs_f64(3.5));

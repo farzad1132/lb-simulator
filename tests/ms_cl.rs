@@ -37,7 +37,9 @@ fn ms_cl_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 
@@ -49,7 +51,9 @@ fn ms_cl_completes_on_fanin_topology() {
     let output = Command::new(&ms_binary)
         .args([
             "--callgraph",
-            root.join("tests/fanin/multi/callgraph.json").to_str().unwrap(),
+            root.join("tests/fanin/multi/callgraph.json")
+                .to_str()
+                .unwrap(),
             "--load-file",
             root.join("tests/fanin/multi/load.json").to_str().unwrap(),
             "--format",
@@ -113,7 +117,9 @@ fn ms_cl_lr_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 
@@ -148,7 +154,9 @@ fn ms_cl_r_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 
@@ -183,7 +191,9 @@ fn ms_cl_rr_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 

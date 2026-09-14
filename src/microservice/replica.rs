@@ -6,11 +6,11 @@ use super::hop::{
 };
 use super::microservice_stats::MicroserviceVisitTracker;
 use super::sidecar::SidecarCapacityEvent;
-use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
 use crate::amphiqueue::PullIntent;
 use crate::amphiqueue_audit::AmphiQueuePullAudit;
 use crate::ms_jbsq_audit::MsJbsqAudit;
+use crate::occupancy::OccupancyAccumulator;
 use crate::policy::AmphiQueueSchedKind;
 use crate::prequal::Probe;
 use crate::scheduling::{SchedulingPolicyKind, edf_insert_index};
@@ -479,9 +479,10 @@ impl Replica {
                 });
             }
             let key = (microservice, server);
-            let output = self.return_outputs.get_mut(&key).ok_or_else(|| {
-                format!("no return output for {:?} server {}", key.0, key.1)
-            })?;
+            let output = self
+                .return_outputs
+                .get_mut(&key)
+                .ok_or_else(|| format!("no return output for {:?} server {}", key.0, key.1))?;
             output.send(ReplicaInput::DownstreamReturn(hop)).await;
             return Ok(());
         }
@@ -573,10 +574,7 @@ impl Replica {
                         cx,
                         &format!(
                             "Server({}/{}) amphiqueue upstream endpoint={} inflight={}",
-                            self.microservice_id,
-                            self.server_idx,
-                            hop.endpoint,
-                            self.in_flight
+                            self.microservice_id, self.server_idx, hop.endpoint, self.in_flight
                         ),
                     );
                     if self.uses_local_amphiqueue_pulls() {

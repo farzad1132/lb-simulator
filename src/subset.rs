@@ -82,7 +82,10 @@ mod tests {
             let subset = assign_subset(SubsetPolicyKind::Deterministic, n, client_id, k as u32);
             assert_eq!(subset.len(), k);
             for idx in subset {
-                assert!(seen.insert(idx), "duplicate backend {idx} for client {client_id}");
+                assert!(
+                    seen.insert(idx),
+                    "duplicate backend {idx} for client {client_id}"
+                );
             }
         }
         assert_eq!(seen.len(), subset_count * k);
@@ -115,7 +118,12 @@ mod tests {
     fn deterministic_reference_fixture() {
         let mut expected = Vec::new();
         for client_id in 0..10 {
-            expected.push(assign_subset(SubsetPolicyKind::Deterministic, 20, client_id, 3));
+            expected.push(assign_subset(
+                SubsetPolicyKind::Deterministic,
+                20,
+                client_id,
+                3,
+            ));
         }
         for (client_id, want) in expected.iter().enumerate() {
             let got = assign_subset(SubsetPolicyKind::Deterministic, 20, client_id, 3);
@@ -161,6 +169,12 @@ mod tests {
         crate::rng::exit_run();
         assert_eq!(subset.len(), 3);
         assert!(subset.iter().all(|&i| i < 20));
-        assert_eq!(subset.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        assert_eq!(
+            subset
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
     }
 }

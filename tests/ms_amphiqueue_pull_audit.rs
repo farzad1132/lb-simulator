@@ -2,9 +2,14 @@ use lb::microservice::{AmphiQueuePullAudit, MsArgs, MsServiceDistribution, Outpu
 use lb::policy::{CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-fn chain3_amphiqueue_args(n: u32, seed: u64, audit: Option<std::sync::Arc<AmphiQueuePullAudit>>) -> MsArgs {
+fn chain3_amphiqueue_args(
+    n: u32,
+    seed: u64,
+    audit: Option<std::sync::Arc<AmphiQueuePullAudit>>,
+) -> MsArgs {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     MsArgs {
         callgraph: root.join("tests/chain/3/callgraph.json"),
@@ -31,6 +36,8 @@ fn chain3_amphiqueue_args(n: u32, seed: u64, audit: Option<std::sync::Arc<AmphiQ
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     }
 }
 
@@ -99,10 +106,14 @@ fn ms_amphiqueue_pull_invariants_with_power_of_two_pull_policy() {
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     })
     .unwrap()
     .expect("simulation should complete");
 
     assert_eq!(stats.by_api["handle"].e2e_ms.len(), 800);
-    audit.validate_bound().expect("audit should pass with P2C pull");
+    audit
+        .validate_bound()
+        .expect("audit should pass with P2C pull");
 }

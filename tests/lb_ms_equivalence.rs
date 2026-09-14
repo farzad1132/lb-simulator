@@ -18,7 +18,11 @@ fn python_executable(root: &Path) -> PathBuf {
 fn lb_ms_equivalence() {
     let root = repo_root();
     let script = root.join("compare_lb_ms.py");
-    assert!(script.is_file(), "compare_lb_ms.py not found at {}", script.display());
+    assert!(
+        script.is_file(),
+        "compare_lb_ms.py not found at {}",
+        script.display()
+    );
 
     let lb_binary = env::var("CARGO_BIN_EXE_lb").expect("CARGO_BIN_EXE_lb must be set");
     let ms_binary = env::var("CARGO_BIN_EXE_ms").expect("CARGO_BIN_EXE_ms must be set");

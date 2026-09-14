@@ -1,7 +1,10 @@
 use lb::microservice::{AmphiQueuePullAudit, MsArgs, MsServiceDistribution, OutputFormat, run};
-use lb::policy::{AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{
+    AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn amphiqueue_args(
@@ -37,13 +40,13 @@ fn amphiqueue_args(
         amphiqueue_sched: Some(amphiqueue_sched),
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     }
 }
 
 fn run_with_audit(args: &MsArgs) -> lb::microservice::MsStats {
-    run(args)
-        .unwrap()
-        .expect("simulation should complete")
+    run(args).unwrap().expect("simulation should complete")
 }
 
 #[test]
@@ -61,7 +64,9 @@ fn ms_no_bind_edf_trace_invariants() {
     let stats = run_with_audit(&args);
     assert_eq!(stats.by_api["handle"].e2e_ms.len(), 500);
     audit.validate_common().expect("common invariants");
-    audit.validate_no_bind_edf().expect("no-bind edf invariants");
+    audit
+        .validate_no_bind_edf()
+        .expect("no-bind edf invariants");
 }
 
 #[test]
@@ -79,7 +84,9 @@ fn ms_no_bind_edf_pulls_earliest_deadline_not_intent_id() {
     let stats = run_with_audit(&args);
     assert_eq!(stats.by_api["handle"].e2e_ms.len(), 500);
     audit.validate_common().expect("common invariants");
-    audit.validate_no_bind_edf().expect("no-bind edf invariants");
+    audit
+        .validate_no_bind_edf()
+        .expect("no-bind edf invariants");
 
     let mismatches: Vec<_> = audit
         .pull_fulfilled_events()
@@ -115,7 +122,9 @@ fn ms_no_bind_edf_multi_caller_independent() {
     let stats = run_with_audit(&args);
     assert_eq!(stats.by_api["f1"].e2e_ms.len(), 400);
     audit.validate_common().expect("common invariants");
-    audit.validate_no_bind_edf().expect("no-bind edf invariants");
+    audit
+        .validate_no_bind_edf()
+        .expect("no-bind edf invariants");
 }
 
 #[test]

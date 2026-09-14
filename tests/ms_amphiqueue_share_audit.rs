@@ -2,7 +2,9 @@ use lb::microservice::{
     AmphiQueuePullAudit, MsArgs, MsServiceDistribution, OutputFormat, n_sidecars, run, sidecar_id,
     sidecar_replicas,
 };
-use lb::policy::{AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{
+    AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
 use std::collections::HashMap;
@@ -42,6 +44,8 @@ fn chain3_args(
         amphiqueue_sched,
         amphiqueue_share,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     }
 }
 
@@ -118,6 +122,8 @@ fn ms_amphiqueue_share_one_latency_close_to_amphiqueue() {
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     })
     .unwrap()
     .expect("amphiqueue");
@@ -183,6 +189,8 @@ fn ms_amphiqueue_share_one_entry_occupancy_close_to_amphiqueue() {
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     })
     .unwrap()
     .expect("amphiqueue");
@@ -346,6 +354,8 @@ fn ms_amphiqueue_share_two_entry_occupancy_balanced_within_groups() {
         amphiqueue_sched: None,
         amphiqueue_share: share,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     })
     .unwrap()
     .expect("share=2");

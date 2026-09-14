@@ -2,6 +2,7 @@ use lb::microservice::{MsArgs, MsJbsqAudit, MsServiceDistribution, OutputFormat,
 use lb::policy::{CentralizedSchedKind, LoadBalancePolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -40,6 +41,8 @@ fn chain3_args(
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     }
 }
 
@@ -133,13 +136,11 @@ fn ms_jbsq_n1_matches_centralized() {
     .expect("jbsq n=1");
 
     assert_eq!(
-        centralized.by_api["handle"].e2e_ms,
-        jbsq.by_api["handle"].e2e_ms,
+        centralized.by_api["handle"].e2e_ms, jbsq.by_api["handle"].e2e_ms,
         "jbsq n=1 should match centralized e2e latencies"
     );
     assert_eq!(
-        centralized.by_api["handle"].processing_time_ms,
-        jbsq.by_api["handle"].processing_time_ms,
+        centralized.by_api["handle"].processing_time_ms, jbsq.by_api["handle"].processing_time_ms,
         "jbsq n=1 should match centralized processing times"
     );
 }

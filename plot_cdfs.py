@@ -338,6 +338,8 @@ def run_ms_simulation(
     amphiqueue_share: int | None = None,
     jbsq_n: int | None = None,
     scale: int | None = None,
+    eq_scale: int | None = None,
+    eq_scale_overrides: dict[str, int] | None = None,
 ) -> dict:
     cmd = [
         str(binary),
@@ -376,6 +378,12 @@ def run_ms_simulation(
         cmd.extend(["--jbsq-n", str(jbsq_n)])
     if scale is not None and scale != 0:
         cmd.extend(["--scale", str(scale)])
+    if eq_scale is not None and eq_scale != 0:
+        cmd.extend(["--eq-scale", str(eq_scale)])
+    if eq_scale_overrides:
+        for name, delta in eq_scale_overrides.items():
+            if delta != 0:
+                cmd.extend(["--eq-scale", f"{name}={delta}"])
     result = run_subprocess(cmd, label="simulator")
     if result.stderr:
         print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")

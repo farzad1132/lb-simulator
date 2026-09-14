@@ -50,7 +50,7 @@ Both use [`src/policy.rs`](../src/policy.rs) for routing algorithms and [`src/su
 | Nested synchronous RPCs | — | yes | Multi-hop call trees; siblings dispatched sequentially |
 | Direct return routing | — | yes | Callee → caller replica via `CallerRef` (not load-balanced) |
 | Request tracing | — | yes | `--trace`, `--trace-limit` (timeline on stderr) |
-| Topology scaling | — | yes | `--scale` adds CPU and replicas to every service |
+| Topology scaling | — | yes | `--scale` adds CPU and replicas to every service (grows capacity). `--eq-scale N` / `--eq-scale NAME=N` adds CPU and replicas and stretches that tier's `avg_rt` so `cpu / E[S]` stays equivalent. |
 | Load/SLO CLI overrides | — | yes | `--rps`, `--slo-ms` override `load.json` |
 | Per-microservice / per-server utilization | yes (per-server) | yes | lb: `server_utilization_pct.server`; ms: `microservice_utilization_pct`, `server_utilization_pct` |
 | Visit / hop metrics | yes (`by_hop`) | yes | lb: `client`/`server` hops (no slack-d); ms: `by_microservice`, `total_processing_p99_ms` |
@@ -222,7 +222,8 @@ Downstream completions return directly to the **specific caller replica** via `C
 ### Tracing and scaling
 
 - `--trace` / `--trace-limit`: human-readable per-request timeline on stderr.
-- `--scale N`: add N CPU cores and N replicas to every microservice node.
+- `--scale N`: add N CPU cores and N replicas to every microservice node (grows processing capacity).
+- `--eq-scale N` / `--eq-scale NAME=N`: add N CPU cores and N replicas (all services, or one named microservice) and stretch that tier's endpoint means by `(cpu+N)/cpu` so max throughput stays equivalent. Named deltas add on top of a bare `N`. Applied after `--scale`.
 
 ### Metrics shape
 

@@ -59,7 +59,10 @@ impl LbPullAudit {
 
     fn record(&self, kind: LbPullEventKind) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.events.lock().unwrap().push(RecordedEvent { seq, kind });
+        self.events
+            .lock()
+            .unwrap()
+            .push(RecordedEvent { seq, kind });
     }
 
     pub fn record_task_enqueued(&self, lb_id: usize, task_id: u64, queue_len_before: usize) {
@@ -144,11 +147,7 @@ impl LbPullAudit {
                     pulled_task_id,
                     queue_head_task_id,
                     ..
-                } => Some((
-                    *intent_request_id,
-                    *pulled_task_id,
-                    *queue_head_task_id,
-                )),
+                } => Some((*intent_request_id, *pulled_task_id, *queue_head_task_id)),
                 _ => None,
             })
             .collect()
@@ -351,15 +350,21 @@ impl LbPullAudit {
                         ));
                     }
                     let task_q = task_queues.get_mut(lb_id).ok_or_else(|| {
-                        format!("bound pull with no replay queue (lb_id={lb_id}) (seq={})", recorded.seq)
-                    })?;
-                    let idx = task_q.iter().position(|id| id == pulled_task_id).ok_or_else(|| {
                         format!(
-                            "bound pulled task not in replay queue (lb_id={lb_id}, \
-                             pulled_task_id={pulled_task_id}) (seq={})",
+                            "bound pull with no replay queue (lb_id={lb_id}) (seq={})",
                             recorded.seq
                         )
                     })?;
+                    let idx = task_q
+                        .iter()
+                        .position(|id| id == pulled_task_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "bound pulled task not in replay queue (lb_id={lb_id}, \
+                             pulled_task_id={pulled_task_id}) (seq={})",
+                                recorded.seq
+                            )
+                        })?;
                     task_q.remove(idx);
                 }
                 _ => {}
@@ -406,7 +411,10 @@ impl LbPullAudit {
                         ));
                     }
                     let task_q = task_queues.get_mut(lb_id).ok_or_else(|| {
-                        format!("no-bind pull with no replay queue (lb_id={lb_id}) (seq={})", recorded.seq)
+                        format!(
+                            "no-bind pull with no replay queue (lb_id={lb_id}) (seq={})",
+                            recorded.seq
+                        )
                     })?;
                     let front = task_q.pop_front().ok_or_else(|| {
                         format!(
@@ -492,6 +500,9 @@ mod tests {
         audit.record_intent_drained(0, 0, 3, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, 0, Some(5), 3, 1, Some(3));
         let err = audit.validate_bound().unwrap_err();
-        assert!(err.contains("bound pull mismatch"), "unexpected error: {err}");
+        assert!(
+            err.contains("bound pull mismatch"),
+            "unexpected error: {err}"
+        );
     }
 }

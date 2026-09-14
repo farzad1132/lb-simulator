@@ -1,7 +1,10 @@
 use lb::microservice::{AmphiQueuePullAudit, MsArgs, MsServiceDistribution, OutputFormat, run};
-use lb::policy::{AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
+use lb::policy::{
+    AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn amphiqueue_args(
@@ -37,13 +40,13 @@ fn amphiqueue_args(
         amphiqueue_sched: Some(amphiqueue_sched),
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     }
 }
 
 fn run_with_audit(args: &MsArgs) -> lb::microservice::MsStats {
-    run(args)
-        .unwrap()
-        .expect("simulation should complete")
+    run(args).unwrap().expect("simulation should complete")
 }
 
 #[test]

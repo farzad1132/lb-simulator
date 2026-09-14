@@ -39,7 +39,9 @@ fn ms_amphiqueue_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 
@@ -138,7 +140,9 @@ fn ms_amphiqueue_no_bind_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 
@@ -208,7 +212,9 @@ fn ms_amphiqueue_no_bind_edf_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 
@@ -247,7 +253,9 @@ fn ms_amphiqueue_no_bind_edf_plus_completes_on_chain_topology() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
-    let by_api = stats["by_api"]["handle"].as_object().expect("by_api.handle");
+    let by_api = stats["by_api"]["handle"]
+        .as_object()
+        .expect("by_api.handle");
     assert_eq!(by_api["e2e_ms"].as_array().map(|a| a.len()), Some(1000));
 }
 
@@ -379,7 +387,9 @@ fn ms_amphiqueue_share_completes_on_chain_topology() {
     let stdout = String::from_utf8(output.stdout).expect("stdout not utf-8");
     let stats: serde_json::Value = serde_json::from_str(&stdout).expect("invalid json output");
     assert_eq!(
-        stats["by_api"]["handle"]["e2e_ms"].as_array().map(|a| a.len()),
+        stats["by_api"]["handle"]["e2e_ms"]
+            .as_array()
+            .map(|a| a.len()),
         Some(500)
     );
 }

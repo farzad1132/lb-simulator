@@ -76,7 +76,10 @@ impl AmphiQueuePullAudit {
 
     fn record(&self, kind: AmphiQueuePullEventKind) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.events.lock().unwrap().push(RecordedEvent { seq, kind });
+        self.events
+            .lock()
+            .unwrap()
+            .push(RecordedEvent { seq, kind });
     }
 
     pub fn record_intent_sent(
@@ -195,8 +198,7 @@ impl AmphiQueuePullAudit {
             .iter()
             .filter_map(|e| match &e.kind {
                 AmphiQueuePullEventKind::PullFulfilled {
-                    pulled_request_id,
-                    ..
+                    pulled_request_id, ..
                 } => Some(*pulled_request_id),
                 _ => None,
             })
@@ -600,16 +602,17 @@ impl AmphiQueuePullAudit {
                             recorded.seq
                         )
                     })?;
-                    let idx = replay.iter().position(|id| id == pulled_request_id).ok_or_else(
-                        || {
+                    let idx = replay
+                        .iter()
+                        .position(|id| id == pulled_request_id)
+                        .ok_or_else(|| {
                             format!(
                                 "bound pulled request not in replay queue \
                                  (rb_id={handler_rb_id}, target={target_ms}, \
                                  pulled_request_id={pulled_request_id}) (seq={})",
                                 recorded.seq
                             )
-                        },
-                    )?;
+                        })?;
                     replay.remove(idx);
                     fulfilled.push((*handler_rb_id, *intent_request_id, *pulled_request_id));
                 }
@@ -949,7 +952,9 @@ mod tests {
         audit.record_intent_queued("backend1", 1, 0, 5, t(100), 0);
         audit.record_intent_drained("backend1", 1, 0, 5, 1, 0, 0, 1);
         audit.record_pull_fulfilled(0, "frontend", 0, "backend1", 1, 5, 3, 1, Some(3));
-        audit.validate_no_bind_edf().expect("valid no-bind edf sequence");
+        audit
+            .validate_no_bind_edf()
+            .expect("valid no-bind edf sequence");
     }
 
     #[test]

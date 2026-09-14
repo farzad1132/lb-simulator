@@ -57,10 +57,7 @@ fn push_queueing_is_mostly_on_server_hop() {
     let stats: serde_json::Value =
         serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
 
-    assert_eq!(
-        stats["hop_order"],
-        serde_json::json!(["client", "server"])
-    );
+    assert_eq!(stats["hop_order"], serde_json::json!(["client", "server"]));
 
     let client_q = f64_array(&stats, &["by_hop", "client", "queueing_delay"]);
     let server_q = f64_array(&stats, &["by_hop", "server", "queueing_delay"]);
@@ -135,7 +132,10 @@ fn amphiqueue_queueing_is_mostly_on_client_hop() {
     let client_q = f64_array(&stats, &["by_hop", "client", "queueing_delay"]);
     let server_q = f64_array(&stats, &["by_hop", "server", "queueing_delay"]);
 
-    assert!(mean(&server_q) < 1e-9, "amphiqueue server queueing should be ~0");
+    assert!(
+        mean(&server_q) < 1e-9,
+        "amphiqueue server queueing should be ~0"
+    );
     assert!(
         mean(&client_q) > 0.01,
         "amphiqueue client queueing should be positive under load, got {}",
@@ -190,7 +190,10 @@ fn centralized_queueing_is_mostly_on_client_hop() {
     let client_q = f64_array(&stats, &["by_hop", "client", "queueing_delay"]);
     let server_q = f64_array(&stats, &["by_hop", "server", "queueing_delay"]);
 
-    assert!(mean(&server_q) < 1e-9, "centralized server queueing should be ~0");
+    assert!(
+        mean(&server_q) < 1e-9,
+        "centralized server queueing should be ~0"
+    );
     assert!(
         mean(&client_q) > 0.01,
         "centralized client queueing should be positive under load, got {}",

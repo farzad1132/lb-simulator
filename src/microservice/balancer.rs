@@ -1,17 +1,16 @@
 use super::hop::{CallerRef, Hop, OutboundCall, OutboundRelease, ReplicaInput};
-use crate::occupancy::OccupancyAccumulator;
 use super::trace::MsTracer;
-use crate::amphiqueue::{fatal_pull_abort, PullIntent};
+use crate::amphiqueue::{PullIntent, fatal_pull_abort};
 use crate::amphiqueue_audit::AmphiQueuePullAudit;
 use crate::ms_centralized_audit::MsCentralizedAudit;
-use crate::policy::{AmphiQueueSchedKind, CentralizedSchedKind};
+use crate::occupancy::OccupancyAccumulator;
 use crate::policy::LoadBalancePolicy;
 use crate::policy::LoadBalancePolicyKind;
 use crate::policy::PowerOfTwoPolicy;
+use crate::policy::{AmphiQueueSchedKind, CentralizedSchedKind};
 use crate::prequal::{
-    apply_r_probe, apply_r_remove, pool_cap, sample_probe_targets, CandidatePool, Probe, B_REUSE,
-    R_PROBE,
-    R_REMOVE,
+    B_REUSE, CandidatePool, Probe, R_PROBE, R_REMOVE, apply_r_probe, apply_r_remove, pool_cap,
+    sample_probe_targets,
 };
 use crate::rng;
 use crate::scheduling::edf_insert_index;
@@ -313,10 +312,7 @@ impl ReplicaBalancer {
     ) {
         if amphiqueue_sched.is_some_and(|s| s.outbound_uses_edf()) {
             let deadline = call.hop.deadline;
-            let insert_at = edf_insert_index(
-                queue.iter().map(|c| c.hop.deadline),
-                deadline,
-            );
+            let insert_at = edf_insert_index(queue.iter().map(|c| c.hop.deadline), deadline);
             queue.insert(insert_at, call);
         } else {
             queue.push_back(call);
@@ -395,7 +391,12 @@ impl ReplicaBalancer {
         queue.remove(idx)
     }
 
-    async fn dispatch_to_server(&mut self, target: &str, server_idx: usize, mut call: OutboundCall) {
+    async fn dispatch_to_server(
+        &mut self,
+        target: &str,
+        server_idx: usize,
+        mut call: OutboundCall,
+    ) {
         if let Some(inflight) = self.local_outbound_inflight.get_mut(target) {
             inflight[server_idx] += 1;
         }
@@ -440,19 +441,12 @@ impl ReplicaBalancer {
         let sender_id = self.rb_id;
         for server_idx in targets {
             if server_idx < outputs.len() {
-                outputs[server_idx]
-                    .send(Probe { sender_id })
-                    .await;
+                outputs[server_idx].send(Probe { sender_id }).await;
             }
         }
     }
 
-    async fn dispatch_prequal(
-        &mut self,
-        mut call: OutboundCall,
-        target: &str,
-        cx: &Context<Self>,
-    ) {
+    async fn dispatch_prequal(&mut self, mut call: OutboundCall, target: &str, cx: &Context<Self>) {
         let n_servers = self
             .local_outbound_inflight
             .get(target)
@@ -555,13 +549,11 @@ impl ReplicaBalancer {
             }
             let request_id = call.hop.request_id;
             let deadline = call.hop.deadline;
-            let queue = self
-                .outbound_queues
-                .entry(target.clone())
-                .or_default();
+            let queue = self.outbound_queues.entry(target.clone()).or_default();
             Self::enqueue_outbound_call(queue, call, self.amphiqueue_sched);
             self.sample_outbound_queue_occupancy(cx.time());
-            self.send_pull_intent_for_target(&target, request_id, deadline).await;
+            self.send_pull_intent_for_target(&target, request_id, deadline)
+                .await;
             return;
         }
 
@@ -797,10 +789,13 @@ impl DownstreamBalancer {
     }
 
     fn caller_key(call: &OutboundCall) -> Option<(String, usize)> {
-        call.hop
-            .caller
-            .as_ref()
-            .map(|CallerRef { microservice, server, .. }| (microservice.clone(), *server))
+        call.hop.caller.as_ref().map(
+            |CallerRef {
+                 microservice,
+                 server,
+                 ..
+             }| (microservice.clone(), *server),
+        )
     }
 
     fn record_caller_level(&self, caller: &(String, usize), now: MonotonicTime, level: u32) {
@@ -898,12 +893,7 @@ impl DownstreamBalancer {
         if self.lb_policy.uses_central_pull_queue() {
             let queue_len_before = self.queue.len();
             if let Some(audit) = &self.centralized_audit {
-                let caller_server = call
-                    .hop
-                    .caller
-                    .as_ref()
-                    .map(|c| c.server)
-                    .unwrap_or(0);
+                let caller_server = call.hop.caller.as_ref().map(|c| c.server).unwrap_or(0);
                 audit.record_call_enqueued(
                     &self.target_microservice,
                     self.lb_id,
@@ -934,10 +924,8 @@ impl DownstreamBalancer {
             }
             self.increment_caller_queue_count(&call, cx.time());
             if self.centralized_sched.uses_edf() {
-                let insert_at = edf_insert_index(
-                    self.queue.iter().map(|c| c.hop.deadline),
-                    call.hop.deadline,
-                );
+                let insert_at =
+                    edf_insert_index(self.queue.iter().map(|c| c.hop.deadline), call.hop.deadline);
                 self.queue.insert(insert_at, call);
             } else {
                 self.queue.push_back(call);

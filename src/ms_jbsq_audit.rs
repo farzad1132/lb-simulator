@@ -41,7 +41,10 @@ impl MsJbsqAudit {
 
     fn record(&self, kind: JbsqEventKind) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.events.lock().unwrap().push(RecordedEvent { seq, kind });
+        self.events
+            .lock()
+            .unwrap()
+            .push(RecordedEvent { seq, kind });
     }
 
     pub fn record_pull_sent(

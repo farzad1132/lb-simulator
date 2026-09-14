@@ -148,7 +148,8 @@ cargo build --release
 | `--seed` | (none) | RNG seed for reproducible runs |
 | `--scheduling` | `fifo` | Server queue discipline (`fifo` or deadline-ordered `edf`); see [docs/scheduling.md](docs/scheduling.md) |
 | `--format` | `human` | `human` or `json` |
-| `--scale` | `0` | Add this many cores and replicas to every microservice |
+| `--scale` | `0` | Add this many cores and replicas to every microservice (grows processing capacity) |
+| `--eq-scale` | (none) | Repeatable `N` or `NAME=N`: add N cpu and N replicas (every service, or one named tier) and stretch that tier's `avg_rt` by `(cpu+N)/cpu` so max throughput `cpu / E[S]` stays equivalent. Applied after `--scale`. |
 
 JSON output includes per-microservice `microservice_utilization_pct`, per-server `server_utilization_pct`, per-microservice visit metrics in `by_microservice`, top-level `total_processing_p99_ms`, and per-API latency arrays in ms (`e2e_ms`, `processing_time_ms`) plus SLO fields (`unloaded_latency_p99_ms` computed from samples, `slo_latency_ms` from `load.json`, `prob_latency_gt_slo` as the fraction of requests exceeding the SLO).
 
@@ -604,11 +605,13 @@ python optimize_express_lane.py --resume optimizer_logs/express_lane_20250702_15
 
 ## Plot microservice chain load compare
 
-`plot_ms_chain_load_compare.py` compares named MS experiment configs on **one** chain topology while sweeping load. Requires `--chain {3,6,10}`. X-axis is load; Y-axis is SLO violation rate (%); one line per config in `DEFAULT_CONFIGS`. SLO is calibrated once (processing p99 × 2) and shared across all configs. Optional `--scale N` adds N cpu cores and N replicas to every microservice (ms `--scale`). Output defaults to `output/ms_chain{N}_load_compare_slo.pdf`.
+`plot_ms_chain_load_compare.py` compares named MS experiment configs on **one** chain topology while sweeping load. Requires `--chain {3,6,10}`. X-axis is load; Y-axis is SLO violation rate (%); one line per config in `DEFAULT_CONFIGS`. SLO is calibrated once (processing p99 × 2) and shared across all configs. Optional `--scale N` adds N cpu cores and N replicas to every microservice (ms `--scale`, grows capacity). Optional `--eq-scale N` / `--eq-scale NAME=N` adds cpu+replicas and stretches `avg_rt` so that tier's processing capacity stays equivalent (ms `--eq-scale`). Output defaults to `output/ms_chain{N}_load_compare_slo.pdf`.
 
 ```bash
 .venv/bin/python plot_ms_chain_load_compare.py --chain 3 --n 100000
 .venv/bin/python plot_ms_chain_load_compare.py --chain 6 --scale 10
+.venv/bin/python plot_ms_chain_load_compare.py --chain 3 --eq-scale 10
+.venv/bin/python plot_ms_chain_load_compare.py --chain 3 --eq-scale backend2=10
 ```
 
 ## Plot microservice chain SLO heatmap

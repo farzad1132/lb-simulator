@@ -211,8 +211,12 @@ impl AmphiQueueServerSidecar {
         if let Some(output) = self.upstream_outputs.get_mut(&server_idx) {
             output.send(ReplicaInput::Upstream(hop)).await;
         } else {
-            *self.occupancy.entry(server_idx).or_insert(0) =
-                self.occupancy.get(&server_idx).copied().unwrap_or(1).saturating_sub(1);
+            *self.occupancy.entry(server_idx).or_insert(0) = self
+                .occupancy
+                .get(&server_idx)
+                .copied()
+                .unwrap_or(1)
+                .saturating_sub(1);
         }
     }
 

@@ -315,9 +315,9 @@ pub fn validate_pull_policy(
     pull_policy: Option<PullPolicyKind>,
 ) -> Result<(), String> {
     match (lb_policy.uses_amphiqueue_protocol(), pull_policy) {
-        (true, None) => Err(
-            "--pull-policy is required with --lb-policy amphiqueue or amphiqueue-share".into(),
-        ),
+        (true, None) => {
+            Err("--pull-policy is required with --lb-policy amphiqueue or amphiqueue-share".into())
+        }
         (false, Some(_)) => Err(
             "--pull-policy is only valid with --lb-policy amphiqueue or amphiqueue-share".into(),
         ),
@@ -335,7 +335,8 @@ pub fn validate_amphiqueue_sched(
     };
     if !lb_policy.uses_amphiqueue_protocol() {
         return Err(
-            "--amphiqueue-sched is only valid with --lb-policy amphiqueue or amphiqueue-share".into(),
+            "--amphiqueue-sched is only valid with --lb-policy amphiqueue or amphiqueue-share"
+                .into(),
         );
     }
     if amphiqueue_sched.requires_ms() && !allow_edf {
@@ -352,8 +353,7 @@ pub fn validate_centralized_sched(
 ) -> Result<(), String> {
     if centralized_sched.uses_edf() && !lb_policy.uses_central_pull_queue() {
         return Err(
-            "--centralized-sched edf is only valid with --lb-policy centralized or jbsq"
-                .into(),
+            "--centralized-sched edf is only valid with --lb-policy centralized or jbsq".into(),
         );
     }
     Ok(())
@@ -497,38 +497,46 @@ mod tests {
     #[test]
     fn validate_centralized_subset_ok_partition() {
         use crate::subset::SubsetPolicyKind;
-        assert!(validate_centralized_subset(
-            LoadBalancePolicyKind::Centralized,
-            12,
-            2,
-            6,
-            SubsetPolicyKind::Deterministic,
-        )
-        .is_ok());
-        assert!(validate_centralized_subset(
-            LoadBalancePolicyKind::Centralized,
-            12,
-            4,
-            6,
-            SubsetPolicyKind::Deterministic,
-        )
-        .is_ok());
-        assert!(validate_centralized_subset(
-            LoadBalancePolicyKind::Centralized,
-            12,
-            3,
-            0,
-            SubsetPolicyKind::Random,
-        )
-        .is_ok());
-        assert!(validate_centralized_subset(
-            LoadBalancePolicyKind::PowerOfTwo,
-            12,
-            3,
-            5,
-            SubsetPolicyKind::Random,
-        )
-        .is_ok());
+        assert!(
+            validate_centralized_subset(
+                LoadBalancePolicyKind::Centralized,
+                12,
+                2,
+                6,
+                SubsetPolicyKind::Deterministic,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_centralized_subset(
+                LoadBalancePolicyKind::Centralized,
+                12,
+                4,
+                6,
+                SubsetPolicyKind::Deterministic,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_centralized_subset(
+                LoadBalancePolicyKind::Centralized,
+                12,
+                3,
+                0,
+                SubsetPolicyKind::Random,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_centralized_subset(
+                LoadBalancePolicyKind::PowerOfTwo,
+                12,
+                3,
+                5,
+                SubsetPolicyKind::Random,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -674,11 +682,10 @@ mod tests {
 
     #[test]
     fn validate_centralized_sched_allows_edf_for_jbsq() {
-        assert!(validate_centralized_sched(
-            LoadBalancePolicyKind::Jbsq,
-            CentralizedSchedKind::Edf,
-        )
-        .is_ok());
+        assert!(
+            validate_centralized_sched(LoadBalancePolicyKind::Jbsq, CentralizedSchedKind::Edf,)
+                .is_ok()
+        );
         let err = validate_centralized_sched(
             LoadBalancePolicyKind::PowerOfTwo,
             CentralizedSchedKind::Edf,
@@ -770,24 +777,30 @@ mod tests {
 
     #[test]
     fn validate_amphiqueue_sched_requires_amphiqueue_and_ms_for_edf() {
-        assert!(validate_amphiqueue_sched(
-            LoadBalancePolicyKind::AmphiQueue,
-            Some(AmphiQueueSchedKind::Edf),
-            true,
-        )
-        .is_ok());
-        assert!(validate_amphiqueue_sched(
-            LoadBalancePolicyKind::AmphiQueueShare,
-            Some(AmphiQueueSchedKind::EdfPlus),
-            true,
-        )
-        .is_ok());
-        assert!(validate_amphiqueue_sched(
-            LoadBalancePolicyKind::AmphiQueue,
-            Some(AmphiQueueSchedKind::Fcfs),
-            false,
-        )
-        .is_ok());
+        assert!(
+            validate_amphiqueue_sched(
+                LoadBalancePolicyKind::AmphiQueue,
+                Some(AmphiQueueSchedKind::Edf),
+                true,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_amphiqueue_sched(
+                LoadBalancePolicyKind::AmphiQueueShare,
+                Some(AmphiQueueSchedKind::EdfPlus),
+                true,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_amphiqueue_sched(
+                LoadBalancePolicyKind::AmphiQueue,
+                Some(AmphiQueueSchedKind::Fcfs),
+                false,
+            )
+            .is_ok()
+        );
         assert!(validate_amphiqueue_sched(LoadBalancePolicyKind::AmphiQueue, None, false).is_ok());
         let err = validate_amphiqueue_sched(
             LoadBalancePolicyKind::PowerOfTwo,
@@ -819,21 +832,27 @@ mod tests {
 
     #[test]
     fn validate_centralized_sched_requires_centralized_for_edf() {
-        assert!(validate_centralized_sched(
-            LoadBalancePolicyKind::Centralized,
-            CentralizedSchedKind::Fcfs,
-        )
-        .is_ok());
-        assert!(validate_centralized_sched(
-            LoadBalancePolicyKind::Centralized,
-            CentralizedSchedKind::Edf,
-        )
-        .is_ok());
-        assert!(validate_centralized_sched(
-            LoadBalancePolicyKind::PowerOfTwo,
-            CentralizedSchedKind::Fcfs,
-        )
-        .is_ok());
+        assert!(
+            validate_centralized_sched(
+                LoadBalancePolicyKind::Centralized,
+                CentralizedSchedKind::Fcfs,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_centralized_sched(
+                LoadBalancePolicyKind::Centralized,
+                CentralizedSchedKind::Edf,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_centralized_sched(
+                LoadBalancePolicyKind::PowerOfTwo,
+                CentralizedSchedKind::Fcfs,
+            )
+            .is_ok()
+        );
         let err = validate_centralized_sched(
             LoadBalancePolicyKind::PowerOfTwo,
             CentralizedSchedKind::Edf,

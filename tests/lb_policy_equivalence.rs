@@ -90,9 +90,7 @@ fn collect_stats(name: &'static str, stats: &serde_json::Value) -> PolicyStats {
     let utilization_pct = stats["utilization_pct"]
         .as_f64()
         .expect("utilization_pct missing");
-    let e2e = stats["e2e"]
-        .as_array()
-        .expect("e2e array missing");
+    let e2e = stats["e2e"].as_array().expect("e2e array missing");
     assert_eq!(e2e.len(), 500, "{name}: expected 500 completed tasks");
 
     let mut samples: Vec<f64> = e2e.iter().map(|v| v.as_f64().expect("e2e value")).collect();
@@ -131,24 +129,24 @@ fn lb_all_policies_similar_with_single_server() {
     }
 
     let min_p99 = results.iter().map(|s| s.p99).fold(f64::INFINITY, f64::min);
-    let max_p99 = results.iter().map(|s| s.p99).fold(f64::NEG_INFINITY, f64::max);
+    let max_p99 = results
+        .iter()
+        .map(|s| s.p99)
+        .fold(f64::NEG_INFINITY, f64::max);
     assert!(
         max_p99 / min_p99 < 1.15,
         "p99 e2e spread too large across policies (min={min_p99:.4}, max={max_p99:.4}): {:?}",
-        results
-            .iter()
-            .map(|s| (s.name, s.p99))
-            .collect::<Vec<_>>()
+        results.iter().map(|s| (s.name, s.p99)).collect::<Vec<_>>()
     );
 
     let min_p50 = results.iter().map(|s| s.p50).fold(f64::INFINITY, f64::min);
-    let max_p50 = results.iter().map(|s| s.p50).fold(f64::NEG_INFINITY, f64::max);
+    let max_p50 = results
+        .iter()
+        .map(|s| s.p50)
+        .fold(f64::NEG_INFINITY, f64::max);
     assert!(
         max_p50 / min_p50 < 1.05,
         "p50 e2e spread too large across policies (min={min_p50:.4}, max={max_p50:.4}): {:?}",
-        results
-            .iter()
-            .map(|s| (s.name, s.p50))
-            .collect::<Vec<_>>()
+        results.iter().map(|s| (s.name, s.p50)).collect::<Vec<_>>()
     );
 }

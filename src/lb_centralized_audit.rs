@@ -38,7 +38,10 @@ impl LbCentralizedAudit {
 
     fn record(&self, kind: CentralizedEventKind) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.events.lock().unwrap().push(RecordedEvent { seq, kind });
+        self.events
+            .lock()
+            .unwrap()
+            .push(RecordedEvent { seq, kind });
     }
 
     pub fn record_task_enqueued(&self, lb_id: usize, task_id: u64, queue_len_before: usize) {
@@ -142,9 +145,7 @@ impl LbCentralizedAudit {
             for j in (i + 1)..expected.len() {
                 let overlap: Vec<_> = expected[i].intersection(&expected[j]).copied().collect();
                 if !overlap.is_empty() {
-                    return Err(format!(
-                        "expected subsets {i} and {j} overlap: {overlap:?}"
-                    ));
+                    return Err(format!("expected subsets {i} and {j} overlap: {overlap:?}"));
                 }
             }
         }

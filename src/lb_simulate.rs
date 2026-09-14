@@ -3,12 +3,12 @@ use crate::lb_pull_audit::LbPullAudit;
 use crate::load_balancer::LoadBalancer;
 use crate::occupancy::OccupancyAccumulator;
 use crate::policy::{AmphiQueueSchedKind, LoadBalancePolicyKind, PullPolicyKind};
-use crate::server::{
-    DispatchMode, ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task,
-};
+use crate::server::{DispatchMode, ExpressEvictionPolicy, QueueDelayEvictionMode, Server, Task};
 use crate::sim_util;
 use crate::subset::{self, SubsetPolicyKind};
-use nexosim::ports::{EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue};
+use nexosim::ports::{
+    EventQueueReader, EventSinkReader, EventSource, Output, SinkState, event_queue,
+};
 use nexosim::simulation::{EventId, Mailbox, SchedulingError, SimInit, Simulation};
 use nexosim::time::MonotonicTime;
 use rand::Rng;
@@ -383,9 +383,7 @@ fn calculate_stats(
                 .expect("express task must have service_started_at");
             (
                 Some(duration_secs(evicted_at.duration_since(task.start))),
-                Some(duration_secs(
-                    service_started_at.duration_since(evicted_at),
-                )),
+                Some(duration_secs(service_started_at.duration_since(evicted_at))),
             )
         } else {
             (None, None)
@@ -548,7 +546,10 @@ fn calculate_stats(
 
     let mut server_util = HashMap::new();
     for server_idx in 0..hop_telemetry.n_servers {
-        let busy = server_busy.get(&server_idx).copied().unwrap_or(Duration::ZERO);
+        let busy = server_busy
+            .get(&server_idx)
+            .copied()
+            .unwrap_or(Duration::ZERO);
         server_util.insert(
             server_idx,
             pool_utilization_pct(busy, observation, hop_telemetry.concurrency),
@@ -591,9 +592,7 @@ fn calculate_stats(
     })
 }
 
-pub fn run(
-    args: &LbRunArgs,
-) -> Result<Option<LbServiceStats>, Box<dyn std::error::Error>> {
+pub fn run(args: &LbRunArgs) -> Result<Option<LbServiceStats>, Box<dyn std::error::Error>> {
     let service_time = resolve_service_time(args)?;
     if args.lb_policy.is_centralized() {
         return run_centralized_simulation(args, &service_time).map_err(Into::into);
@@ -646,12 +645,7 @@ fn run_centralized_simulation(
         let server_indices = if args.lb_subset_size == 0 {
             (0..n_servers).collect()
         } else {
-            subset::assign_subset(
-                args.lb_subset_policy,
-                n_servers,
-                lb_id,
-                args.lb_subset_size,
-            )
+            subset::assign_subset(args.lb_subset_policy, n_servers, lb_id, args.lb_subset_size)
         };
         if args.verbose >= 1 {
             eprintln!("centralized lb {lb_id} subset: {server_indices:?}");
@@ -672,8 +666,7 @@ fn run_centralized_simulation(
             Some(hop_telemetry.client_queue_occupancy.clone()),
         );
         for &server_idx in &server_indices {
-            load_balancer.outputs[server_idx]
-                .connect(Server::input, &server_mailboxes[server_idx]);
+            load_balancer.outputs[server_idx].connect(Server::input, &server_mailboxes[server_idx]);
         }
         pending_lbs.push((load_balancer, Mailbox::new()));
     }
@@ -716,9 +709,7 @@ fn run_centralized_simulation(
             Some(hop_telemetry.server_occupancy.clone()),
             Some(hop_telemetry.server_busy_time.clone()),
         );
-        server
-            .pull_output
-            .connect(LoadBalancer::pull, lb_address);
+        server.pull_output.connect(LoadBalancer::pull, lb_address);
         server.output.connect_sink(sink.clone());
         let pull_input = EventSource::new()
             .connect(Server::request_pull, &server_mailbox)
@@ -912,8 +903,7 @@ fn run_push_simulation(
         }
         if is_express {
             if let Some(express_addr) = express_lb_address.as_ref() {
-                release_outputs[express_lb_id]
-                    .connect(LoadBalancer::release, express_addr);
+                release_outputs[express_lb_id].connect(LoadBalancer::release, express_addr);
             }
         }
 
@@ -992,9 +982,7 @@ fn run_push_simulation(
         }
         if is_express {
             if let Some(express_addr) = express_lb_address.as_ref() {
-                server
-                    .pull_output
-                    .connect(LoadBalancer::pull, express_addr);
+                server.pull_output.connect(LoadBalancer::pull, express_addr);
                 let pull_input = EventSource::new()
                     .connect(Server::request_pull, &server_mailbox)
                     .register(&mut bench);
@@ -1035,11 +1023,14 @@ fn run_push_simulation(
 
     let sim_end = simu.time();
     let observation = sim_end.duration_since(t0);
-    let stats_config = args.express_lane.as_ref().map(|cfg| ExpressLaneStatsConfig {
-        n_regular: (n_servers - cfg.express_size as usize) as u32,
-        express_size: cfg.express_size,
-        concurrency,
-    });
+    let stats_config = args
+        .express_lane
+        .as_ref()
+        .map(|cfg| ExpressLaneStatsConfig {
+            n_regular: (n_servers - cfg.express_size as usize) as u32,
+            express_size: cfg.express_size,
+            concurrency,
+        });
     Ok(calculate_stats(
         &mut output,
         observation,

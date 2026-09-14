@@ -2,6 +2,7 @@ use lb::microservice::{MsArgs, MsServiceDistribution, OutputFormat, run};
 use lb::policy::{CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsArgs {
@@ -36,6 +37,8 @@ fn caller_queue_args(seed: u64, n: u32, lb_policy: LoadBalancePolicyKind) -> MsA
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     }
 }
 
@@ -47,9 +50,13 @@ fn queueing_p50(values: &[f64]) -> f64 {
 
 #[test]
 fn g1_nested_call_completes_with_queueing() {
-    let stats = run(&caller_queue_args(42, 500, LoadBalancePolicyKind::LeastRequest))
-        .unwrap()
-        .expect("stats");
+    let stats = run(&caller_queue_args(
+        42,
+        500,
+        LoadBalancePolicyKind::LeastRequest,
+    ))
+    .unwrap()
+    .expect("stats");
     let api = &stats.by_api["g1"];
     assert_eq!(api.e2e_ms.len(), 500);
 
@@ -68,9 +75,13 @@ fn g1_nested_call_completes_with_queueing() {
 
 #[test]
 fn amphiqueue_caller_queueing_excludes_downstream_blocking() {
-    let stats = run(&caller_queue_args(42, 500, LoadBalancePolicyKind::AmphiQueue))
-        .unwrap()
-        .expect("stats");
+    let stats = run(&caller_queue_args(
+        42,
+        500,
+        LoadBalancePolicyKind::AmphiQueue,
+    ))
+    .unwrap()
+    .expect("stats");
 
     let frontend = &stats.by_microservice["frontend"];
     let backend = &stats.by_microservice["backend1"];
@@ -78,8 +89,7 @@ fn amphiqueue_caller_queueing_excludes_downstream_blocking() {
     assert_eq!(backend.queueing_delay_ms.len(), 500);
 
     for i in 0..500 {
-        let backend_reconstructed =
-            backend.queueing_delay_ms[i] + backend.processing_time_ms[i];
+        let backend_reconstructed = backend.queueing_delay_ms[i] + backend.processing_time_ms[i];
         assert!(
             (backend_reconstructed - backend.response_time_ms[i]).abs() < 1e-3,
             "visit {i}: leaf queueing+proc should equal response"
@@ -108,12 +118,20 @@ fn amphiqueue_caller_queueing_excludes_downstream_blocking() {
 
 #[test]
 fn amphiqueue_caller_lb_queue_increases_server_avg_occupancy() {
-    let stats = run(&caller_queue_args(42, 500, LoadBalancePolicyKind::AmphiQueue))
-        .unwrap()
-        .expect("stats");
-    let lr_stats = run(&caller_queue_args(42, 500, LoadBalancePolicyKind::LeastRequest))
-        .unwrap()
-        .expect("stats");
+    let stats = run(&caller_queue_args(
+        42,
+        500,
+        LoadBalancePolicyKind::AmphiQueue,
+    ))
+    .unwrap()
+    .expect("stats");
+    let lr_stats = run(&caller_queue_args(
+        42,
+        500,
+        LoadBalancePolicyKind::LeastRequest,
+    ))
+    .unwrap()
+    .expect("stats");
 
     let amphiqueue_occ = stats.server_avg_queue_inflight["frontend"][&0];
     let lr_occ = lr_stats.server_avg_queue_inflight["frontend"][&0];
@@ -151,6 +169,8 @@ fn f1_nested_callgraph_completes() {
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     })
     .unwrap()
     .expect("stats");

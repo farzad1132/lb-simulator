@@ -94,4 +94,3 @@ fn lb_rejects_pull_policy_with_prequal() {
         "unexpected stderr: {stderr}"
     );
 }
-

@@ -87,12 +87,17 @@ impl CallGraph {
             if node.id == "USER" {
                 continue;
             }
-            let cpu = node.cpu.ok_or_else(|| format!("node {} missing cpu", node.id))?;
+            let cpu = node
+                .cpu
+                .ok_or_else(|| format!("node {} missing cpu", node.id))?;
             let replicas = node
                 .replicas
                 .ok_or_else(|| format!("node {} missing replicas", node.id))?;
             if cpu == 0 || replicas == 0 {
-                return Err(format!("node {} must have cpu > 0 and replicas > 0", node.id));
+                return Err(format!(
+                    "node {} must have cpu > 0 and replicas > 0",
+                    node.id
+                ));
             }
             microservices.insert(
                 node.id.clone(),
@@ -134,7 +139,10 @@ impl CallGraph {
                     .next_back()
                     .ok_or_else(|| format!("invalid entry target {}", edge.target))?
                     .to_string();
-                if entrypoints.insert(api.clone(), edge.target.clone()).is_some() {
+                if entrypoints
+                    .insert(api.clone(), edge.target.clone())
+                    .is_some()
+                {
                     return Err(format!("duplicate entry API {}", api));
                 }
             }
@@ -162,12 +170,74 @@ impl CallGraph {
             return Ok(());
         }
         for (id, spec) in &mut self.microservices {
-            spec.cpu = spec.cpu.checked_add(delta).ok_or_else(|| {
-                format!("node {id} cpu overflow after --scale {delta}")
-            })?;
-            spec.replicas = spec.replicas.checked_add(delta).ok_or_else(|| {
-                format!("node {id} replicas overflow after --scale {delta}")
-            })?;
+            spec.cpu = spec
+                .cpu
+                .checked_add(delta)
+                .ok_or_else(|| format!("node {id} cpu overflow after --scale {delta}"))?;
+            spec.replicas = spec
+                .replicas
+                .checked_add(delta)
+                .ok_or_else(|| format!("node {id} replicas overflow after --scale {delta}"))?;
+        }
+        Ok(())
+    }
+
+    /// Add `cpu`/`replicas` and stretch endpoint means so `cpu / E[S]` stays constant.
+    ///
+    /// All-tier `all` is applied first, then each named delta adds on top.
+    pub fn apply_eq_scale(
+        &mut self,
+        all: Option<u32>,
+        named: &HashMap<String, u32>,
+    ) -> Result<(), String> {
+        for id in named.keys() {
+            if !self.microservices.contains_key(id) {
+                return Err(format!("--eq-scale unknown microservice {id}"));
+            }
+        }
+        if let Some(delta) = all {
+            let ids = self.microservice_order.clone();
+            for id in ids {
+                self.eq_scale_service(&id, delta)?;
+            }
+        }
+        for (id, delta) in named {
+            self.eq_scale_service(id, *delta)?;
+        }
+        Ok(())
+    }
+
+    fn eq_scale_service(&mut self, id: &str, delta: u32) -> Result<(), String> {
+        if delta == 0 {
+            return Ok(());
+        }
+        let cpu = {
+            let spec = self
+                .microservices
+                .get_mut(id)
+                .ok_or_else(|| format!("--eq-scale unknown microservice {id}"))?;
+            let cpu = spec.cpu;
+            spec.cpu = spec
+                .cpu
+                .checked_add(delta)
+                .ok_or_else(|| format!("node {id} cpu overflow after --eq-scale {delta}"))?;
+            spec.replicas = spec
+                .replicas
+                .checked_add(delta)
+                .ok_or_else(|| format!("node {id} replicas overflow after --eq-scale {delta}"))?;
+            cpu
+        };
+        let factor = (cpu as f32 + delta as f32) / (cpu as f32);
+        let endpoints: Vec<String> = self
+            .endpoint_microservice
+            .iter()
+            .filter(|(_, ms)| ms.as_str() == id)
+            .map(|(endpoint, _)| endpoint.clone())
+            .collect();
+        for endpoint in endpoints {
+            if let Some(mean) = self.interface_means.get_mut(&endpoint) {
+                *mean *= factor;
+            }
         }
         Ok(())
     }
@@ -191,6 +261,52 @@ impl CallGraph {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EqScaleSpec {
+    All(u32),
+    Named(String, u32),
+}
+
+pub fn parse_eq_scale_spec(s: &str) -> Result<EqScaleSpec, String> {
+    if let Some((name, count)) = s.split_once('=') {
+        if name.is_empty() {
+            return Err("--eq-scale NAME=N requires a microservice name".into());
+        }
+        let n: u32 = count
+            .parse()
+            .map_err(|_| format!("invalid --eq-scale count {count:?}"))?;
+        Ok(EqScaleSpec::Named(name.to_string(), n))
+    } else {
+        let n: u32 = s
+            .parse()
+            .map_err(|_| format!("invalid --eq-scale value {s:?} (expected N or NAME=N)"))?;
+        Ok(EqScaleSpec::All(n))
+    }
+}
+
+pub fn collect_eq_scale(
+    specs: &[EqScaleSpec],
+) -> Result<(Option<u32>, HashMap<String, u32>), String> {
+    let mut all = None;
+    let mut named = HashMap::new();
+    for spec in specs {
+        match spec {
+            EqScaleSpec::All(n) => {
+                if all.is_some() {
+                    return Err("at most one bare --eq-scale N is allowed".into());
+                }
+                all = Some(*n);
+            }
+            EqScaleSpec::Named(name, n) => {
+                if named.insert(name.clone(), *n).is_some() {
+                    return Err(format!("duplicate --eq-scale microservice {name}"));
+                }
+            }
+        }
+    }
+    Ok((all, named))
+}
+
 pub fn load_spec_from_file(path: &Path) -> Result<LoadSpec, String> {
     let data = fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&data).map_err(|e| e.to_string())
@@ -204,7 +320,10 @@ fn interface_mean(iface: &Interface) -> Result<f32, String> {
         (Some(rt), None) => rt,
         (None, Some(exp)) => exp.mean,
         (Some(rt), Some(_)) => rt,
-        (None, None) => Err(format!("interface {} missing avg_rt or exponential", iface.name))?,
+        (None, None) => Err(format!(
+            "interface {} missing avg_rt or exponential",
+            iface.name
+        ))?,
     };
     Ok(mean_ms * MS_TO_SECS)
 }
@@ -240,8 +359,7 @@ mod tests {
 
     #[test]
     fn load_spec_parses_api_objects() {
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/single/load.json");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fanin/single/load.json");
         let load = load_spec_from_file(&path).unwrap();
         assert_eq!(load["f1"].rps, 1200.0);
         assert_eq!(load["f1"].slo_ms, 35.0);
@@ -279,5 +397,103 @@ mod tests {
         assert_eq!(graph.microservices["backend1"].replicas, 8);
         assert_eq!(graph.microservices["shared"].cpu, 9);
         assert_eq!(graph.microservices["shared"].replicas, 9);
+    }
+
+    fn chain3_graph() -> CallGraph {
+        CallGraph::from_file(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/chain/3/callgraph.json"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn apply_eq_scale_all_adds_cpu_replicas_and_stretches_means() {
+        let mut graph = chain3_graph();
+        let orig = graph.interface_means["frontend:handle"];
+        graph.apply_eq_scale(Some(10), &HashMap::new()).unwrap();
+        for id in ["frontend", "backend1", "backend2"] {
+            assert_eq!(graph.microservices[id].cpu, 20);
+            assert_eq!(graph.microservices[id].replicas, 20);
+        }
+        assert_eq!(graph.interface_means["frontend:handle"], orig * 2.0);
+        assert_eq!(graph.interface_means["backend2:f2"], orig * 2.0);
+    }
+
+    #[test]
+    fn apply_eq_scale_named_leaves_other_tiers_untouched() {
+        let mut graph = chain3_graph();
+        let frontend_mean = graph.interface_means["frontend:handle"];
+        let backend2_mean = graph.interface_means["backend2:f2"];
+        let named = HashMap::from([("backend2".to_string(), 10)]);
+        graph.apply_eq_scale(None, &named).unwrap();
+        assert_eq!(graph.microservices["frontend"].cpu, 10);
+        assert_eq!(graph.microservices["frontend"].replicas, 10);
+        assert_eq!(graph.interface_means["frontend:handle"], frontend_mean);
+        assert_eq!(graph.microservices["backend2"].cpu, 20);
+        assert_eq!(graph.microservices["backend2"].replicas, 20);
+        assert_eq!(graph.interface_means["backend2:f2"], backend2_mean * 2.0);
+    }
+
+    #[test]
+    fn apply_eq_scale_named_adds_on_top_of_all() {
+        let mut graph = chain3_graph();
+        let orig = graph.interface_means["backend2:f2"];
+        let named = HashMap::from([("backend2".to_string(), 10)]);
+        graph.apply_eq_scale(Some(10), &named).unwrap();
+        assert_eq!(graph.microservices["frontend"].cpu, 20);
+        assert_eq!(graph.microservices["backend2"].cpu, 30);
+        assert_eq!(graph.microservices["backend2"].replicas, 30);
+        assert_eq!(graph.interface_means["backend2:f2"], orig * 3.0);
+        assert_eq!(graph.interface_means["frontend:handle"], orig * 2.0);
+    }
+
+    #[test]
+    fn apply_eq_scale_zero_is_noop() {
+        let mut graph = chain3_graph();
+        let cpu = graph.microservices["frontend"].cpu;
+        let mean = graph.interface_means["frontend:handle"];
+        graph.apply_eq_scale(Some(0), &HashMap::new()).unwrap();
+        assert_eq!(graph.microservices["frontend"].cpu, cpu);
+        assert_eq!(graph.interface_means["frontend:handle"], mean);
+    }
+
+    #[test]
+    fn apply_eq_scale_unknown_name_errors() {
+        let mut graph = chain3_graph();
+        let named = HashMap::from([("missing".to_string(), 10)]);
+        let err = graph.apply_eq_scale(None, &named).unwrap_err();
+        assert!(err.contains("unknown microservice missing"));
+    }
+
+    #[test]
+    fn apply_eq_scale_composes_after_scale() {
+        let mut graph = chain3_graph();
+        let orig = graph.interface_means["frontend:handle"];
+        graph.apply_scale(10).unwrap();
+        graph.apply_eq_scale(Some(10), &HashMap::new()).unwrap();
+        assert_eq!(graph.microservices["frontend"].cpu, 30);
+        assert_eq!(graph.microservices["frontend"].replicas, 30);
+        assert_eq!(graph.interface_means["frontend:handle"], orig * 1.5);
+    }
+
+    #[test]
+    fn parse_eq_scale_spec_all_and_named() {
+        assert_eq!(parse_eq_scale_spec("10").unwrap(), EqScaleSpec::All(10));
+        assert_eq!(
+            parse_eq_scale_spec("backend2=10").unwrap(),
+            EqScaleSpec::Named("backend2".into(), 10)
+        );
+    }
+
+    #[test]
+    fn collect_eq_scale_rejects_duplicate_all_and_named() {
+        let err = collect_eq_scale(&[EqScaleSpec::All(10), EqScaleSpec::All(5)]).unwrap_err();
+        assert!(err.contains("at most one bare"));
+        let err = collect_eq_scale(&[
+            EqScaleSpec::Named("backend2".into(), 10),
+            EqScaleSpec::Named("backend2".into(), 5),
+        ])
+        .unwrap_err();
+        assert!(err.contains("duplicate"));
     }
 }

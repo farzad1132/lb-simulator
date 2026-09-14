@@ -20,17 +20,17 @@ use super::hop::{
     CompletedRequest, Hop, OutboundCall, ReplicaInput, microservice_for_endpoint, sample_exp,
 };
 use super::microservice_stats::{MicroserviceStats, MicroserviceVisitTracker};
-use crate::occupancy::OccupancyAccumulator;
 use super::replica::{Replica, ReplicaConfig};
-use super::sidecar::{n_sidecars, sidecar_replicas, AmphiQueueServerSidecar};
+use super::sidecar::{AmphiQueueServerSidecar, n_sidecars, sidecar_replicas};
 use super::trace::MsTracer;
 use crate::amphiqueue_audit::AmphiQueuePullAudit;
 use crate::ms_centralized_audit::MsCentralizedAudit;
 use crate::ms_jbsq_audit::MsJbsqAudit;
+use crate::occupancy::OccupancyAccumulator;
 use crate::policy::{
-    validate_amphiqueue_sched, validate_amphiqueue_share, validate_centralized_subset,
-    validate_centralized_sched, validate_jbsq_n, validate_prequal_subset, validate_pull_policy,
     AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    validate_amphiqueue_sched, validate_amphiqueue_share, validate_centralized_sched,
+    validate_centralized_subset, validate_jbsq_n, validate_prequal_subset, validate_pull_policy,
 };
 use crate::rng;
 use crate::scheduling::SchedulingPolicyKind;
@@ -81,6 +81,10 @@ pub struct MsArgs {
     pub amphiqueue_share: u32,
     /// Max local occupancy (`queue + in_flight`) for jbsq pulls. Required when `lb_policy` is jbsq.
     pub jbsq_n: Option<u32>,
+    /// All-tier equivalent-scale delta (add cpu+replicas, stretch means). Applied after `--scale`.
+    pub eq_scale: Option<u32>,
+    /// Per-microservice equivalent-scale deltas, applied after `eq_scale`.
+    pub eq_scale_overrides: HashMap<String, u32>,
 }
 
 #[derive(Serialize)]
@@ -562,7 +566,9 @@ fn validate_ms_shared_subset(
                 lb_subset_policy,
             )
             .map_err(|err| {
-                format!("central pull-queue subsetting for caller {caller} → target {target}: {err}")
+                format!(
+                    "central pull-queue subsetting for caller {caller} → target {target}: {err}"
+                )
             })?;
         }
     }
@@ -585,6 +591,7 @@ pub fn run(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>>
 fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error>> {
     let mut graph = CallGraph::from_file(&args.callgraph)?;
     graph.apply_scale(args.scale)?;
+    graph.apply_eq_scale(args.eq_scale, &args.eq_scale_overrides)?;
     graph.service_dist = args.service_dist;
     validate_ms_shared_subset(
         args.lb_policy,
@@ -832,9 +839,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                     (0..n_servers).collect()
                 };
                 if args.verbose >= 1 {
-                    eprintln!(
-                        "downstream balancer {target} lb={lb_id} subset: {server_indices:?}"
-                    );
+                    eprintln!("downstream balancer {target} lb={lb_id} subset: {server_indices:?}");
                 }
                 for &server_idx in &server_indices {
                     owned[server_idx] = lb_id;
@@ -1076,7 +1081,8 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
 
                     let mut outbound = Output::default();
                     outbound.connect(ReplicaBalancer::outbound, &mailbox);
-                    replica_balancer_outbound.insert((microservice_id.clone(), server_idx), outbound);
+                    replica_balancer_outbound
+                        .insert((microservice_id.clone(), server_idx), outbound);
                     replica_balancer_addresses
                         .insert((microservice_id.clone(), server_idx), address.clone());
 
@@ -1135,8 +1141,7 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
                         if let Some(mb) =
                             server_mailboxes.get(&(target_microservice.clone(), server_idx))
                         {
-                            intent_outputs[server_idx]
-                                .connect(Replica::receive_pull_intent, mb);
+                            intent_outputs[server_idx].connect(Replica::receive_pull_intent, mb);
                         }
                     }
                 }
@@ -1203,8 +1208,8 @@ fn run_inner(args: &MsArgs) -> Result<Option<MsStats>, Box<dyn std::error::Error
             if amphiqueue_share == 1 {
                 for pending in &mut pending_edge_balancers {
                     for &server_idx in &pending.server_indices {
-                        if let Some(mb) = server_mailboxes
-                            .get(&(pending.entry_microservice.clone(), server_idx))
+                        if let Some(mb) =
+                            server_mailboxes.get(&(pending.entry_microservice.clone(), server_idx))
                         {
                             pending.balancer.outputs[server_idx].connect(Replica::input, mb);
                         }
@@ -1675,6 +1680,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         }
     }
 
@@ -1706,6 +1713,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         })
         .unwrap()
         .expect("stats");
@@ -1769,6 +1778,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1819,6 +1830,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         })
         .unwrap()
         .expect("stats");
@@ -1839,8 +1852,14 @@ mod tests {
             for i in 0..spec.replicas as usize {
                 let avg = servers[&i];
                 let q = queue_only[&i];
-                assert!(avg.is_finite() && avg >= 0.0, "server {i} of {microservice_id}: {avg}");
-                assert!(q.is_finite() && q >= 0.0, "queue server {i} of {microservice_id}: {q}");
+                assert!(
+                    avg.is_finite() && avg >= 0.0,
+                    "server {i} of {microservice_id}: {avg}"
+                );
+                assert!(
+                    q.is_finite() && q >= 0.0,
+                    "queue server {i} of {microservice_id}: {q}"
+                );
                 assert!(
                     q <= avg + 1e-9,
                     "queue-only should be <= queue+inflight for {microservice_id}/{i}: {q} vs {avg}"
@@ -1877,6 +1896,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         };
         let first = run(&args).unwrap().expect("stats");
         let second = run(&args).unwrap().expect("stats");
@@ -1914,6 +1935,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         };
 
         let stats = run(&chain_args(LoadBalancePolicyKind::Centralized))
@@ -1999,6 +2022,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         })
         .unwrap()
         .expect("stats");
@@ -2125,8 +2150,8 @@ mod tests {
                     "{ms} visit {i}"
                 );
                 if idx == 2 {
-                    let reconstructed = ms_stats.queueing_delay_ms[i]
-                        + ms_stats.processing_time_ms[i];
+                    let reconstructed =
+                        ms_stats.queueing_delay_ms[i] + ms_stats.processing_time_ms[i];
                     assert!(
                         (reconstructed - ms_stats.response_time_ms[i]).abs() < 1e-3,
                         "{ms} visit {i}: leaf queueing+proc should equal response"
@@ -2204,6 +2229,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         })
         .unwrap()
         .expect("stats")
@@ -2243,6 +2270,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         })
         .unwrap()
         .expect("stats");
@@ -2288,6 +2317,8 @@ mod tests {
             amphiqueue_sched: None,
             amphiqueue_share: 1,
             jbsq_n: None,
+            eq_scale: None,
+            eq_scale_overrides: HashMap::new(),
         })
         .unwrap()
         .expect("stats");

@@ -82,6 +82,8 @@ class MsExperimentConfig:
     centralized_sched: str = "fcfs"  # centralized / jbsq shared pull queue
     jbsq_n: int | None = None  # required when lb_policy == jbsq
     scale: int | None = None
+    eq_scale: int | None = None  # all-tier equivalent-scale delta
+    tier_eq_scale: tuple[tuple[str, int], ...] = ()  # named deltas after eq_scale
     rps: float | None = None  # base rate; simulator rps = load * rps
     service_dist: str | None = None  # None = CLI override or "exp"
     slo_ms: float | None = None  # None = calibrate from unloaded p99 × multiplier
@@ -148,6 +150,81 @@ def resolve_config_service_dist(
     return default if config.service_dist is None else config.service_dist
 
 
+def parse_eq_scale_specs(
+    specs: list[str] | None,
+) -> tuple[int | None, tuple[tuple[str, int], ...]] | None:
+    if specs is None:
+        return None
+    all_delta: int | None = None
+    named: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for spec in specs:
+        if "=" in spec:
+            name, count = spec.split("=", 1)
+            if not name:
+                raise SystemExit("--eq-scale NAME=N requires a microservice name")
+            try:
+                n = int(count)
+            except ValueError:
+                raise SystemExit(f"invalid --eq-scale count {count!r}") from None
+            if n < 0:
+                raise SystemExit(f"--eq-scale {name} must be >= 0 (got {n})")
+            if name in seen:
+                raise SystemExit(f"duplicate --eq-scale microservice {name}")
+            seen.add(name)
+            named.append((name, n))
+        else:
+            try:
+                n = int(spec)
+            except ValueError:
+                raise SystemExit(
+                    f"invalid --eq-scale value {spec!r} (expected N or NAME=N)"
+                ) from None
+            if n < 0:
+                raise SystemExit(f"--eq-scale must be >= 0 (got {n})")
+            if all_delta is not None:
+                raise SystemExit("at most one bare --eq-scale N is allowed")
+            all_delta = n
+    return all_delta, tuple(named)
+
+
+def ms_eq_scale_kwargs(config: MsExperimentConfig) -> dict:
+    overrides = dict(config.tier_eq_scale) if config.tier_eq_scale else None
+    return {"eq_scale": config.eq_scale, "eq_scale_overrides": overrides}
+
+
+def format_eq_scale_parts(config: MsExperimentConfig) -> list[str]:
+    parts: list[str] = []
+    if config.eq_scale is not None:
+        parts.append(f"eq_scale={config.eq_scale}")
+    for name, delta in config.tier_eq_scale:
+        parts.append(f"eq_scale.{name}={delta}")
+    return parts
+
+
+def eq_scale_filename_suffix(
+    eq_scale: int | None = None,
+    tier_eq_scale: tuple[tuple[str, int], ...] = (),
+) -> str:
+    named = [(name, delta) for name, delta in tier_eq_scale if delta != 0]
+    has_all = eq_scale is not None and eq_scale != 0
+    if not has_all and not named:
+        return ""
+    if has_all:
+        suffix = f"_eq{eq_scale}"
+        for name, delta in named:
+            suffix += f"-{name}{delta}"
+        return suffix
+    return "_eq-" + "-".join(f"{name}{delta}" for name, delta in named)
+
+
+EQ_SCALE_HELP = (
+    "Override equivalent-scale for all configs: N adds N cpu and N replicas "
+    "to every microservice and stretches avg_rt by (cpu+N)/cpu; NAME=N does "
+    "the same for one tier. Repeatable; named deltas add on top of N"
+)
+
+
 def validate_ms_config(config: MsExperimentConfig) -> None:
     label = config.label
     if uses_amphiqueue_protocol(config) and config.pull_policy is None:
@@ -192,6 +269,23 @@ def validate_ms_config(config: MsExperimentConfig) -> None:
         )
     if config.scale is not None and config.scale < 0:
         raise SystemExit(f"config {label!r}: scale must be >= 0 (got {config.scale})")
+    if config.eq_scale is not None and config.eq_scale < 0:
+        raise SystemExit(
+            f"config {label!r}: eq_scale must be >= 0 (got {config.eq_scale})"
+        )
+    seen_tiers: set[str] = set()
+    for name, delta in config.tier_eq_scale:
+        if not name:
+            raise SystemExit(f"config {label!r}: tier_eq_scale name must be non-empty")
+        if delta < 0:
+            raise SystemExit(
+                f"config {label!r}: tier_eq_scale {name} must be >= 0 (got {delta})"
+            )
+        if name in seen_tiers:
+            raise SystemExit(
+                f"config {label!r}: duplicate tier_eq_scale microservice {name}"
+            )
+        seen_tiers.add(name)
     if config.rps is not None and config.rps <= 0:
         raise SystemExit(f"config {label!r}: rps must be > 0 (got {config.rps})")
     if config.service_dist is not None and config.service_dist not in MS_SERVICE_DISTS:
@@ -210,6 +304,7 @@ def select_configs(
     *,
     lb_subset_size: int | None = None,
     scale: int | None = None,
+    eq_scale_override: tuple[int | None, tuple[tuple[str, int], ...]] | None = None,
     rps: float | None = None,
     service_dist: str | None = None,
     slo_ms: float | None = None,
@@ -234,6 +329,12 @@ def select_configs(
         if scale < 0:
             raise SystemExit(f"--scale must be >= 0 (got {scale})")
         selected = [replace(config, scale=scale) for config in selected]
+    if eq_scale_override is not None:
+        eq_scale, tier_eq_scale = eq_scale_override
+        selected = [
+            replace(config, eq_scale=eq_scale, tier_eq_scale=tier_eq_scale)
+            for config in selected
+        ]
     if rps is not None:
         if rps <= 0:
             raise SystemExit(f"--rps must be > 0 (got {rps})")
@@ -311,6 +412,7 @@ def calibrate_topology_slo(
         ),
         jbsq_n=config.jbsq_n,
         scale=config.scale,
+        **ms_eq_scale_kwargs(config),
     )
     return slo_from_unloaded_latency_ms(api_stats(data, api))
 
@@ -351,6 +453,7 @@ def format_run_summary(
         parts.append(f"amphiqueue_share={config.amphiqueue_share}")
     if config.scale is not None:
         parts.append(f"scale={config.scale}")
+    parts.extend(format_eq_scale_parts(config))
     if config.service_dist is not None:
         parts.append(f"service_dist={config.service_dist}")
     if seed is not None:
@@ -412,6 +515,7 @@ def run_load_compare_sweep(
             ),
             jbsq_n=config.jbsq_n,
             scale=config.scale,
+            **ms_eq_scale_kwargs(config),
         )
         violation_pct = api_stats(data, api)["prob_latency_gt_slo"] * 100.0
         utilization_pct = average_utilization_pct(data)
@@ -501,11 +605,14 @@ def default_output_path(
     chain: int,
     *,
     scale: int | None = None,
+    eq_scale: int | None = None,
+    tier_eq_scale: tuple[tuple[str, int], ...] = (),
     lb_subset_size: int | None = None,
 ) -> Path:
     name = f"ms_chain{chain}_load_compare_slo"
     if scale is not None and scale != 0:
         name += f"_scale{scale}"
+    name += eq_scale_filename_suffix(eq_scale, tier_eq_scale)
     if lb_subset_size is not None:
         name += f"_k{lb_subset_size}"
     return DEFAULT_OUTPUT_DIR / f"{name}.pdf"
@@ -552,6 +659,13 @@ def parse_args() -> argparse.Namespace:
             "Override scale for all configs "
             "(add this many cpu cores and replicas to every microservice)"
         ),
+    )
+    parser.add_argument(
+        "--eq-scale",
+        nargs="+",
+        default=None,
+        metavar="SPEC",
+        help=EQ_SCALE_HELP,
     )
     parser.add_argument(
         "--lb-subset-size",
@@ -641,6 +755,7 @@ def main() -> None:
         args.config_index,
         lb_subset_size=args.lb_subset_size,
         scale=args.scale,
+        eq_scale_override=parse_eq_scale_specs(args.eq_scale),
         rps=args.rps,
         service_dist=args.service_dist,
         slo_ms=args.slo_ms,
@@ -693,6 +808,8 @@ def main() -> None:
     output_path = args.output or default_output_path(
         args.chain,
         scale=args.scale,
+        eq_scale=configs[0].eq_scale if configs else None,
+        tier_eq_scale=configs[0].tier_eq_scale if configs else (),
         lb_subset_size=args.lb_subset_size,
     )
     output_path = output_path_with_comment(output_path, args.comment)

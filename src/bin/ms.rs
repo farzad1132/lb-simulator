@@ -1,10 +1,12 @@
 use clap::Parser;
 use lb::microservice::{
-    MsArgs, MsServiceDistribution, MsStats, OutputFormat, print_human_stats, run,
+    EqScaleSpec, MsArgs, MsServiceDistribution, MsStats, OutputFormat, collect_eq_scale,
+    parse_eq_scale_spec, print_human_stats, run,
 };
 use lb::policy::{
-    validate_amphiqueue_share, validate_centralized_sched, validate_jbsq_n, validate_prequal_subset,
     AmphiQueueSchedKind, CentralizedSchedKind, LoadBalancePolicyKind, PullPolicyKind,
+    validate_amphiqueue_share, validate_centralized_sched, validate_jbsq_n,
+    validate_prequal_subset,
 };
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
@@ -41,6 +43,14 @@ struct Args {
     trace_limit: u32,
     #[arg(long, default_value_t = 0)]
     scale: u32,
+    #[arg(
+        long,
+        value_name = "SPEC",
+        action = clap::ArgAction::Append,
+        value_parser = parse_eq_scale_spec,
+        help = "Add N cpu and N replicas (every service, or NAME=N for one tier) and stretch that tier's avg_rt by (cpu+N)/cpu so processing capacity stays equivalent"
+    )]
+    eq_scale: Vec<EqScaleSpec>,
     #[arg(long, value_enum, default_value_t = SchedulingPolicyKind::Fifo)]
     scheduling: SchedulingPolicyKind,
     #[arg(long, value_enum, default_value_t = CentralizedSchedKind::Fcfs)]
@@ -63,6 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     validate_amphiqueue_share(cli.lb_policy, cli.amphiqueue_share)?;
     validate_centralized_sched(cli.lb_policy, cli.centralized_sched)?;
     validate_jbsq_n(cli.lb_policy, cli.jbsq_n)?;
+    let (eq_scale, eq_scale_overrides) = collect_eq_scale(&cli.eq_scale)?;
     let args = MsArgs {
         callgraph: cli.callgraph,
         load_file: cli.load_file,
@@ -88,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         amphiqueue_sched: cli.amphiqueue_sched,
         amphiqueue_share: cli.amphiqueue_share,
         jbsq_n: cli.jbsq_n,
+        eq_scale,
+        eq_scale_overrides,
     };
 
     let stats = run(&args)?;
@@ -137,6 +150,7 @@ mod tests {
         assert_eq!(cli.scheduling, SchedulingPolicyKind::Fifo);
         assert_eq!(cli.centralized_sched, CentralizedSchedKind::Fcfs);
         assert_eq!(cli.scale, 0);
+        assert!(cli.eq_scale.is_empty());
         assert_eq!(cli.rps, None);
         assert_eq!(cli.slo_ms, None);
     }
@@ -460,5 +474,58 @@ mod tests {
             "-v",
         ]);
         assert_eq!(cli.verbose, 1);
+    }
+
+    #[test]
+    fn parses_eq_scale_all() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--eq-scale",
+            "10",
+        ]);
+        assert_eq!(cli.eq_scale, vec![EqScaleSpec::All(10)]);
+    }
+
+    #[test]
+    fn parses_eq_scale_named() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--eq-scale",
+            "backend2=10",
+        ]);
+        assert_eq!(
+            cli.eq_scale,
+            vec![EqScaleSpec::Named("backend2".into(), 10)]
+        );
+    }
+
+    #[test]
+    fn parses_eq_scale_all_and_named() {
+        let cli = Args::parse_from([
+            "ms",
+            "--callgraph",
+            "tests/fanin/callgraph.json",
+            "--load-file",
+            "tests/fanin/load.json",
+            "--eq-scale",
+            "10",
+            "--eq-scale",
+            "backend2=10",
+        ]);
+        assert_eq!(
+            cli.eq_scale,
+            vec![
+                EqScaleSpec::All(10),
+                EqScaleSpec::Named("backend2".into(), 10)
+            ]
+        );
     }
 }

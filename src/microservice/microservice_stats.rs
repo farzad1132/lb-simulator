@@ -94,7 +94,10 @@ impl MicroserviceVisitTracker {
         if response_ms <= 0.0 {
             return;
         }
-        if let Some(visit) = self.active.get_mut(&(request_id, microservice_id.to_string())) {
+        if let Some(visit) = self
+            .active
+            .get_mut(&(request_id, microservice_id.to_string()))
+        {
             visit.downstream_response += Duration::from_secs_f64(response_ms / SECS_TO_MS);
         }
     }
@@ -105,7 +108,10 @@ impl MicroserviceVisitTracker {
         microservice_id: &str,
         duration: Duration,
     ) {
-        if let Some(visit) = self.active.get_mut(&(request_id, microservice_id.to_string())) {
+        if let Some(visit) = self
+            .active
+            .get_mut(&(request_id, microservice_id.to_string()))
+        {
             visit.local_processing += duration;
         }
     }
@@ -134,17 +140,12 @@ impl MicroserviceVisitTracker {
                 .as_secs_f64()
                 * SECS_TO_MS,
         );
-        samples.departure_times_ms.push(
-            departure
-                .duration_since(MonotonicTime::EPOCH)
-                .as_secs_f64()
-                * SECS_TO_MS,
-        );
+        samples
+            .departure_times_ms
+            .push(departure.duration_since(MonotonicTime::EPOCH).as_secs_f64() * SECS_TO_MS);
         let response_ms = response.as_secs_f64() * SECS_TO_MS;
         samples.response_time_ms.push(response_ms);
-        samples
-            .queueing_delay_ms
-            .push(queueing_ms);
+        samples.queueing_delay_ms.push(queueing_ms);
         samples.cumulative_queueing_delay_ms.push(f64::NAN);
         samples
             .processing_time_ms
@@ -257,9 +258,7 @@ impl MicroserviceVisitTracker {
 }
 
 fn time_to_ms(time: MonotonicTime) -> f64 {
-    time.duration_since(MonotonicTime::EPOCH)
-        .as_secs_f64()
-        * SECS_TO_MS
+    time.duration_since(MonotonicTime::EPOCH).as_secs_f64() * SECS_TO_MS
 }
 
 fn consecutive_diffs(times_ms: &[f64]) -> Vec<f64> {
@@ -314,7 +313,11 @@ mod tests {
         // frontend: queueing = 10 ms
         tracker.record_arrival(1, "frontend", MonotonicTime::EPOCH, deadline);
         tracker.add_local_processing(1, "frontend", Duration::from_millis(5));
-        tracker.finalize_visit(1, "frontend", MonotonicTime::EPOCH + Duration::from_millis(15));
+        tracker.finalize_visit(
+            1,
+            "frontend",
+            MonotonicTime::EPOCH + Duration::from_millis(15),
+        );
 
         // backend1: queueing = 20 ms (50 ms downstream + 5 ms proc + 20 ms own queueing)
         let be1_arrival = MonotonicTime::EPOCH + Duration::from_millis(100);

@@ -2,6 +2,7 @@ use lb::microservice::{MsArgs, MsCentralizedAudit, MsServiceDistribution, Output
 use lb::policy::{CentralizedSchedKind, LoadBalancePolicyKind};
 use lb::scheduling::SchedulingPolicyKind;
 use lb::subset::SubsetPolicyKind;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -37,6 +38,8 @@ fn chain3_centralized_args(
         amphiqueue_sched: None,
         amphiqueue_share: 1,
         jbsq_n: None,
+        eq_scale: None,
+        eq_scale_overrides: HashMap::new(),
     }
 }
 

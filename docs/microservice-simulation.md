@@ -493,7 +493,8 @@ cargo build --release
 | `--format` | `human` or `json` |
 | `--trace` | Emit a human-readable request-flow timeline on stderr |
 | `--trace-limit` | Number of user requests to trace (default `5`; only applies with `--trace`) |
-| `--scale` | Add this many cores and replicas to every microservice (default `0`) |
+| `--scale` | Add this many cores and replicas to every microservice (default `0`; grows processing capacity) |
+| `--eq-scale` | Repeatable `N` or `NAME=N`: add N cpu and N replicas (every service, or one named tier) and multiply that tier's endpoint means by `(cpu+N)/cpu` so max throughput `cpu / E[S]` stays equivalent. Applied after `--scale`. |
 
 ### Tracing
 
