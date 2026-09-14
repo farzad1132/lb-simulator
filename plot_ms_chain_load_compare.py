@@ -88,6 +88,7 @@ class MsExperimentConfig:
     tier_eq_scale: tuple[tuple[str, int], ...] = ()  # named deltas after eq_scale
     service_dist: str | None = None  # None = CLI override or "exp"
     slo_ms: float | None = None  # None = calibrate from unloaded p99 × multiplier
+    theory: bool = False  # plot Theory (Independent + hop covariances)
 
 
 def uses_amphiqueue_protocol(config: MsExperimentConfig) -> bool:

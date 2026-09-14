@@ -882,7 +882,7 @@ def plot_line(ax, x, y, yerr=None, label: Optional[str] = None,
     # Only add markers if explicitly requested
     if show_markers:
         marker = kwargs.pop('marker', style.markers[si % len(style.markers)])
-        marker_size = style.marker_size
+        marker_size = kwargs.pop('markersize', style.marker_size)
     else:
         marker = kwargs.pop('marker', None)
         marker_size = 0

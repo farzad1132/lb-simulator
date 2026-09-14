@@ -5,6 +5,8 @@ Requires --chain {3,6,10}. Configs are selected like plot_ms_occupancy_compare.p
 Color encodes config; shared marker/linestyle encodes Theory: Independent
 (sum of per-hop queueing variances) vs Simulation
 (var of cumulative_queueing_delay_ms) by microservice tier.
+Optional Theory (MsExperimentConfig.theory or --theory) adds Independent plus
+request-aligned hop covariances (Var of the prefix sum).
 """
 
 from __future__ import annotations
@@ -64,6 +66,9 @@ from plotting_primitive import (
 # Shared across configs: Theory vs Simulation distinguished only by style.
 THEORY_MARKER = "o"
 THEORY_LINESTYLE = "--"
+THEORY_COV_MARKER = "x"
+THEORY_COV_LINESTYLE = ":"
+THEORY_COV_MARKER_SIZE = 7.0
 SIMULATION_MARKER = "s"
 SIMULATION_LINESTYLE = "-"
 
@@ -75,17 +80,17 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
-    MsExperimentConfig("CPull", "centralized"),
-    MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
+    #MsExperimentConfig("CPull", "centralized"),
+    #MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
     #MsExperimentConfig("C-P2C", "cl"),
     #MsExperimentConfig("C-RR", "cl-rr"),
     #MsExperimentConfig("C-R", "cl-r"),
-    MsExperimentConfig("P2C", "power-of-two"),
-    MsExperimentConfig("Prequal", "prequal"),
+    MsExperimentConfig("P2C", "power-of-two", theory=True),
+    #MsExperimentConfig("Prequal", "prequal"),
     #MsExperimentConfig("P2C", "power-of-two", scheduling="edf"),
-    MsExperimentConfig("LR", "least-request"),
-    MsExperimentConfig("RR", "round-robin"),
-    MsExperimentConfig("R", "random"),
+    #MsExperimentConfig("LR", "least-request"),
+    #MsExperimentConfig("RR", "round-robin"),
+    #MsExperimentConfig("R", "random"),
     #MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
     #MsExperimentConfig("AmphiQueue-FCFS", "amphiqueue", pull_policy="least-request", amphiqueue_sched="fcfs"),
     #MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
@@ -126,10 +131,46 @@ def validate_queueing_fields(data: dict, microservices: list[str]) -> None:
             )
 
 
+def validate_per_request_cumulative(data: dict, microservices: list[str]) -> None:
+    rows = data.get("per_request_cumulative_queueing_ms")
+    if rows is None:
+        raise SystemExit(
+            "ms JSON missing per_request_cumulative_queueing_ms; rebuild the ms binary"
+        )
+    if not rows:
+        raise SystemExit("ms JSON per_request_cumulative_queueing_ms is empty")
+    n_cols = len(rows[0])
+    if n_cols != len(microservices):
+        raise SystemExit(
+            "per_request_cumulative_queueing_ms has "
+            f"{n_cols} columns, expected {len(microservices)}; rebuild the ms binary"
+        )
+
+
+def prefix_cov_var(hop: np.ndarray) -> list[float]:
+    """Var of each hop prefix via 1^T C 1 (ddof=0). hop shape: (n_requests, n_tiers)."""
+    n_tiers = hop.shape[1]
+    theory: list[float] = []
+    for k in range(n_tiers):
+        prefix = hop[:, : k + 1]
+        cov = np.atleast_2d(np.cov(prefix, rowvar=False, ddof=0))
+        theory.append(float(np.sum(cov)))
+    return theory
+
+
+def theory_cov_var_series(data: dict, microservices: list[str]) -> list[float]:
+    validate_per_request_cumulative(data, microservices)
+    cum = np.asarray(data["per_request_cumulative_queueing_ms"], dtype=float)
+    hop = np.diff(cum, axis=1, prepend=0.0)
+    return prefix_cov_var(hop)
+
+
 def cumulative_queueing_var_series(
     data: dict,
     microservices: list[str],
-) -> tuple[list[float], list[float]]:
+    *,
+    include_theory: bool = False,
+) -> tuple[list[float], list[float], list[float] | None]:
     by_ms = data["by_microservice"]
     per_hop_var = [
         float(np.var(by_ms[ms]["queueing_delay_ms"], ddof=0))
@@ -143,7 +184,8 @@ def cumulative_queueing_var_series(
         float(np.var(by_ms[ms]["cumulative_queueing_delay_ms"], ddof=0))
         for ms in microservices
     ]
-    return theoretical_var, simulation_var
+    theory_var = theory_cov_var_series(data, microservices) if include_theory else None
+    return theoretical_var, simulation_var, theory_var
 
 
 def format_run_summary(
@@ -153,6 +195,7 @@ def format_run_summary(
     rps: float,
     theoretical_var: list[float],
     simulation_var: list[float],
+    theory_var: list[float] | None = None,
 ) -> str:
     parts = [
         f"label={config.label}",
@@ -174,11 +217,16 @@ def format_run_summary(
     parts.extend(format_eq_scale_parts(config))
     if config.service_dist is not None:
         parts.append(f"service_dist={config.service_dist}")
+    if config.theory:
+        parts.append("theory=True")
     parts.append(f"rps={rps:g}")
-    theory_str = ",".join(f"{v:.3f}" for v in theoretical_var)
+    theory_indep_str = ",".join(f"{v:.3f}" for v in theoretical_var)
     sim_str = ",".join(f"{v:.3f}" for v in simulation_var)
-    parts.append(f"theory_var=[{theory_str}]")
+    parts.append(f"theory_indep_var=[{theory_indep_str}]")
     parts.append(f"simulation_var=[{sim_str}]")
+    if theory_var is not None:
+        theory_str = ",".join(f"{v:.3f}" for v in theory_var)
+        parts.append(f"theory_var=[{theory_str}]")
     return "  ".join(parts)
 
 
@@ -192,10 +240,10 @@ def run_cum_queueing_var_compare(
     n: int,
     seed: int | None,
     default_service_dist: str = "exp",
-) -> tuple[list[str], list[tuple[str, list[float], list[float]]]]:
-    """Return (microservices, [(label, theory_var, simulation_var)])."""
+) -> tuple[list[str], list[tuple[str, list[float], list[float], list[float] | None]]]:
+    """Return (microservices, [(label, independent_var, simulation_var, theory_var)])."""
     microservices: list[str] | None = None
-    series: list[tuple[str, list[float], list[float]]] = []
+    series: list[tuple[str, list[float], list[float], list[float] | None]] = []
 
     for config in tqdm(configs, desc="config", unit="run"):
         rps = load * resolve_config_rps(config)
@@ -232,10 +280,10 @@ def run_cum_queueing_var_compare(
                 f"{order} vs {microservices}"
             )
         validate_queueing_fields(data, microservices)
-        theoretical_var, simulation_var = cumulative_queueing_var_series(
-            data, microservices
+        theoretical_var, simulation_var, theory_var = cumulative_queueing_var_series(
+            data, microservices, include_theory=config.theory
         )
-        series.append((config.label, theoretical_var, simulation_var))
+        series.append((config.label, theoretical_var, simulation_var, theory_var))
         _log(
             format_run_summary(
                 config=config,
@@ -243,6 +291,7 @@ def run_cum_queueing_var_compare(
                 rps=rps,
                 theoretical_var=theoretical_var,
                 simulation_var=simulation_var,
+                theory_var=theory_var,
             )
         )
 
@@ -253,7 +302,7 @@ def run_cum_queueing_var_compare(
 
 def plot_cum_queueing_var_lines(
     microservices: list[str],
-    series: list[tuple[str, list[float], list[float]]],
+    series: list[tuple[str, list[float], list[float], list[float] | None]],
     *,
     output_path: Path,
 ) -> None:
@@ -268,7 +317,8 @@ def plot_cum_queueing_var_lines(
     positions = list(range(len(microservices)))
     config_handles: list[Line2D] = []
     config_labels: list[str] = []
-    for cfg_idx, (label, theoretical_var, simulation_var) in enumerate(series):
+    any_theory = False
+    for cfg_idx, (label, theoretical_var, simulation_var, theory_var) in enumerate(series):
         color = style.colors[cfg_idx % len(style.colors)]
         plot_line(
             ax,
@@ -289,7 +339,23 @@ def plot_cum_queueing_var_lines(
             color=color,
             marker=SIMULATION_MARKER,
             linestyle=SIMULATION_LINESTYLE,
+            zorder=3,
         )
+        if theory_var is not None:
+            any_theory = True
+            plot_line(
+                ax,
+                positions,
+                theory_var,
+                style=style,
+                show_markers=True,
+                color=color,
+                marker=THEORY_COV_MARKER,
+                linestyle=THEORY_COV_LINESTYLE,
+                markersize=THEORY_COV_MARKER_SIZE,
+                markeredgewidth=1.2,
+                zorder=4,
+            )
         config_handles.append(
             Line2D(
                 [0],
@@ -334,6 +400,22 @@ def plot_cum_queueing_var_lines(
             linewidth=style.line_width,
             label="Theory: Independent",
         ),
+    ]
+    if any_theory:
+        style_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color="black",
+                linestyle=THEORY_COV_LINESTYLE,
+                marker=THEORY_COV_MARKER,
+                markersize=THEORY_COV_MARKER_SIZE,
+                markeredgewidth=1.2,
+                linewidth=style.line_width,
+                label="Theory",
+            )
+        )
+    style_handles.append(
         Line2D(
             [0],
             [0],
@@ -343,8 +425,8 @@ def plot_cum_queueing_var_lines(
             markersize=style.marker_size,
             linewidth=style.line_width,
             label="Simulation",
-        ),
-    ]
+        )
+    )
     ax.legend(
         handles=style_handles,
         fontsize=max(style.legend_size - 1, 5),
@@ -369,6 +451,7 @@ def default_output_path(
     eq_scale: int | None = None,
     tier_eq_scale: tuple[tuple[str, int], ...] = (),
     lb_subset_size: int | None = None,
+    theory: bool = False,
 ) -> Path:
     name = f"ms_chain{chain}_cumulative_queueing_var"
     if scale is not None and scale != 0:
@@ -376,6 +459,8 @@ def default_output_path(
     name += eq_scale_filename_suffix(eq_scale, tier_eq_scale)
     if lb_subset_size is not None:
         name += f"_k{lb_subset_size}"
+    if theory:
+        name += "_theory"
     return DEFAULT_OUTPUT_DIR / f"{name}.pdf"
 
 
@@ -390,7 +475,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Line plot of cumulative queueing variance (Theory: Independent vs "
-            "Simulation) for MS experiment configs at a single load."
+            "Simulation, optional Theory with hop covariances) for MS experiment "
+            "configs at a single load."
         ),
     )
     parser.add_argument(
@@ -469,6 +555,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--theory",
+        action="store_true",
+        help=(
+            "Plot Theory (Independent plus hop covariances) for all selected configs "
+            "(overrides MsExperimentConfig.theory)"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -486,6 +580,8 @@ def main() -> None:
     )
     if not configs:
         raise SystemExit("no configs selected")
+    if args.theory:
+        configs = [replace(config, theory=True) for config in configs]
 
     callgraph, load_file = resolve_fixtures(args)
     binary = ensure_release_binary(REPO_ROOT, args.binary, simulator="ms")
@@ -500,12 +596,14 @@ def main() -> None:
         seed=args.seed,
     )
 
+    any_theory = any(config.theory for config in configs)
     output_path = args.output or default_output_path(
         args.chain,
         scale=args.scale,
         eq_scale=configs[0].eq_scale if configs else None,
         tier_eq_scale=configs[0].tier_eq_scale if configs else (),
         lb_subset_size=args.lb_subset_size,
+        theory=any_theory,
     )
     output_path = output_path_with_comment(output_path, args.comment)
     plot_cum_queueing_var_lines(
