@@ -67,27 +67,28 @@ THEORY_LINESTYLE = "--"
 SIMULATION_MARKER = "s"
 SIMULATION_LINESTYLE = "-"
 
-sys.path.insert(0, str(REPO_ROOT / "analyze"))
-from ms_service_distributions import finalize_violin_y_axis  # noqa: E402
+Y_AXIS_MIN = 0.0
+Y_AXIS_MAX = 120.0
+Y_TICK_STEP = 20.0
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 
 # Placeholder configs — edit to compare the policies you care about.
 DEFAULT_CONFIGS: list[MsExperimentConfig] = [
     MsExperimentConfig("CPull", "centralized"),
-    #MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
+    MsExperimentConfig("JBSQ-2", "jbsq", jbsq_n=2),
     #MsExperimentConfig("C-P2C", "cl"),
     #MsExperimentConfig("C-RR", "cl-rr"),
     #MsExperimentConfig("C-R", "cl-r"),
     MsExperimentConfig("P2C", "power-of-two"),
-    #MsExperimentConfig("Prequal", "prequal"),
+    MsExperimentConfig("Prequal", "prequal"),
     #MsExperimentConfig("P2C", "power-of-two", scheduling="edf"),
-    #MsExperimentConfig("LR", "least-request"),
+    MsExperimentConfig("LR", "least-request"),
     MsExperimentConfig("RR", "round-robin"),
-    #MsExperimentConfig("R", "random"),
-    MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
+    MsExperimentConfig("R", "random"),
+    #MsExperimentConfig("AmphiQueue", "amphiqueue", pull_policy="least-request"),
     #MsExperimentConfig("AmphiQueue-FCFS", "amphiqueue", pull_policy="least-request", amphiqueue_sched="fcfs"),
-    MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
+    #MsExperimentConfig("AmphiQueue-EDF", "amphiqueue", pull_policy="least-request", amphiqueue_sched="edf"),
 ]
 
 
@@ -265,13 +266,10 @@ def plot_cum_queueing_var_lines(
     ax = grid.get_ax(0, 0)
 
     positions = list(range(len(microservices)))
-    all_values: list[float] = []
     config_handles: list[Line2D] = []
     config_labels: list[str] = []
     for cfg_idx, (label, theoretical_var, simulation_var) in enumerate(series):
         color = style.colors[cfg_idx % len(style.colors)]
-        all_values.extend(theoretical_var)
-        all_values.extend(simulation_var)
         plot_line(
             ax,
             positions,
@@ -306,7 +304,6 @@ def plot_cum_queueing_var_lines(
 
     ax.set_xticks(positions)
     ax.set_xticklabels([str(i) for i in positions], fontsize=style.font_size - 1)
-    finalize_violin_y_axis(ax, np.asarray(all_values, dtype=float), style=style)
     if positions:
         ax.set_xlim(positions[0] - 0.5, positions[-1] + 0.5)
     grid.configure_ax(
@@ -320,7 +317,11 @@ def plot_cum_queueing_var_lines(
         show_xticklabels=True,
         show_yticklabels=True,
         auto_ticks=False,
+        ylim=(Y_AXIS_MIN, Y_AXIS_MAX),
     )
+    yticks = np.arange(Y_AXIS_MIN, Y_AXIS_MAX + 0.1, Y_TICK_STEP)
+    ax.set_yticks(yticks)
+    ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
 
     style_handles = [
         Line2D(
